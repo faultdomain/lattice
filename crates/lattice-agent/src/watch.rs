@@ -21,12 +21,16 @@ use crate::executor::build_url;
 use lattice_proto::{agent_message::Payload, AgentMessage, KubernetesRequest, KubernetesResponse};
 
 /// Build a streaming response chunk (pure function)
-fn build_stream_chunk_response(request_id: &str, body: Vec<u8>) -> KubernetesResponse {
+fn build_stream_chunk_response(
+    request_id: &str,
+    body: Vec<u8>,
+    content_type: &str,
+) -> KubernetesResponse {
     KubernetesResponse {
         request_id: request_id.to_string(),
         status_code: 200,
         body,
-        content_type: "application/json".to_string(),
+        content_type: content_type.to_string(),
         streaming: true,
         stream_end: false,
         error: String::new(),
@@ -197,6 +201,15 @@ pub async fn execute_watch(
         return;
     }
 
+    // Capture actual content type from the K8s API response.
+    // Istiod may request protobuf — forwarding as JSON causes parse failures.
+    let response_content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
     // Stream the response body
     let mut body = response.into_body();
     let mut chunk_count: u64 = 0;
@@ -241,7 +254,7 @@ pub async fn execute_watch(
                             }
 
                             // Send the chunk as a streaming response
-                            let response = build_stream_chunk_response(&request_id, data.to_vec());
+                            let response = build_stream_chunk_response(&request_id, data.to_vec(), &response_content_type);
                             if send_response(&message_tx, &cluster_name, response).await.is_err() {
                                 debug!(
                                     request_id = %request_id,
@@ -362,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_build_stream_chunk_response() {
-        let resp = build_stream_chunk_response("req-123", b"test data".to_vec());
+        let resp = build_stream_chunk_response("req-123", b"test data".to_vec(), "application/json");
 
         assert_eq!(resp.request_id, "req-123");
         assert_eq!(resp.status_code, 200);

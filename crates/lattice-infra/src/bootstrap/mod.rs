@@ -652,6 +652,7 @@ fn generate_istio_manifests(
         serde_json::to_string_pretty(&istio::IstioReconciler::generate_default_deny()),
         serde_json::to_string_pretty(&istio::IstioReconciler::generate_waypoint_default_deny()),
         serde_json::to_string_pretty(&istio::IstioReconciler::generate_operator_allow_policy()),
+        serde_json::to_string_pretty(&istio::IstioReconciler::generate_eastwest_gateway_allow()),
     ] {
         manifests.push(policy.map_err(|e| format!("Failed to serialize Istio policy: {e}"))?);
     }

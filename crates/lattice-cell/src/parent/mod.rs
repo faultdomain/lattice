@@ -880,6 +880,14 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                // Disconnect agents with stale heartbeats (zombie gRPC streams).
+                // Without this, a silently dead stream leaves command_tx pointing
+                // to a full buffer, blocking all proxy requests for that agent.
+                let stale = cleanup_registry
+                    .disconnect_stale_agents(crate::HEARTBEAT_STALE_THRESHOLD);
+                if !stale.is_empty() {
+                    warn!(agents = ?stale, "Disconnected agents with stale heartbeats");
+                }
                 let removed = cleanup_registry.cleanup_stale_disconnected(DISCONNECTED_AGENT_TTL);
                 if removed > 0 {
                     info!(removed, "Cleaned up stale disconnected agents");

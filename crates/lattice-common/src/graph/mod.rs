@@ -112,6 +112,10 @@ pub struct ServiceNode {
     /// Whether this member participates in Istio ambient mesh (L7 enforcement).
     /// When `false`, only Cilium L4 policies are generated.
     pub ambient: bool,
+    /// Whether this service is advertised for cross-cluster access with open callers.
+    /// Set when ingress routes have `advertise: { allowedServices: ["*"] }`.
+    /// Drives inbound AuthorizationPolicy to allow any authenticated principal.
+    pub advertised_open: bool,
 }
 
 /// Resolve a list of caller/service references into a (allows_all, callers) pair.
@@ -157,6 +161,8 @@ impl ServiceNode {
                 ));
             }
         }
+
+        node.advertised_open = spec.ingress.as_ref().is_some_and(|i| i.has_open_advertise());
 
         node
     }
@@ -223,6 +229,7 @@ impl ServiceNode {
             egress_rules: vec![],
             service_account: None,
             ambient: true,
+            advertised_open: false,
         }
     }
 
@@ -294,6 +301,7 @@ impl ServiceNode {
             egress_rules: spec.egress.clone(),
             service_account: spec.service_account.clone(),
             ambient: spec.ambient,
+            advertised_open: spec.ingress.as_ref().is_some_and(|i| i.has_open_advertise()),
         }
     }
 
@@ -315,6 +323,7 @@ impl ServiceNode {
             egress_rules: vec![],
             service_account: None,
             ambient: true,
+            advertised_open: false,
         }
     }
 
@@ -570,12 +579,10 @@ pub struct ServiceGraph {
     /// `allowed_services: ["clusterA/ns/svc"]` would match `ns/svc` on ANY cluster.
     cluster_name: Option<String>,
 
-}
-
-impl Default for ServiceGraph {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// SPIFFE trust domain derived from the root CA fingerprint.
+    /// Used by policy compilers to generate AuthorizationPolicy principals.
+    /// All clusters sharing the same root CA have the same trust domain.
+    trust_domain: String,
 }
 
 impl ServiceGraph {
@@ -677,7 +684,7 @@ impl ServiceGraph {
     }
 
     /// Create a new empty service graph
-    pub fn new() -> Self {
+    pub fn new(trust_domain: impl Into<String>) -> Self {
         Self {
             vertices: DashMap::new(),
             edges_out: DashMap::new(),
@@ -687,6 +694,7 @@ impl ServiceGraph {
             volume_owners: DashMap::new(),
             edge_diffs: DashMap::new(),
             cluster_name: None,
+            trust_domain: trust_domain.into(),
         }
     }
 
@@ -694,6 +702,11 @@ impl ServiceGraph {
     pub fn with_cluster_name(mut self, name: impl Into<String>) -> Self {
         self.cluster_name = Some(name.into());
         self
+    }
+
+    /// Get the trust domain for SPIFFE principal generation.
+    pub fn trust_domain(&self) -> &str {
+        &self.trust_domain
     }
 
     /// Insert or update a local service in the graph
@@ -804,6 +817,7 @@ impl ServiceGraph {
             egress_rules: vec![],
             service_account: None,
             ambient: true,
+            advertised_open: false,
         };
         self.put_node(NodeUpdate::Service(node));
     }
@@ -1205,6 +1219,21 @@ impl ServiceGraph {
             .collect()
     }
 
+    /// All (namespace, name) pairs for nodes that could have a LatticeMeshMember.
+    ///
+    /// Includes both Local (LatticeService-created) and MeshMember nodes.
+    /// Used by watch mappers to trigger MeshMember re-reconciliation.
+    pub fn all_mesh_eligible(&self) -> Vec<(String, String)> {
+        self.vertices
+            .iter()
+            .filter(|entry| entry.value().type_.is_local() || entry.value().type_.is_mesh_member())
+            .map(|entry| {
+                let (ns, name) = entry.key();
+                (ns.clone(), name.clone())
+            })
+            .collect()
+    }
+
     /// Get all node names in a namespace (all types, including Unknown).
     pub fn all_names_in_namespace(&self, namespace: &str) -> HashSet<String> {
         self.ns_index
@@ -1347,7 +1376,7 @@ mod tests {
 
     #[test]
     fn test_put_and_get_service() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let spec = make_service_spec(vec![], vec![]);
 
         graph.put_service("prod", "api", &spec);
@@ -1367,7 +1396,7 @@ mod tests {
             ResourceType, ServicePortsSpec, WorkloadSpec,
         };
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Create a service in "frontend" namespace that depends on "backend/api"
         let mut resources = BTreeMap::new();
@@ -1432,7 +1461,7 @@ mod tests {
 
     #[test]
     fn test_bilateral_agreement_same_namespace() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // api allows gateway
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -1451,7 +1480,7 @@ mod tests {
 
     #[test]
     fn test_delete_service() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let spec = make_service_spec(vec![], vec![]);
         graph.put_service("prod", "api", &spec);
@@ -1469,7 +1498,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_allows_all_sets_flag() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Service with wildcard inbound (allows all callers)
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -1483,7 +1512,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_allows_any_caller() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // api allows all inbound via wildcard
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -1500,7 +1529,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_bilateral_agreement_single_caller() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // api allows all inbound via wildcard
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -1523,7 +1552,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_bilateral_agreement_multiple_callers() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // api allows all inbound via wildcard
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -1556,7 +1585,7 @@ mod tests {
             ResourceType, ServicePortsSpec, WorkloadSpec,
         };
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // api in "backend" allows all inbound via wildcard
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -1621,7 +1650,7 @@ mod tests {
 
     #[test]
     fn test_no_wildcard_requires_explicit_allow() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // api allows only gateway explicitly (no wildcard)
         let api_spec = make_service_spec(vec![], vec!["gateway"]);
@@ -1641,7 +1670,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_still_requires_outbound_declaration() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // api allows all inbound via wildcard
         let api_spec = make_service_spec(vec![], vec!["*"]);
@@ -1665,7 +1694,7 @@ mod tests {
 
     #[test]
     fn test_list_services_filters_local_only() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Add local service
         let local_spec = make_service_spec(vec![], vec![]);
@@ -1683,14 +1712,14 @@ mod tests {
 
     #[test]
     fn test_list_services_empty_namespace() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let services = graph.list_services("nonexistent");
         assert!(services.is_empty());
     }
 
     #[test]
     fn test_list_namespaces() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let spec = make_service_spec(vec![], vec![]);
         graph.put_service("ns1", "svc1", &spec);
@@ -1704,7 +1733,7 @@ mod tests {
 
     #[test]
     fn test_list_namespaces_excludes_empty() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let spec = make_service_spec(vec![], vec![]);
         graph.put_service("ns1", "svc1", &spec);
@@ -1717,7 +1746,7 @@ mod tests {
 
     #[test]
     fn test_service_count() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let spec = make_service_spec(vec![], vec![]);
         graph.put_service("ns1", "svc1", &spec);
@@ -1771,7 +1800,7 @@ mod tests {
 
     #[test]
     fn test_put_mesh_member() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
         let spec = make_mesh_member_spec(labels.clone(), vec![("metrics", 9090)], vec![], vec![]);
 
@@ -1788,7 +1817,7 @@ mod tests {
 
     #[test]
     fn test_mesh_member_bilateral_with_service() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // MeshMember allows "api" caller
         let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
@@ -1857,7 +1886,7 @@ mod tests {
 
     #[test]
     fn test_list_mesh_members() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Add mesh member
         let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
@@ -1880,7 +1909,7 @@ mod tests {
 
     #[test]
     fn test_mesh_member_namespace_target() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let spec = LatticeMeshMemberSpec {
             target: MeshMemberTarget::Namespace("kube-system".to_string()),
@@ -1910,7 +1939,7 @@ mod tests {
 
     #[test]
     fn test_mesh_member_with_dependencies() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // MeshMember depends on a service
         let labels = BTreeMap::from([("app".to_string(), "webhook".to_string())]);
@@ -1929,7 +1958,7 @@ mod tests {
 
     #[test]
     fn test_delete_mesh_member() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let labels = BTreeMap::from([("app".to_string(), "prometheus".to_string())]);
         let spec = make_mesh_member_spec(labels, vec![("metrics", 9090)], vec![], vec![]);
@@ -1946,7 +1975,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_sets_flag() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
         let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
         spec.depends_all = true;
@@ -1959,7 +1988,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_outbound_edges() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // scraper has depends_all
         let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
@@ -1983,7 +2012,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_inbound_edges() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // scraper has depends_all
         let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
@@ -2003,7 +2032,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_no_self_edge() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Service allows all and depends on all
         let labels = BTreeMap::from([("app".to_string(), "svc".to_string())]);
@@ -2020,7 +2049,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_cross_namespace() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // scraper in monitoring has depends_all
         let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
@@ -2082,7 +2111,7 @@ mod tests {
 
     #[test]
     fn test_metrics_port_implicitly_allows_vmagent() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Service with a "metrics" port but no explicit vmagent caller
         let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
@@ -2097,7 +2126,7 @@ mod tests {
 
     #[test]
     fn test_no_metrics_port_no_implicit_vmagent() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Service without a "metrics" port
         let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
@@ -2110,7 +2139,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_vmagent_reaches_metrics_port() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // vmagent with depends_all
         let vmagent_labels = BTreeMap::from([("app".to_string(), "vmagent".to_string())]);
@@ -2138,7 +2167,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_delete_cleans_index() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
         let mut spec = make_mesh_member_spec(labels, vec![("http", 8080)], vec![], vec![]);
@@ -2162,7 +2191,7 @@ mod tests {
     fn test_depends_all_excludes_remote_services() {
         use crate::crd::ClusterRoute;
 
-        let graph = ServiceGraph::new().with_cluster_name("mgmt");
+        let graph = ServiceGraph::new("lattice.test").with_cluster_name("mgmt");
 
         // scraper has depends_all
         let labels = BTreeMap::from([("app".to_string(), "scraper".to_string())]);
@@ -2183,6 +2212,7 @@ mod tests {
             port: 80,
             protocol: "HTTP".to_string(),
             allowed_services: vec!["*".to_string()],
+            service_ports: Default::default(),
         };
         graph.put_remote_service("child-cluster", &route);
 
@@ -2205,7 +2235,7 @@ mod tests {
 
     #[test]
     fn edge_diffs_tracks_removed_dependency() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // A depends on [B, C]
         let spec_bc = make_service_spec(vec!["B", "C"], vec![]);
@@ -2227,7 +2257,7 @@ mod tests {
 
     #[test]
     fn edge_diffs_tracks_added_dependency() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // A depends on [B]
         let spec_b = make_service_spec(vec!["B"], vec![]);
@@ -2247,7 +2277,7 @@ mod tests {
 
     #[test]
     fn edge_diffs_empty_when_unchanged() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // A depends on [B]
         let spec = make_service_spec(vec!["B"], vec![]);
@@ -2265,7 +2295,7 @@ mod tests {
 
     #[test]
     fn edge_diffs_consumed_on_drain() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         let spec_b = make_service_spec(vec!["B"], vec![]);
         graph.put_service("ns", "A", &spec_b);
@@ -2286,7 +2316,7 @@ mod tests {
             EgressRule, EgressTarget, LatticeMeshMemberSpec, MeshMemberTarget, PeerAuth,
         };
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // MeshMember controller writes node with egress rules
         let mm_spec = LatticeMeshMemberSpec {
@@ -2343,7 +2373,7 @@ mod tests {
             EgressRule, EgressTarget, LatticeMeshMemberSpec, MeshMemberTarget, PeerAuth,
         };
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Service controller writes node first
         let svc_spec = make_service_spec(vec!["api"], vec![]);
@@ -2386,7 +2416,7 @@ mod tests {
     fn test_put_workload_extra_callers_are_authoritative() {
         use crate::crd::ServiceRef;
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Mesh member controller sets allowed_callers
         let labels = BTreeMap::from([("app".to_string(), "serving".to_string())]);
@@ -2411,7 +2441,7 @@ mod tests {
     /// This is the feedback loop fix — LS is authoritative on callers.
     #[test]
     fn test_put_service_clears_allowed_callers() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Mesh member controller sets allowed_callers
         let labels = BTreeMap::from([("app".to_string(), "rm-internal".to_string())]);
@@ -2434,7 +2464,7 @@ mod tests {
     /// put_workload with empty extra_callers clears callers (authoritative).
     #[test]
     fn test_put_workload_empty_callers_clears() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
 
         // Mesh member with wildcard callers
         let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);

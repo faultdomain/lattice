@@ -46,7 +46,7 @@ pub struct IstioConfig {
     /// Trust domain derived from the root CA fingerprint.
     /// All clusters sharing the same root CA get the same trust domain,
     /// enabling cross-cluster mTLS without trustDomainAliases.
-    /// Format: `lattice.{short_hash}.local`
+    /// Format: `lattice.{sha256_hex_prefix}`
     pub trust_domain: String,
     /// Remote cluster names for meshNetworks gateway mapping.
     /// None = don't touch meshNetworks (preserves existing).
@@ -171,6 +171,36 @@ impl IstioReconciler {
                 selector: None,
                 action: String::new(),
                 rules: vec![],
+            },
+        )
+    }
+
+    /// Generate AuthorizationPolicy allowing the east-west gateway to forward
+    /// cross-cluster HBONE traffic.
+    ///
+    /// The mesh-default-deny applies to the gateway envoy since it's in the mesh.
+    /// Without this ALLOW, all cross-cluster HBONE forwarding is denied with
+    /// `tcp.rbac.denied`. Uses targetRef (not selector) to attach to the gateway
+    /// envoy — selector only attaches to ztunnel.
+    ///
+    /// Rules are allow-all (`[{}]`) because after HBONE termination the destination
+    /// port is the inner service port, not 15008. Port filtering doesn't work here;
+    /// mTLS identity is the enforcement layer.
+    pub fn generate_eastwest_gateway_allow() -> AuthorizationPolicy {
+        AuthorizationPolicy::new(
+            ObjectMeta::new("eastwest-gateway-allow", "istio-system"),
+            AuthorizationPolicySpec {
+                target_refs: vec![TargetRef {
+                    group: "gateway.networking.k8s.io".to_string(),
+                    kind: "Gateway".to_string(),
+                    name: "istio-eastwestgateway".to_string(),
+                }],
+                selector: None,
+                action: "ALLOW".to_string(),
+                rules: vec![AuthorizationRule {
+                    from: vec![],
+                    to: vec![],
+                }],
             },
         )
     }

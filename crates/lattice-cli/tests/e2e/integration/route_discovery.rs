@@ -141,7 +141,7 @@ fn build_cross_cluster_consumer(
 
     let script = format!(
         r#"while true; do
-  if curl -sf http://{remote_dns} 2>/dev/null | grep -q .; then
+  if curl -sf http://{remote_dns}:8080 2>/dev/null | grep -q .; then
     echo "CROSS_CLUSTER_OK"
   else
     echo "CROSS_CLUSTER_FAIL"
@@ -188,13 +188,14 @@ done"#
 /// Verify cross-cluster traffic by checking consumer pod logs for "CROSS_CLUSTER_OK".
 ///
 /// Uses the same retry pattern as mesh tests — polls logs until the marker appears
-/// or DEFAULT_TIMEOUT is reached.
+/// or DEFAULT_TIMEOUT is reached. On failure, dumps diagnostics (graph, CNPs,
+/// AuthorizationPolicies, ztunnel logs) to help debug cross-cluster issues.
 async fn verify_cross_cluster_traffic(
     kubeconfig: &str,
     namespace: &str,
     service_name: &str,
 ) -> Result<(), String> {
-    wait_for_condition(
+    let result = wait_for_condition(
         "cross-cluster traffic",
         DEFAULT_TIMEOUT,
         Duration::from_secs(10),
@@ -220,7 +221,68 @@ async fn verify_cross_cluster_traffic(
             }
         },
     )
-    .await
+    .await;
+
+    if result.is_err() {
+        dump_cross_cluster_diagnostics(kubeconfig, namespace, service_name).await;
+    }
+    result
+}
+
+/// Dump diagnostics for cross-cluster traffic failures.
+async fn dump_cross_cluster_diagnostics(kubeconfig: &str, namespace: &str, service_name: &str) {
+    info!("[CrossCluster] === DIAGNOSTICS START ===");
+
+    // Consumer's LatticeService status
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig, "get", "latticeservice", service_name,
+        "-n", namespace, "-o", "jsonpath={.status.phase} {.status.message}",
+    ]).await.map(|o| info!("[CrossCluster] LatticeService status: {o}"));
+
+    // Consumer's MeshMember status + graph hash
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig, "get", "latticemeshmember", service_name,
+        "-n", namespace, "-o", "jsonpath={.metadata.annotations.lattice\\.dev/graph-hash} deps={.spec.dependencies}",
+    ]).await.map(|o| info!("[CrossCluster] MeshMember hash+deps: {o}"));
+
+    // Consumer's CiliumNetworkPolicy (check for HBONE egress)
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig, "get", "ciliumnetworkpolicy",
+        "-n", namespace, "-o", "yaml",
+    ]).await.map(|o| {
+        let has_hbone = o.contains("15008");
+        info!("[CrossCluster] CNP has HBONE egress: {has_hbone}");
+        if !has_hbone {
+            info!("[CrossCluster] CNP yaml:\n{o}");
+        }
+    });
+
+    // AuthorizationPolicies in consumer namespace
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig, "get", "authorizationpolicy",
+        "-n", namespace, "-o", "wide",
+    ]).await.map(|o| info!("[CrossCluster] AuthorizationPolicies ({namespace}):\n{o}"));
+
+    // LatticeClusterRoutes (are remote routes present?)
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig, "get", "latticeclusterroutes", "-o", "wide",
+    ]).await.map(|o| info!("[CrossCluster] LatticeClusterRoutes:\n{o}"));
+
+    // Ztunnel logs (last 10 lines for RBAC/connection errors)
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig, "logs",
+        "-n", "istio-system", "-l", "app=ztunnel",
+        "--tail=10",
+    ]).await.map(|o| info!("[CrossCluster] Ztunnel logs:\n{o}"));
+
+    // Service graph via debug endpoint
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig, "exec",
+        "-n", "lattice-system", "deploy/lattice-operator", "--",
+        "wget", "-qO-", "http://localhost:8080/debug/graph",
+    ]).await.map(|o| info!("[CrossCluster] Service graph:\n{o}"));
+
+    info!("[CrossCluster] === DIAGNOSTICS END ===");
 }
 
 // =============================================================================

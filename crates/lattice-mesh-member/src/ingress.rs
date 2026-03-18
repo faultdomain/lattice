@@ -240,6 +240,7 @@ impl IngressCompiler {
         namespace: &str,
         ingress: &IngressSpec,
         ports: &[MeshMemberPort],
+        trust_domain: &str,
     ) -> Result<GeneratedIngress, String> {
         let mut output = GeneratedIngress::default();
         let mut all_listeners = Vec::new();
@@ -377,7 +378,7 @@ impl IngressCompiler {
                     .values()
                     .filter_map(|r| r.advertise.as_ref())
                     .filter(|a| !a.is_open())
-                    .flat_map(|a| a.to_spiffe_principals())
+                    .flat_map(|a| a.to_spiffe_principals(trust_domain))
                     .collect();
 
                 output.cross_cluster_auth_policy =
@@ -861,6 +862,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -886,6 +888,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -910,6 +913,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -939,6 +943,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -994,6 +999,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
         let route = &output.http_routes[0];
@@ -1047,6 +1053,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
         let route = &output.http_routes[0];
@@ -1068,6 +1075,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1107,6 +1115,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1140,6 +1149,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1171,7 +1181,7 @@ mod tests {
             )]),
         };
         let output =
-            IngressCompiler::compile("db", "prod", &ingress, &single_port())
+            IngressCompiler::compile("db", "prod", &ingress, &single_port(), "lattice.abcd1234")
                 .unwrap();
 
         assert!(output.http_routes.is_empty());
@@ -1236,6 +1246,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1260,6 +1271,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1401,6 +1413,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1423,6 +1436,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1453,6 +1467,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1497,6 +1512,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1514,6 +1530,7 @@ mod tests {
             "prod",
             &ingress_a,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
         let out_b = IngressCompiler::compile(
@@ -1521,6 +1538,7 @@ mod tests {
             "prod",
             &ingress_b,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 
@@ -1541,6 +1559,7 @@ mod tests {
             "prod",
             &ingress,
             &single_port(),
+            "lattice.abcd1234",
         )
         .unwrap();
 

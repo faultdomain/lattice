@@ -150,5 +150,6 @@ fn tunnel_error_to_proxy_error(e: TunnelError) -> ProxyError {
         TunnelError::Timeout => ProxyError::Timeout,
         TunnelError::AgentError(msg) => ProxyError::AgentError(msg),
         TunnelError::ResponseBuild(msg) => ProxyError::ResponseBuild(msg),
+        TunnelError::AgentNotConnected(_) => ProxyError::AgentDisconnected,
     }
 }

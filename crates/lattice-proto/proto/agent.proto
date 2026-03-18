@@ -591,6 +591,10 @@ message SubtreeService {
   // Empty = fail-closed (nobody allowed). Use "*" for wildcard.
   // Propagated up the hierarchy for bilateral agreement enforcement.
   repeated string allowed_services = 10;
+  // Backend service ports (name → port) from the LatticeService spec.
+  // Used to create Service stubs with matching ports so istiod can
+  // merge remote endpoints.
+  map<string, uint32> service_ports = 11;
 }
 
 // Cell → Agent: Push peer (parent + sibling) service routes for multi-cluster Istio

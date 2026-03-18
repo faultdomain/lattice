@@ -7,6 +7,8 @@
 //! - **Cross-cluster discovery**: siblings resolve dependencies across clusters
 //! - **Observability**: operators see which services are available where
 
+use std::collections::BTreeMap;
+
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -59,6 +61,12 @@ pub struct ClusterRoute {
     /// Empty = fail-closed (nobody allowed). Use ["*"] for open access.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_services: Vec<String>,
+
+    /// Backend service ports (name → port) from the LatticeService spec.
+    /// Used to create Service stubs with matching ports so istiod can
+    /// merge remote endpoints. Empty = use gateway port only (legacy).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub service_ports: BTreeMap<String, u16>,
 }
 
 fn default_protocol() -> String {
@@ -121,6 +129,22 @@ impl ClusterRoute {
                 self.service_namespace
             ));
         }
+        // Validate service_ports: port values must be valid, names must be DNS labels,
+        // and total count is bounded to prevent CRD bloat.
+        const MAX_SERVICE_PORTS: usize = 100;
+        if self.service_ports.len() > MAX_SERVICE_PORTS {
+            return Err(format!(
+                "too many service_ports ({}, max {})",
+                self.service_ports.len(),
+                MAX_SERVICE_PORTS
+            ));
+        }
+        for (name, &port) in &self.service_ports {
+            if port == 0 {
+                return Err(format!("service_ports['{name}']: port is 0"));
+            }
+            crate::crd::validate_dns_label(name, "service_ports name")?;
+        }
         Ok(())
     }
 }
@@ -171,6 +195,7 @@ mod tests {
             port: 8096,
             protocol: "HTTP".to_string(),
             allowed_services: vec!["edge/edge/haproxy-fw".to_string()],
+            service_ports: BTreeMap::from([("http".to_string(), 8096)]),
         };
 
         let json = serde_json::to_string(&route).unwrap();

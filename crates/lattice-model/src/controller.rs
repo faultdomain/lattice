@@ -264,7 +264,7 @@ impl ModelContext {
     pub fn for_testing(kube: Arc<dyn ModelKubeClient>) -> Self {
         Self {
             kube,
-            graph: Arc::new(ServiceGraph::new()),
+            graph: Arc::new(ServiceGraph::new("lattice.test")),
             cluster_name: "test-cluster".to_string(),
             provider_type: ProviderType::Docker,
             cedar: Arc::new(

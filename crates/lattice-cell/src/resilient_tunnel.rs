@@ -72,17 +72,11 @@ async fn tunnel_single_resilient(
     params: K8sRequestParams,
     config: &ResilientTunnelConfig,
 ) -> Result<Response<Body>, TunnelError> {
-    let timeout = if config.enabled {
-        config.reconnect_timeout
-    } else {
-        Duration::ZERO
-    };
-
-    // Get command channel (waits for agent if not yet connected)
-    let command_tx = registry
-        .wait_for_connection(cluster_name, timeout)
-        .await
-        .ok_or(TunnelError::Timeout)?;
+    // Fail fast if agent isn't connected. Without this, the proxy accepts
+    // the TCP connection and holds it waiting for the backend — Go's
+    // net/http has no read deadline on the initial request, so reflectors
+    // (e.g. istiod informers) hang forever instead of retrying.
+    let command_tx = get_or_wait_for_connection(registry, cluster_name).await?;
 
     // First attempt
     let result = tunnel_and_receive(registry, cluster_name, command_tx, &params).await;
@@ -136,17 +130,32 @@ async fn tunnel_watch_resilient(
     tokio::spawn(async move {
         let mut current_params = params;
         let mut ct_tx = Some(ct_tx);
+        let mut is_first_attempt = true;
 
         loop {
-            // Get command channel (waits for agent if not yet connected)
-            let command_tx = match registry
-                .wait_for_connection(&cluster_name, reconnect_timeout)
-                .await
-            {
-                Some(tx) => tx,
-                None => {
-                    warn!(cluster = %cluster_name, "Agent connection timeout, ending watch");
-                    break;
+            // On the first attempt, fail fast if agent isn't connected — the
+            // caller's TCP connection is already accepted, and holding it open
+            // while waiting causes Go reflectors to hang forever.
+            // On subsequent attempts (reconnect after stream break), wait.
+            let command_tx = if is_first_attempt {
+                is_first_attempt = false;
+                match registry.get_connected_command_tx(&cluster_name) {
+                    Some(tx) => tx,
+                    None => {
+                        warn!(cluster = %cluster_name, "Agent not connected, failing watch immediately");
+                        break;
+                    }
+                }
+            } else {
+                match registry
+                    .wait_for_connection(&cluster_name, reconnect_timeout)
+                    .await
+                {
+                    Some(tx) => tx,
+                    None => {
+                        warn!(cluster = %cluster_name, "Agent connection timeout, ending watch");
+                        break;
+                    }
                 }
             };
 
@@ -208,6 +217,28 @@ async fn tunnel_watch_resilient(
         .header("Content-Type", content_type)
         .body(body)
         .map_err(|e| TunnelError::ResponseBuild(e.to_string()))
+}
+
+/// Get command channel, failing fast if agent isn't connected.
+///
+/// In resilient mode, returns the live channel if connected, or 503 if not.
+/// In non-resilient mode, also fails immediately.
+///
+/// This prevents the proxy from holding TCP connections open while waiting
+/// for a backend that isn't there — Go's net/http has no read deadline on
+/// initial requests, so holding the connection causes informer hangs.
+async fn get_or_wait_for_connection(
+    registry: &SharedAgentRegistry,
+    cluster_name: &str,
+) -> Result<mpsc::Sender<lattice_proto::CellCommand>, TunnelError> {
+    // Always fail fast on the initial request — don't hold the caller's
+    // TCP connection open waiting for a backend that may never arrive.
+    registry
+        .get_connected_command_tx(cluster_name)
+        .ok_or_else(|| {
+            debug!(cluster = %cluster_name, "Agent not connected, returning 503");
+            TunnelError::AgentNotConnected(cluster_name.to_string())
+        })
 }
 
 /// Execute tunnel request and receive single response

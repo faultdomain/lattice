@@ -116,10 +116,10 @@ pub async fn build_service_controllers(
     registry: Arc<CrdRegistry>,
     metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
-) -> (
+) -> anyhow::Result<(
     Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
     Arc<lattice_common::graph::ServiceGraph>,
-) {
+)> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     let cedar_for_mm = cedar.clone();
 
@@ -131,11 +131,17 @@ pub async fn build_service_controllers(
         client.clone(),
         "lattice-service-controller",
     ));
+    // Compute trust domain from the root CA for SPIFFE principal generation.
+    // The operator MUST NOT start service controllers without a valid trust domain —
+    // doing so would generate incorrect SPIFFE principals and Istio policies.
+    let trust_domain = lattice_infra::bootstrap::read_trust_domain(&client)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("root CA secret not available — cannot compute trust domain for SPIFFE principals"))?;
 
     let mut service_ctx = ServiceContext::new(
         svc_kube_client,
         Arc::new(
-            lattice_common::graph::ServiceGraph::new()
+            lattice_common::graph::ServiceGraph::new(&trust_domain)
                 .with_cluster_name(cluster.cluster_name.clone()),
         ),
         cluster,
@@ -278,7 +284,15 @@ pub async fn build_service_controllers(
             watcher_config(),
             {
                 let graph = service_ctx.graph.clone();
-                move |_routes| all_mesh_member_refs(&graph)
+                move |routes| {
+                    // Sync remote services to graph BEFORE triggering re-reconcile.
+                    // Without this, MeshMember reconcile runs with stale graph state
+                    // and generates CNPs missing cross-cluster HBONE egress rules.
+                    let source_cluster =
+                        routes.metadata.name.as_deref().unwrap_or("unknown");
+                    graph.sync_remote_services(source_cluster, &routes.spec.routes);
+                    all_mesh_member_refs(&graph)
+                }
             },
         )
         .shutdown_on_signal()
@@ -294,7 +308,7 @@ pub async fn build_service_controllers(
 
     let graph = service_ctx.graph.clone();
 
-    (vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph)
+    Ok((vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph))
 }
 
 /// Spawn the remote secret controller for Istio multi-cluster discovery.
@@ -922,15 +936,11 @@ fn all_service_refs(graph: &lattice_common::graph::ServiceGraph) -> Vec<ObjectRe
 fn all_mesh_member_refs(
     graph: &lattice_common::graph::ServiceGraph,
 ) -> Vec<ObjectRef<LatticeMeshMember>> {
-    let mut refs = Vec::new();
-    for ns in graph.list_namespaces() {
-        for svc in graph.list_services(&ns) {
-            if svc.type_.is_mesh_member() || svc.type_.is_local() {
-                refs.push(ObjectRef::<LatticeMeshMember>::new(&svc.name).within(&ns));
-            }
-        }
-    }
-    refs
+    graph
+        .all_mesh_eligible()
+        .into_iter()
+        .map(|(ns, name)| ObjectRef::<LatticeMeshMember>::new(&name).within(&ns))
+        .collect()
 }
 
 /// Creates a closure for logging reconciliation results.

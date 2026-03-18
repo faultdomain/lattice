@@ -92,7 +92,7 @@ fn simple_service_spec() -> LatticeServiceSpec {
 
 /// Create a chain topology: svc-0 → svc-1 → svc-2 → ... → svc-n
 fn setup_chain_graph(n: usize) -> ServiceGraph {
-    let graph = ServiceGraph::new();
+    let graph = ServiceGraph::new("lattice.test");
 
     for i in 0..n {
         // Each service depends on the next one
@@ -118,7 +118,7 @@ fn setup_chain_graph(n: usize) -> ServiceGraph {
 
 /// Create a star topology: hub ← spoke-0, spoke-1, ..., spoke-n
 fn setup_star_graph(n: usize) -> ServiceGraph {
-    let graph = ServiceGraph::new();
+    let graph = ServiceGraph::new("lattice.test");
 
     // Hub service allows all spokes
     let caller_names: Vec<String> = (0..n).map(|i| format!("spoke-{}", i)).collect();
@@ -137,7 +137,7 @@ fn setup_star_graph(n: usize) -> ServiceGraph {
 
 /// Create a realistic microservices topology
 fn setup_realistic_graph(n: usize) -> ServiceGraph {
-    let graph = ServiceGraph::new();
+    let graph = ServiceGraph::new("lattice.test");
     let mut rng = rand::thread_rng();
 
     // Create n services with random but realistic connectivity
@@ -180,7 +180,7 @@ fn bench_put_service(c: &mut Criterion) {
     for size in [10usize, 100, 500, 1000] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("empty_graph", size), &size, |b, &size| {
-            let graph = ServiceGraph::new();
+            let graph = ServiceGraph::new("lattice.test");
             let spec = simple_service_spec();
             let mut i = 0;
             b.iter(|| {

@@ -44,7 +44,7 @@ impl<'a> PolicyCompiler<'a> {
         namespace: &str,
         inbound_edges: &[ActiveEdge],
     ) -> Option<AuthorizationPolicy> {
-        if inbound_edges.is_empty() && !service.allow_peer_traffic {
+        if inbound_edges.is_empty() && !service.allow_peer_traffic && !service.advertised_open {
             return None;
         }
 
@@ -54,7 +54,8 @@ impl<'a> PolicyCompiler<'a> {
                 let caller = self
                     .graph
                     .get_service(&edge.caller_namespace, &edge.caller_name)?;
-                Some(mesh::principal::service(
+                Some(mesh::trust_domain::principal(
+                    self.graph.trust_domain(),
                     &edge.caller_namespace,
                     caller.sa_name(),
                 ))
@@ -63,7 +64,11 @@ impl<'a> PolicyCompiler<'a> {
 
         // If allow_peer_traffic, add own principal so pods can talk to each other
         if service.allow_peer_traffic {
-            principals.push(mesh::principal::service(namespace, service.sa_name()));
+            principals.push(mesh::trust_domain::principal(
+                self.graph.trust_domain(),
+                namespace,
+                service.sa_name(),
+            ));
         }
 
         let ports: Vec<String> = service
@@ -71,6 +76,38 @@ impl<'a> PolicyCompiler<'a> {
             .values()
             .map(|pm| pm.target_port.to_string())
             .collect();
+
+        // Advertised services with open callers allow any authenticated identity.
+        // Cross-cluster callers arrive via the east-west gateway with their original
+        // SPIFFE identity — we can't enumerate them, so allow from any source.
+        // Uses empty `from` (omitted in serialization) = any authenticated caller.
+        if service.advertised_open {
+            let match_labels = service.istio_match_labels();
+            return Some(AuthorizationPolicy::new(
+                ObjectMeta::new(
+                    derived_name("allow-to-", &[namespace, &service.name]),
+                    namespace,
+                ),
+                AuthorizationPolicySpec {
+                    target_refs: vec![],
+                    selector: Some(WorkloadSelector { match_labels }),
+                    action: "ALLOW".to_string(),
+                    rules: vec![AuthorizationRule {
+                        from: vec![], // omitted = any authenticated source
+                        to: if ports.is_empty() {
+                            vec![]
+                        } else {
+                            vec![AuthorizationOperation {
+                                operation: OperationSpec {
+                                    ports,
+                                    hosts: vec![],
+                                },
+                            }]
+                        },
+                    }],
+                },
+            ));
+        }
 
         // Need both principals and ports to generate a meaningful policy
         if principals.is_empty() || ports.is_empty() {
@@ -123,7 +160,10 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![mesh::principal::waypoint(namespace)],
+                            principals: vec![mesh::trust_domain::waypoint_principal(
+                                self.graph.trust_domain(),
+                                namespace,
+                            )],
                             not_principals: vec![],
                         },
                     }],
@@ -209,7 +249,8 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![mesh::principal::service(
+                            principals: vec![mesh::trust_domain::principal(
+                                self.graph.trust_domain(),
                                 namespace,
                                 service.sa_name(),
                             )],

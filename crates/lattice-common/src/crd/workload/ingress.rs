@@ -22,6 +22,18 @@ pub struct IngressSpec {
     pub routes: BTreeMap<String, RouteSpec>,
 }
 
+impl IngressSpec {
+    /// Whether any route is advertised with open (wildcard) callers.
+    ///
+    /// Used to generate inbound AuthorizationPolicy that allows any
+    /// authenticated principal for cross-cluster traffic.
+    pub fn has_open_advertise(&self) -> bool {
+        self.routes
+            .values()
+            .any(|r| r.advertise.as_ref().is_some_and(|a| a.is_open()))
+    }
+}
+
 /// Route kind — which Gateway API route resource to generate.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[non_exhaustive]
@@ -85,7 +97,7 @@ pub struct AdvertiseConfig {
     ///
     /// Each entry is "cluster/namespace/name" (e.g., "edge/edge/haproxy-fw")
     /// or "*" for all. The cluster/namespace/name format maps directly to a
-    /// SPIFFE principal: `lattice.{cluster}.local/ns/{namespace}/sa/{name}`.
+    /// SPIFFE principal: `cluster.local/ns/{namespace}/sa/{name}`.
     pub allowed_services: Vec<String>,
 }
 
@@ -107,13 +119,12 @@ impl AdvertiseConfig {
     /// Convert allowedServices to SPIFFE principals for AuthorizationPolicy.
     ///
     /// Each "cluster/namespace/name" entry becomes
-    /// `cluster.local/ns/{namespace}/sa/{name}`.
-    /// Uses `cluster.local` as the trust domain per Istio docs — Istio resolves
-    /// it to the actual mesh trust domain at evaluation time.
-    /// The cluster component is used for routing, not for the principal.
+    /// `{trust_domain}/ns/{namespace}/sa/{name}`.
+    /// The cluster component is used for routing but NOT for the trust domain —
+    /// all clusters in a tree share the same CA-derived trust domain.
     /// Wildcard entries are skipped (use is_open() to check).
     /// Malformed entries are logged as warnings and skipped.
-    pub fn to_spiffe_principals(&self) -> Vec<String> {
+    pub fn to_spiffe_principals(&self, trust_domain: &str) -> Vec<String> {
         self.allowed_services
             .iter()
             .filter(|s| *s != "*")
@@ -125,7 +136,9 @@ impl AdvertiseConfig {
                     && !parts[2].is_empty()
                 {
                     // parts[0] is cluster name (for routing), parts[1] namespace, parts[2] SA name
-                    Some(crate::mesh::principal::service(parts[1], parts[2]))
+                    Some(crate::mesh::trust_domain::principal(
+                        trust_domain, parts[1], parts[2],
+                    ))
                 } else {
                     tracing::warn!(
                         entry = %s,
@@ -844,8 +857,11 @@ mod tests {
         let config = AdvertiseConfig {
             allowed_services: vec!["edge/edge/haproxy-fw".to_string(), "*".to_string()],
         };
-        let principals = config.to_spiffe_principals();
+        let principals = config.to_spiffe_principals("lattice.abcd1234.local");
         assert_eq!(principals.len(), 1); // wildcard skipped
-        assert_eq!(principals[0], "cluster.local/ns/edge/sa/haproxy-fw");
+        assert_eq!(
+            principals[0],
+            "lattice.abcd1234.local/ns/edge/sa/haproxy-fw"
+        );
     }
 }

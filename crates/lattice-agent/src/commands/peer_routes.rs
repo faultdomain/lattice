@@ -51,6 +51,11 @@ fn hash_routes(routes: &[ClusterRoute]) -> Vec<u8> {
         for allowed in &r.allowed_services {
             buf.extend_from_slice(allowed.as_bytes());
         }
+        // BTreeMap iteration is sorted by key
+        for (name, port) in &r.service_ports {
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(&port.to_le_bytes());
+        }
     }
     lattice_common::kube_utils::sha256(&buf)
 }
@@ -133,6 +138,10 @@ pub async fn handle(sync: &PeerRouteSync, ctx: &CommandContext) {
                 port: svc.port as u16,
                 protocol: svc.protocol.clone(),
                 allowed_services: svc.allowed_services.clone(),
+                service_ports: svc.service_ports.iter()
+                    .filter(|(_, &v)| v > 0 && v <= u16::MAX as u32)
+                    .map(|(k, &v)| (k.clone(), v as u16))
+                    .collect(),
             });
     }
 

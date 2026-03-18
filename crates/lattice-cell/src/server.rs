@@ -253,6 +253,10 @@ fn group_subtree_routes_by_cluster(
             port: s.port as u16,
             protocol: s.protocol.clone(),
             allowed_services: s.allowed_services.clone(),
+            service_ports: s.service_ports.iter()
+                .filter(|(_, &v)| v > 0 && v <= u16::MAX as u32)
+                .map(|(k, &v)| (k.clone(), v as u16))
+                .collect(),
         };
         if let Err(reason) = route.validate() {
             warn!(service = %s.name, reason = %reason, "rejecting route");
@@ -867,7 +871,19 @@ async fn process_agent_message(
                         return;
                     }
                 };
+                // Validate each origin cluster belongs to the sender's subtree.
+                // Without this, a compromised agent could inject routes for
+                // arbitrary clusters by setting the `cluster` field in SubtreeService.
+                let allowed_clusters = subtree_registry.clusters_via_agent(cluster_name).await;
                 for (origin, origin_routes) in grouped {
+                    if origin != *cluster_name && !allowed_clusters.contains(&origin) {
+                        warn!(
+                            sender = %cluster_name,
+                            origin = %origin,
+                            "rejecting routes for cluster not in sender's subtree"
+                        );
+                        continue;
+                    }
                     let update = crate::route_reconciler::RouteUpdate {
                         cluster_name: origin,
                         routes: origin_routes,
@@ -1652,7 +1668,8 @@ mod tests {
                     protocol: "HTTP".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                },
+                service_ports: Default::default(),
+                    },
                 lattice_proto::SubtreeService {
                     name: "old-service".to_string(),
                     namespace: "default".to_string(),
@@ -1664,7 +1681,8 @@ mod tests {
                     protocol: "HTTP".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                },
+                service_ports: Default::default(),
+                    },
             ],
             is_full_sync: true,
         };
@@ -1702,7 +1720,8 @@ mod tests {
                 protocol: "HTTPS".to_string(),
                 labels: std::collections::HashMap::new(),
                 allowed_services: vec![],
-            }],
+            service_ports: Default::default(),
+                    }],
             is_full_sync: false,
         };
 
@@ -1733,7 +1752,8 @@ mod tests {
                     protocol: "HTTPS".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                },
+                service_ports: Default::default(),
+                    },
                 lattice_proto::SubtreeService {
                     name: "db".to_string(),
                     namespace: "data".to_string(),
@@ -1745,7 +1765,8 @@ mod tests {
                     protocol: "TCP".to_string(),
                     labels: std::collections::HashMap::new(),
                     allowed_services: vec![],
-                },
+                service_ports: Default::default(),
+                    },
             ],
             is_full_sync: false,
         };
@@ -1773,7 +1794,8 @@ mod tests {
                 protocol: "HTTP".to_string(),
                 labels: std::collections::HashMap::new(),
                 allowed_services: vec![],
-            }],
+            service_ports: Default::default(),
+                    }],
             is_full_sync: false,
         };
 

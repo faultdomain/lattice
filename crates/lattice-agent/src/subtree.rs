@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{LatticeCluster, LatticeClusterRoutes};
 use lattice_common::watcher::resilient_watcher;
+use lattice_common::PEER_ROUTES_LABEL;
 use lattice_proto::{
     agent_message::Payload, AgentMessage, SubtreeCluster, SubtreeService, SubtreeState,
 };
@@ -120,6 +121,17 @@ impl SubtreeSender {
 
         list.items
             .iter()
+            .filter(|crd| {
+                // Skip peer routes — they were received from the parent via PeerRouteSync
+                // and must not be echoed back, which would cause stale overwrites.
+                let is_peer = crd
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(PEER_ROUTES_LABEL))
+                    .is_some_and(|v| v == "true");
+                !is_peer
+            })
             .flat_map(|crd| {
                 let source_cluster = crd.metadata.name.as_deref().unwrap_or(&self.cluster_name);
                 crd.spec.routes.iter().map(move |r| SubtreeService {
@@ -133,6 +145,7 @@ impl SubtreeSender {
                     protocol: r.protocol.clone(),
                     labels: HashMap::new(),
                     allowed_services: r.allowed_services.clone(),
+                    service_ports: r.service_ports.iter().map(|(k, &v)| (k.clone(), v as u32)).collect(),
                 })
             })
             .collect()
@@ -341,6 +354,7 @@ mod tests {
             protocol: "HTTP".to_string(),
             labels: HashMap::from([("lattice.dev/environment".to_string(), "homelab".to_string())]),
             allowed_services: vec![],
+            service_ports: Default::default(),
         };
 
         assert_eq!(svc.hostname, "jellyfin.home.arpa");

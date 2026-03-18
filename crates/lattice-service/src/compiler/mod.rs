@@ -14,7 +14,7 @@
 //! # Usage
 //!
 //! ```text
-//! let graph = ServiceGraph::new();
+//! let graph = ServiceGraph::new("lattice.test");
 //! let cedar = PolicyEngine::new();
 //! let compiler = ServiceCompiler::new(&graph, "prod-cluster", ProviderType::Docker, &cedar, MonitoringConfig::default());
 //! let output = compiler.compile(&lattice_service).await;
@@ -146,7 +146,7 @@ impl<'a> ServiceCompiler<'a> {
     ///
     /// # Arguments
     /// * `graph` - The service graph for policy generation (bilateral agreement checks)
-    /// * `cluster_name` - Cluster name used in trust domain (lattice.{cluster}.local)
+    /// * `cluster_name` - Cluster name for workload templating and Istio network identity
     /// * `provider_type` - Infrastructure provider for topology-aware scheduling
     /// * `cedar` - Cedar policy engine for secret access authorization
     /// * `monitoring` - Monitoring configuration for this cluster
@@ -478,7 +478,7 @@ mod tests {
 
     /// Create a fresh graph + cedar pair for tests.
     fn test_setup() -> (ServiceGraph, PolicyEngine) {
-        (ServiceGraph::new(), PolicyEngine::new())
+        (ServiceGraph::new("lattice.test"), PolicyEngine::new())
     }
 
     /// Set the security context on the "main" container.
@@ -953,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn compile_succeeds_when_security_override_permitted() {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::with_policies(
             r#"
             permit(

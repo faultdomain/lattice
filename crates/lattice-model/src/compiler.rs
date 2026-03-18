@@ -980,7 +980,7 @@ mod tests {
         roles.insert("decode".to_string(), make_role("decoder:latest", 2));
 
         let model = make_model(roles);
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1008,7 +1008,7 @@ mod tests {
         roles.insert("decode".to_string(), make_role("decode:latest", 4));
 
         let model = make_model(roles);
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1029,7 +1029,7 @@ mod tests {
     #[tokio::test]
     async fn empty_roles_returns_error() {
         let model = make_model(BTreeMap::new());
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
         let result = compile_model(
@@ -1055,7 +1055,7 @@ mod tests {
         let model = LatticeModel::new("test-model", spec);
         // No namespace set
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
         let result = compile_model(
@@ -1084,7 +1084,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1118,7 +1118,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1173,7 +1173,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1226,7 +1226,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1274,7 +1274,7 @@ mod tests {
         roles.insert("decode".to_string(), make_role("decoder:latest", 2));
 
         let model = make_model(roles);
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1313,7 +1313,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1393,7 +1393,7 @@ mod tests {
         roles.insert("decode".to_string(), make_role("decoder:latest", 2));
 
         let model = make_model(roles);
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         let compiled = compile_model(
@@ -1455,7 +1455,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1571,7 +1571,7 @@ mod tests {
         roles.insert("decode".to_string(), role);
 
         let model = make_model(roles);
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         // This should succeed — the compiler propagates ghcr-creds to the worker workload
@@ -1603,7 +1603,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1670,7 +1670,7 @@ mod tests {
         model.metadata.name = None;
         model.metadata.namespace = Some("default".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
         let result = compile_model(
@@ -1702,7 +1702,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
         let result = compile_model(
@@ -1738,7 +1738,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1820,7 +1820,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1860,7 +1860,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
@@ -1920,7 +1920,7 @@ mod tests {
         model.metadata.namespace = Some("default".to_string());
         model.metadata.uid = Some("uid-456".to_string());
 
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 

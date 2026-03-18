@@ -417,7 +417,7 @@ async fn run_service_slice(
         metrics_scraper.clone(),
         cost_provider.clone(),
     )
-    .await;
+    .await?;
 
     let _ = graph_holder.set(graph.clone());
 
@@ -586,7 +586,7 @@ async fn run_all_slices(
         metrics_scraper.clone(),
         cost_provider.clone(),
     )
-    .await;
+    .await?;
     controllers.extend(service_controllers);
 
     let _ = graph_holder.set(graph.clone());

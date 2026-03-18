@@ -51,14 +51,16 @@ pub(crate) fn hbone_ingress_rule() -> CiliumIngressRule {
     }
 }
 
-/// Broad HBONE egress: allow this pod to reach any pod in the cluster on port 15008.
+/// Broad HBONE egress: allow this pod to reach any destination on port 15008.
 ///
-/// Uses `toEntities: [cluster]` instead of `toEndpoints: [{}]` because
-/// empty endpoint selectors in namespaced CNPs only match same-namespace pods.
-/// HBONE traffic is cross-namespace (ztunnel delivers to pods in any namespace).
+/// Includes both "cluster" (local pods/nodes) and "world" (cross-cluster
+/// east-west gateway IPs). HBONE is always mTLS-protected by Istio, so
+/// allowing world on this port has no security impact. Including world
+/// unconditionally prevents cross-cluster HBONE from breaking when remote
+/// services are transiently removed from the service graph.
 pub(crate) fn hbone_egress_rule() -> CiliumEgressRule {
     CiliumEgressRule {
-        to_entities: vec!["cluster".to_string()],
+        to_entities: vec!["cluster".to_string(), "world".to_string()],
         to_ports: vec![CiliumPortRule {
             ports: vec![CiliumPort {
                 port: mesh::HBONE_PORT.to_string(),
@@ -181,7 +183,7 @@ impl<'a> PolicyCompiler<'a> {
         // HBONE ingress: ztunnel wraps all inbound traffic on port 15008 in ambient mesh.
         // Required whenever this pod accepts any inbound traffic (mesh callers, webhooks,
         // permissive ports, or peer traffic).
-        if !inbound_edges.is_empty() || !ingress_rules.is_empty() || service.allow_peer_traffic {
+        if !inbound_edges.is_empty() || !ingress_rules.is_empty() || service.allow_peer_traffic || service.advertised_open {
             ingress_rules.insert(0, hbone_ingress_rule());
         }
 
@@ -213,29 +215,8 @@ impl<'a> PolicyCompiler<'a> {
                 .get_service(&e.callee_namespace, &e.callee_name)
                 .is_some_and(|c| c.ambient)
         });
-        let has_remote_outbound = outbound_edges.iter().any(|e| {
-            self.graph
-                .get_service(&e.callee_namespace, &e.callee_name)
-                .is_some_and(|c| c.type_.is_remote())
-        });
         if has_ambient_outbound || has_fqdn_egress || service.allow_peer_traffic {
             egress_rules.push(hbone_egress_rule());
-        }
-        // Cross-cluster dependencies route via the east-west gateway's external IP.
-        // The gateway is outside the "cluster" entity, so we need "world" egress
-        // on the HBONE port. Istio mTLS protects the connection.
-        if has_remote_outbound {
-            egress_rules.push(CiliumEgressRule {
-                to_entities: vec!["world".to_string()],
-                to_ports: vec![CiliumPortRule {
-                    ports: vec![CiliumPort {
-                        port: mesh::HBONE_PORT.to_string(),
-                        protocol: "TCP".to_string(),
-                    }],
-                    rules: None,
-                }],
-                ..Default::default()
-            });
         }
 
         // Direct egress for outbound edges to non-ambient callees.

@@ -16,7 +16,7 @@ use super::providers::{AwsConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
 /// Cluster-level configuration shared across controllers.
 #[derive(Clone)]
 pub struct ClusterConfig {
-    /// Cluster name used in trust domain (lattice.{cluster}.local)
+    /// Cluster name for workload templating and Istio network identity
     pub cluster_name: String,
     /// Provider type for topology-aware scheduling
     pub provider_type: ProviderType,

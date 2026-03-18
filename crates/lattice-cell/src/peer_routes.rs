@@ -29,6 +29,7 @@ fn tagged_to_proto(routes: &[TaggedRoute]) -> Vec<SubtreeService> {
             protocol: r.protocol.clone(),
             labels: Default::default(),
             allowed_services: r.allowed_services.clone(),
+            service_ports: r.service_ports.iter().map(|(k, &v)| (k.clone(), v as u32)).collect(),
         })
         .collect()
 }
@@ -66,6 +67,11 @@ fn hash_peer_routes(routes: &[SubtreeService]) -> Vec<u8> {
             buf.extend_from_slice(s.protocol.as_bytes());
             for allowed in &s.allowed_services {
                 buf.extend_from_slice(allowed.as_bytes());
+            }
+            // BTreeMap iteration is sorted by key
+            for (name, port) in &s.service_ports {
+                buf.extend_from_slice(name.as_bytes());
+                buf.extend_from_slice(&(*port as u16).to_le_bytes());
             }
         }
         per_cluster.insert(cluster, sha256(&buf));

@@ -173,6 +173,17 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
         // Create Service stub (no selector, no endpoints) with a ClusterIP
         // so DNS resolves the service name. Headless services (clusterIP: None)
         // don't get DNS A records, which breaks cross-cluster routing.
+        // Build port list from service_ports if available, otherwise fall
+        // back to the gateway port. Istiod requires stub ports to match the
+        // real service ports for endpoint merging.
+        let ports: Vec<serde_json::Value> = if route.service_ports.is_empty() {
+            vec![serde_json::json!({"port": route.port, "protocol": "TCP", "name": "tcp"})]
+        } else {
+            route.service_ports.iter().map(|(name, &port)| {
+                serde_json::json!({"port": port, "protocol": "TCP", "name": name})
+            }).collect()
+        };
+
         let svc = serde_json::json!({
             "apiVersion": "v1",
             "kind": "Service",
@@ -186,11 +197,7 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
                 }
             },
             "spec": {
-                "ports": [{
-                    "port": route.port,
-                    "protocol": "TCP",
-                    "name": "tcp"
-                }]
+                "ports": ports
             }
         });
 

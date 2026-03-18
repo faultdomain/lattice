@@ -305,13 +305,12 @@ impl AgentRegistry {
         self.proxy_config.get().cloned()
     }
 
-    /// Register an agent connection (new or reconnection)
+    /// Register an agent connection (new or reconnection).
     ///
-    /// Always notifies waiting requests via the connection broadcast channel,
-    /// so both the resilient tunnel and SubtreeForwarder can pick up new agents.
-    /// Register an agent connection. Returns the generation number for this
-    /// connection — pass it to `unregister()` so stale tasks don't stomp
-    /// newer connections.
+    /// Notifies waiting requests via the connection broadcast channel so both
+    /// the resilient tunnel and SubtreeForwarder can pick up new agents.
+    /// Returns the generation number — pass it to `unregister()` so stale
+    /// tasks don't stomp newer connections.
     pub fn register(&self, mut connection: AgentConnection) -> u64 {
         let cluster_name = connection.cluster_name.clone();
         let command_tx = connection.command_tx.clone();
@@ -370,10 +369,16 @@ impl AgentRegistry {
                 );
                 return;
             }
-            agent.connected = false;
-            agent.disconnected_at = Some(Instant::now());
+            Self::mark_disconnected(&mut agent);
             info!(cluster = %cluster_name, "Agent disconnected");
         }
+    }
+
+    /// Mark an agent as disconnected (sets `connected = false` and records
+    /// the disconnection timestamp). Single source of truth for disconnection.
+    fn mark_disconnected(agent: &mut AgentConnection) {
+        agent.connected = false;
+        agent.disconnected_at = Some(Instant::now());
     }
 
     /// Get an agent connection by cluster name
@@ -828,18 +833,15 @@ impl AgentRegistry {
             .unwrap_or(false)
     }
 
-    /// Detect connected agents with stale heartbeats.
-    ///
-    /// Returns cluster names of agents that are marked connected but haven't sent
-    /// a heartbeat within `threshold`. Agents that have never sent a heartbeat
-    /// (e.g. still in initial handshake) are excluded.
-    /// Get the names of all currently connected agents.
-    pub fn connected_cluster_names(&self) -> Vec<String> {
-        self.agents
-            .iter()
-            .filter(|r| r.value().connected)
-            .map(|r| r.key().clone())
-            .collect()
+    /// Get command channel only if agent is currently connected with a live channel.
+    /// Returns None immediately if not connected — never waits.
+    pub fn get_connected_command_tx(&self, cluster_name: &str) -> Option<mpsc::Sender<CellCommand>> {
+        let agent = self.agents.get(cluster_name)?;
+        if agent.connected && !agent.command_tx.is_closed() {
+            Some(agent.command_tx.clone())
+        } else {
+            None
+        }
     }
 
     /// Check if a peer route sync is needed for token refresh.
@@ -862,8 +864,20 @@ impl AgentRegistry {
         }
     }
 
-    pub fn detect_stale_agents(&self, threshold: Duration) -> Vec<String> {
-        self.agents
+    /// Detect agents whose heartbeat is stale and forcibly mark them disconnected.
+    ///
+    /// When a gRPC stream silently dies (TCP half-open, network partition), the
+    /// agent stops sending heartbeats but the cell never gets a stream close event.
+    /// The `command_tx` buffer fills up and all proxy requests hang.
+    ///
+    /// This method detects the stale heartbeat and marks the agent disconnected,
+    /// which causes `wait_for_connection` to wait for a fresh reconnect instead
+    /// of returning the dead channel.
+    ///
+    /// Returns the names of agents that were disconnected.
+    pub fn disconnect_stale_agents(&self, threshold: Duration) -> Vec<String> {
+        let stale: Vec<String> = self
+            .agents
             .iter()
             .filter(|r| {
                 let agent = r.value();
@@ -874,7 +888,20 @@ impl AgentRegistry {
                         .unwrap_or(false)
             })
             .map(|r| r.key().clone())
-            .collect()
+            .collect();
+
+        for name in &stale {
+            if let Some(mut agent) = self.agents.get_mut(name) {
+                Self::mark_disconnected(&mut agent);
+                warn!(
+                    cluster = %name,
+                    "Forcibly disconnected agent: heartbeat stale for {:?}",
+                    threshold
+                );
+            }
+        }
+
+        stale
     }
 
     /// Remove agents that have been disconnected longer than `max_age`.
@@ -1512,7 +1539,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_detect_stale_agents_none_stale() {
+    fn test_disconnect_stale_agents_none_stale() {
         let registry = AgentRegistry::new();
         let (conn, _rx) = create_test_connection("cluster-a");
         registry.register(conn);
@@ -1527,12 +1554,13 @@ mod tests {
             },
         );
 
-        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        let stale = registry.disconnect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
         assert!(stale.is_empty());
+        assert!(registry.get("cluster-a").unwrap().connected);
     }
 
     #[test]
-    fn test_detect_stale_agents_stale_heartbeat() {
+    fn test_disconnect_stale_agents_marks_disconnected() {
         let registry = AgentRegistry::new();
         let (conn, _rx) = create_test_connection("cluster-a");
         registry.register(conn);
@@ -1542,12 +1570,15 @@ mod tests {
             agent.last_heartbeat = Some(Instant::now() - Duration::from_secs(100));
         }
 
-        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        let stale = registry.disconnect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
         assert_eq!(stale, vec!["cluster-a"]);
+        // Must actually be disconnected now
+        assert!(!registry.get("cluster-a").unwrap().connected);
+        assert!(registry.get("cluster-a").unwrap().disconnected_at.is_some());
     }
 
     #[test]
-    fn test_detect_stale_agents_disconnected_excluded() {
+    fn test_disconnect_stale_agents_already_disconnected_excluded() {
         let registry = AgentRegistry::new();
         let (conn, _rx) = create_test_connection("cluster-a");
         registry.register(conn);
@@ -1558,19 +1589,19 @@ mod tests {
         }
         registry.unregister("cluster-a", 0);
 
-        // Disconnected agents should NOT appear in stale list
-        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        // Already disconnected agents should NOT be double-disconnected
+        let stale = registry.disconnect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
         assert!(stale.is_empty());
     }
 
     #[test]
-    fn test_detect_stale_agents_no_heartbeat_yet() {
+    fn test_disconnect_stale_agents_no_heartbeat_yet() {
         let registry = AgentRegistry::new();
         let (conn, _rx) = create_test_connection("cluster-a");
         registry.register(conn);
 
-        // No heartbeat received yet (still in handshake)
-        let stale = registry.detect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
+        // No heartbeat received yet (still in handshake) — don't disconnect
+        let stale = registry.disconnect_stale_agents(HEARTBEAT_STALE_THRESHOLD);
         assert!(stale.is_empty());
     }
 

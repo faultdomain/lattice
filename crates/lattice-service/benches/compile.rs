@@ -249,7 +249,7 @@ fn bench_baseline(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("compile_baseline");
 
-    let graph = ServiceGraph::new();
+    let graph = ServiceGraph::new("lattice.test");
     let cedar = PolicyEngine::new();
     let spec = baseline_spec();
     graph.put_service("default", "target", &spec);
@@ -278,7 +278,7 @@ fn bench_mesh(c: &mut Criterion) {
     let mut group = c.benchmark_group("compile_mesh");
 
     for (deps, callers) in [(2, 2), (5, 5), (10, 10), (20, 10)] {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
         let spec = mesh_spec(deps, callers);
         setup_graph(&graph, "default", &spec);
@@ -312,7 +312,7 @@ fn bench_secrets(c: &mut Criterion) {
     let mut group = c.benchmark_group("compile_secrets");
 
     for num_secrets in [1, 3, 5, 10] {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = cedar_permit_all_secrets();
         let spec = secrets_spec(num_secrets, 3);
         graph.put_service("default", "target", &spec);
@@ -341,7 +341,7 @@ fn bench_ingress(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("compile_ingress");
 
-    let graph = ServiceGraph::new();
+    let graph = ServiceGraph::new("lattice.test");
     let cedar = PolicyEngine::new();
     let spec = ingress_spec();
     graph.put_service("default", "target", &spec);
@@ -370,7 +370,7 @@ fn bench_full(c: &mut Criterion) {
     let mut group = c.benchmark_group("compile_full");
 
     for (deps, callers, secrets) in [(5, 5, 3), (10, 10, 5), (20, 10, 10)] {
-        let graph = ServiceGraph::new();
+        let graph = ServiceGraph::new("lattice.test");
         let cedar = cedar_permit_all_secrets();
         let spec = full_spec(deps, callers, secrets);
         setup_graph(&graph, "default", &spec);

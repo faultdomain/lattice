@@ -310,6 +310,16 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 _ => "HTTP",
             };
 
+            let service_ports: std::collections::BTreeMap<String, u16> = ls
+                .spec
+                .workload
+                .service
+                .as_ref()
+                .map(|svc| {
+                    svc.ports.iter().map(|(name, ps)| (name.clone(), ps.port)).collect()
+                })
+                .unwrap_or_default();
+
             for host in &route.hosts {
                 let cr = ClusterRoute {
                     service_name: svc_name.to_string(),
@@ -319,6 +329,7 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                     port,
                     protocol: protocol.to_string(),
                     allowed_services: allowed_services.clone(),
+                    service_ports: service_ports.clone(),
                 };
                 if let Err(reason) = cr.validate() {
                     warn!(

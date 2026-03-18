@@ -326,6 +326,9 @@ pub enum TunnelError {
 
     #[error("failed to build response: {0}")]
     ResponseBuild(String),
+
+    #[error("agent not connected: {0}")]
+    AgentNotConnected(String),
 }
 
 impl TunnelError {
@@ -337,6 +340,7 @@ impl TunnelError {
             TunnelError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             TunnelError::AgentError(_) => StatusCode::BAD_GATEWAY,
             TunnelError::ResponseBuild(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TunnelError::AgentNotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
