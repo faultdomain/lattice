@@ -321,7 +321,9 @@ impl AgentRegistry {
     /// and calls unregister. Without the generation check, it would stomp the
     /// new connection's state. The generation ensures only the task that owns
     /// the current connection can mark it disconnected.
-    pub fn unregister(&self, cluster_name: &str, generation: u64) {
+    /// Returns true if the agent was actually disconnected, false if the
+    /// generation didn't match (stale cleanup from a previous connection).
+    pub fn unregister(&self, cluster_name: &str, generation: u64) -> bool {
         if let Some(mut agent) = self.agents.get_mut(cluster_name) {
             if agent.generation != generation {
                 debug!(
@@ -330,11 +332,13 @@ impl AgentRegistry {
                     cleanup_gen = generation,
                     "Ignoring unregister from stale connection"
                 );
-                return;
+                return false;
             }
             self.disconnect_agent(&mut agent);
             info!(cluster = %cluster_name, "Agent disconnected");
+            return true;
         }
+        false
     }
 
     /// Disconnect an agent: mark as disconnected and drop all pending response

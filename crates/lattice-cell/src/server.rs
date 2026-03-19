@@ -541,11 +541,13 @@ struct MessageContext {
 }
 
 /// Process an agent message
+/// Process an inbound agent message. Returns `false` if the stream should be
+/// closed (e.g. the command channel is dead after a reconnect on a new stream).
 async fn process_agent_message(
     ctx: &MessageContext,
     msg: &AgentMessage,
     peer_config: Option<&PeerRouteConfig>,
-) {
+) -> bool {
     let registry = &ctx.registry;
     let subtree_registry = &ctx.subtree_registry;
     let command_tx = &ctx.command_tx;
@@ -651,6 +653,17 @@ async fn process_agent_message(
                 )
                 .await;
             }
+
+            // If the command channel is dead (receiver dropped because a newer
+            // stream replaced us), this stream is a zombie. Close it so the
+            // agent's outbound half sees EOF and reconnects cleanly.
+            if command_tx.is_closed() {
+                warn!(
+                    cluster = %cluster_name,
+                    "Command channel closed (superseded by newer connection), closing stream"
+                );
+                return false;
+            }
         }
         Some(Payload::ClusterHealth(health)) => {
             // Legacy standalone health message — persist to registry
@@ -676,7 +689,7 @@ async fn process_agent_message(
                     cluster = %cluster_name,
                     "Teardown already in progress, ignoring duplicate ClusterDeleting"
                 );
-                return;
+                return true;
             }
 
             info!(
@@ -837,7 +850,7 @@ async fn process_agent_message(
                     }
                     Err(e) => {
                         error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
-                        return;
+                        return true;
                     }
                 }
             } else {
@@ -857,7 +870,7 @@ async fn process_agent_message(
                     }
                     Err(e) => {
                         error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
-                        return;
+                        return true;
                     }
                 }
             }
@@ -870,7 +883,7 @@ async fn process_agent_message(
                     Ok(g) => g,
                     Err(e) => {
                         error!(cluster = %cluster_name, error = %e, "rejecting oversized route state");
-                        return;
+                        return true;
                     }
                 };
                 // Validate each origin cluster belongs to the sender's subtree.
@@ -988,6 +1001,7 @@ async fn process_agent_message(
             warn!(cluster = %cluster_name, "Received message with no payload");
         }
     }
+    true
 }
 
 impl AgentServer {
@@ -1176,7 +1190,9 @@ impl LatticeAgent for AgentServer {
                         }
 
                         let peer_config = peer_config_lock.read().await.clone();
-                        process_agent_message(&msg_ctx, &msg, peer_config.as_ref()).await;
+                        if !process_agent_message(&msg_ctx, &msg, peer_config.as_ref()).await {
+                            break;
+                        }
                     }
                     Err(e) => {
                         error!(error = %e, "Error receiving agent message");
@@ -1187,12 +1203,15 @@ impl LatticeAgent for AgentServer {
 
             // Cleanup on disconnect — only if this is still the current connection.
             // A stale task from a previous connection must not stomp the new one.
+            // Both unregister and subtree disconnect are guarded by generation to
+            // prevent a zombie stream from marking a live reconnection as disconnected.
             let gen = cleanup_generation.load(std::sync::atomic::Ordering::Relaxed);
-            msg_ctx.registry.unregister(&cert_cluster_id, gen);
-            msg_ctx
-                .subtree_registry
-                .handle_agent_disconnect(&cert_cluster_id)
-                .await;
+            if msg_ctx.registry.unregister(&cert_cluster_id, gen) {
+                msg_ctx
+                    .subtree_registry
+                    .handle_agent_disconnect(&cert_cluster_id)
+                    .await;
+            }
 
             // Routes are intentionally NOT deleted on disconnect. Temporarily
             // disconnected agents will reconnect and re-advertise. Deleting here
