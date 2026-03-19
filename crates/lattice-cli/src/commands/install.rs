@@ -236,7 +236,7 @@ impl Installer {
     /// Path: `~/.lattice/kubeconfig.root`
     pub fn kubeconfig_path(&self) -> PathBuf {
         crate::config::kubeconfig_root_path()
-            .unwrap_or_else(|_| PathBuf::from("/tmp/lattice-kubeconfig-root"))
+            .expect("failed to determine ~/.lattice directory; cannot write kubeconfig")
     }
 
     fn provider(&self) -> ProviderType {
@@ -1002,6 +1002,10 @@ impl Installer {
     /// Find a secret file by name in the config directory.
     /// Checks for `{name}.yaml` then `{name}.yml`.
     async fn find_secret_file(&self, name: &str) -> Result<PathBuf> {
+        // Validate name to prevent path traversal (e.g., "../../etc/passwd")
+        lattice_common::crd::validate_dns_label(name, "credentials secret name")
+            .map_err(Error::validation)?;
+
         for ext in &["yaml", "yml"] {
             let path = self.config_dir.join(format!("{}.{}", name, ext));
             if tokio::fs::metadata(&path).await.is_ok() {

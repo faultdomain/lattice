@@ -140,6 +140,7 @@ impl SecretEvalContext<'_> {
 /// Deny all paths when we can't even build basic Cedar entities
 fn deny_all(request: &SecretAuthzRequest, error: Error) -> SecretAuthzResult {
     tracing::warn!(%error, "Cedar entity construction failed, denying all secret paths");
+    let reason = DenialReason::InternalError(format!("Cedar entity construction: {error}"));
     let denied = request
         .secret_paths
         .iter()
@@ -147,7 +148,7 @@ fn deny_all(request: &SecretAuthzRequest, error: Error) -> SecretAuthzResult {
             resource_name: resource_name.clone(),
             remote_key: remote_key.clone(),
             provider: provider.clone(),
-            reason: DenialReason::NoPermitPolicy,
+            reason: reason.clone(),
         })
         .collect();
     SecretAuthzResult { denied }

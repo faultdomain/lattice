@@ -147,6 +147,7 @@ impl EndpointEvalContext<'_> {
 /// Deny all endpoints when we can't even build basic Cedar entities
 fn deny_all(request: &ExternalEndpointAuthzRequest, error: Error) -> ExternalEndpointAuthzResult {
     tracing::warn!(%error, "Cedar entity construction failed, denying all external endpoints");
+    let reason = DenialReason::InternalError(format!("Cedar entity construction: {error}"));
     let denied = request
         .endpoints
         .iter()
@@ -155,7 +156,7 @@ fn deny_all(request: &ExternalEndpointAuthzRequest, error: Error) -> ExternalEnd
                 resource_name: resource_name.clone(),
                 host: host.clone(),
                 port: *port,
-                reason: DenialReason::NoPermitPolicy,
+                reason: reason.clone(),
             },
         )
         .collect();

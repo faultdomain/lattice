@@ -152,13 +152,14 @@ impl SecurityEvalContext<'_> {
 /// Deny all overrides when we can't even build basic Cedar entities
 fn deny_all(request: &SecurityAuthzRequest, error: Error) -> SecurityAuthzResult {
     tracing::warn!(%error, "Cedar entity construction failed, denying all security overrides");
+    let reason = DenialReason::InternalError(format!("Cedar entity construction: {error}"));
     let denied = request
         .overrides
         .iter()
         .map(|o| SecurityDenial {
             override_id: o.override_id.clone(),
             container: o.container.clone(),
-            reason: DenialReason::NoPermitPolicy,
+            reason: reason.clone(),
         })
         .collect();
     SecurityAuthzResult { denied }
