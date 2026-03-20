@@ -129,7 +129,41 @@ pub async fn start_server(
 
     info!(addr = %config.addr, "Starting auth proxy server");
 
-    axum_server::bind_rustls(config.addr, tls_config)
+    // Bind with TCP keepalive so clients detect dead connections faster
+    // in the SIGKILL/OOM case where graceful shutdown can't run.
+    let listener = std::net::TcpListener::bind(config.addr)
+        .map_err(|e| Error::Internal(format!("Failed to bind: {}", e)))?;
+    let socket = socket2::Socket::from(listener);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(30))
+        .with_interval(std::time::Duration::from_secs(10));
+    socket
+        .set_tcp_keepalive(&keepalive)
+        .map_err(|e| Error::Internal(format!("Failed to set TCP keepalive: {}", e)))?;
+    let listener: std::net::TcpListener = socket.into();
+
+    // Handle for graceful shutdown — on SIGTERM/SIGINT, immediately drop all
+    // connections so clients (istiod, kubectl) get EOF and reconnect to the
+    // new pod instead of hanging on a half-open connection forever.
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+    tokio::spawn(async move {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to listen for SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT, closing all proxy connections");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, closing all proxy connections");
+            }
+        }
+        shutdown_handle.shutdown();
+    });
+
+    axum_server::from_tcp_rustls(listener, tls_config)
+        .handle(handle)
         .serve(app.into_make_service())
         .await
         .map_err(|e| Error::Internal(format!("Server error: {}", e)))?;

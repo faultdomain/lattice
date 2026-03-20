@@ -60,6 +60,9 @@ tower = { workspace = true }
 # Security
 zeroize = { workspace = true }
 
+# Networking
+socket2 = { workspace = true }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 rstest = { workspace = true }

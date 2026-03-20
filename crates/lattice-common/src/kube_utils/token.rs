@@ -20,8 +20,8 @@ pub async fn request_istiod_proxy_token(client: &Client) -> Result<String, kube:
     use k8s_openapi::api::core::v1::ServiceAccount;
     use kube::api::PostParams;
 
-    const SA_NAME: &str = "lattice-istiod-proxy";
-    const SA_NAMESPACE: &str = "istio-system";
+    const SA_NAME: &str = "lattice-operator";
+    const SA_NAMESPACE: &str = "lattice-system";
 
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), SA_NAMESPACE);
     let token_request = TokenRequest {
