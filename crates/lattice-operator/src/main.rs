@@ -320,14 +320,11 @@ async fn run_controller(
         servers.shutdown().await;
     }
     if let Some(handle) = auth_proxy_handle {
-        // Send GOAWAY, wait for all connections to drain, force-close after 10s.
+        // Send GOAWAY to all HTTP/2 connections and wait for drain (up to 10s).
         handle.graceful_shutdown(std::time::Duration::from_secs(10)).await;
     }
     tracing::info!("Shutdown complete");
-    // Force-exit to RST any connections that didn't close during drain.
-    // axum_server's graceful_shutdown drops the accept loop after the timeout
-    // but doesn't RST existing TCP connections.
-    std::process::exit(0);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

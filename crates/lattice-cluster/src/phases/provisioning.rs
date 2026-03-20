@@ -161,7 +161,7 @@ async fn copy_kubeconfig_for_istiod(
     use k8s_openapi::api::core::v1::Secret;
     use kube::api::{Api, Patch, PatchParams};
 
-    let dest_name = format!("istiod-direct-kubeconfig-{}", cluster_name);
+    let dest_name = lattice_common::istiod_kubeconfig_secret_name(cluster_name);
     let dest_api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
 
     // Only copy once — if the destination already exists, the original

@@ -277,7 +277,7 @@ async fn load_peer_proxy_credentials(client: &Client) -> Result<(String, String,
 /// Reads the `istiod-direct-kubeconfig-{cluster}` secret from istio-system,
 /// copied from the CAPI kubeconfig pre-pivot by the cluster controller.
 async fn load_direct_kubeconfig(client: &Client, cluster_name: &str) -> Result<String, Error> {
-    let secret_name = format!("istiod-direct-kubeconfig-{}", cluster_name);
+    let secret_name = lattice_common::istiod_kubeconfig_secret_name(cluster_name);
     let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
 
     let secret = api.get(&secret_name).await.map_err(|e| {

@@ -17,8 +17,8 @@ pub enum Error {
     #[error("authorization failed: {0}")]
     Forbidden(String),
 
-    /// Cluster not found in subtree
-    #[error("cluster not found: {0}")]
+    /// Cluster not available (agent disconnected or not in subtree)
+    #[error("cluster not available: {0}")]
     ClusterNotFound(String),
 
     /// Failed to proxy request
@@ -36,37 +36,25 @@ pub enum Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, client_message) = match &self {
-            Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication failed"),
-            Error::Forbidden(_) => (StatusCode::FORBIDDEN, "authorization failed"),
-            Error::ClusterNotFound(_) => (StatusCode::SERVICE_UNAVAILABLE, "cluster not available"),
-            Error::Proxy(_) => (StatusCode::SERVICE_UNAVAILABLE, "proxy error"),
-            Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-            Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        let (status, message, reason) = match &self {
+            Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication failed", "Unauthorized"),
+            Error::Forbidden(_) => (StatusCode::FORBIDDEN, "authorization failed", "Forbidden"),
+            Error::ClusterNotFound(_) => (StatusCode::SERVICE_UNAVAILABLE, "cluster not available", "ServiceUnavailable"),
+            Error::Proxy(_) => (StatusCode::SERVICE_UNAVAILABLE, "proxy error", "ServiceUnavailable"),
+            Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error", "InternalError"),
+            Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error", "InternalError"),
         };
 
-        // Log the full error detail server-side, return generic message to client
         tracing::warn!(error = %self, status = %status, "API error response");
 
-        let reason = match &self {
-            Error::Unauthorized(_) => "Unauthorized",
-            Error::Forbidden(_) => "Forbidden",
-            Error::ClusterNotFound(_) | Error::Proxy(_) => "ServiceUnavailable",
-            Error::Config(_) | Error::Internal(_) => "InternalError",
-        };
-
-        // Return an exact K8s API server Status response so client-go
-        // handles it the same way it handles a real API server error.
         let body = serde_json::json!({
             "kind": "Status",
             "apiVersion": "v1",
             "metadata": {},
             "status": "Failure",
-            "message": client_message,
+            "message": message,
             "reason": reason,
-            "details": {
-                "retryAfterSeconds": 1
-            },
+            "details": { "retryAfterSeconds": 1 },
             "code": status.as_u16()
         });
 

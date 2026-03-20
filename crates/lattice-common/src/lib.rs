@@ -107,6 +107,13 @@ pub fn kubeconfig_secret_name(cluster_name: &str) -> String {
     format!("{}-kubeconfig", cluster_name)
 }
 
+/// Name of the direct API server kubeconfig secret for istiod multi-cluster
+/// discovery. Stored in `istio-system`, copied pre-pivot before the CAPI
+/// kubeconfig is patched for proxy access.
+pub fn istiod_kubeconfig_secret_name(cluster_name: &str) -> String {
+    format!("istiod-direct-kubeconfig-{}", cluster_name)
+}
+
 /// Construct a Kubernetes service DNS name for a Lattice service.
 ///
 /// Returns `{service}.{LATTICE_SYSTEM_NAMESPACE}.svc`
