@@ -99,7 +99,7 @@ struct SliceHandle {
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     agent_token: Option<tokio_util::sync::CancellationToken>,
     graph_auditor_token: Option<tokio_util::sync::CancellationToken>,
-    auth_proxy_handle: Option<tokio::task::JoinHandle<()>>,
+    auth_proxy_handle: Option<lattice_api::ProxyHandle>,
     infra_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
@@ -255,8 +255,16 @@ async fn run_controller(
 
     // Run controllers until shutdown signal, controllers exit, or leadership lost
     let shutdown_signal = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("Received shutdown signal");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Received SIGINT, shutting down");
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM, shutting down");
+            }
+        }
     };
 
     let controllers = futures::future::select_all(controllers);
@@ -308,11 +316,12 @@ async fn run_controller(
     if let Some(token) = graph_auditor_token {
         token.cancel();
     }
-    if let Some(handle) = auth_proxy_handle {
-        handle.abort();
-    }
     if let Some(servers) = parent_servers {
         servers.shutdown().await;
+    }
+    if let Some(handle) = auth_proxy_handle {
+        // Send GOAWAY, wait for all connections to drain, force-close after 10s.
+        handle.graceful_shutdown(std::time::Duration::from_secs(10)).await;
     }
     tracing::info!("Shutdown complete");
     Ok(())
@@ -694,7 +703,7 @@ async fn setup_cell_infra(
 ) -> anyhow::Result<(
     Arc<ParentServers<DefaultManifestGenerator>>,
     tokio_util::sync::CancellationToken,
-    Option<tokio::task::JoinHandle<()>>,
+    Option<lattice_api::ProxyHandle>,
     Option<lattice_cell::route_reconciler::RouteUpdateSender>,
 )> {
     let is_bootstrap = config.is_bootstrap_cluster;
@@ -807,7 +816,7 @@ async fn activate_cell_services(
     servers: &Arc<ParentServers<DefaultManifestGenerator>>,
     cluster_name: &Option<String>,
     params: CellActivationParams,
-) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+) -> anyhow::Result<Option<lattice_api::ProxyHandle>> {
     let CellActivationParams {
         extra_sans,
         cedar,
@@ -1061,7 +1070,7 @@ async fn start_auth_proxy(
     cedar: Arc<PolicyEngine>,
     oidc_allow_insecure_http: bool,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<lattice_api::ProxyHandle> {
     // Get cluster name (default to "unknown")
     let cluster_name = cluster_name
         .clone()
@@ -1167,14 +1176,12 @@ async fn start_auth_proxy(
     // Start OIDCProvider watcher to reload OIDC config when CRDs change
     start_oidc_provider_watcher(client.clone(), auth_chain.clone(), oidc_allow_insecure_http);
 
-    // Start in background task
-    let handle = tokio::spawn(async move {
-        if let Err(e) = lattice_api::start_server(config, auth_chain, cedar, backend).await {
-            tracing::error!(error = %e, "Auth proxy server error");
-        }
-    });
+    let proxy_handle = lattice_api::start_server(config, auth_chain, cedar, backend)
+        .await
+        .map_err(|e| tracing::error!(error = %e, "Failed to start auth proxy"))
+        .ok();
 
-    Some(handle)
+    proxy_handle
 }
 
 /// Start a background task to watch for OIDCProvider CRD changes and reload the OIDC validator.

@@ -39,8 +39,8 @@ impl IntoResponse for Error {
         let (status, client_message) = match &self {
             Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication failed"),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, "authorization failed"),
-            Error::ClusterNotFound(_) => (StatusCode::NOT_FOUND, "cluster not found"),
-            Error::Proxy(_) => (StatusCode::BAD_GATEWAY, "proxy error"),
+            Error::ClusterNotFound(_) => (StatusCode::SERVICE_UNAVAILABLE, "cluster not available"),
+            Error::Proxy(_) => (StatusCode::SERVICE_UNAVAILABLE, "proxy error"),
             Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
             Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };

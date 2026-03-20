@@ -44,4 +44,4 @@ pub use backend::{
 };
 pub use error::{Error, Result};
 pub use sa_auth::SaValidator;
-pub use server::{start_server, AppState, ServerConfig};
+pub use server::{start_server, AppState, ProxyHandle, ServerConfig};

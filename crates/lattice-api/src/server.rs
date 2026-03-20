@@ -64,13 +64,28 @@ pub struct AppState {
     pub ca_cert_base64: String,
 }
 
-/// Start the auth proxy server
+/// Handle for triggering graceful shutdown of the auth proxy.
+/// Sends HTTP/2 GOAWAY frames so clients reconnect cleanly.
+pub struct ProxyHandle {
+    inner: axum_server::Handle,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ProxyHandle {
+    /// Send GOAWAY and wait for all connections to drain or timeout.
+    pub async fn graceful_shutdown(self, timeout: std::time::Duration) {
+        self.inner.graceful_shutdown(Some(timeout));
+        let _ = self.task.await;
+    }
+}
+
+/// Start the auth proxy server. Returns a handle for graceful shutdown.
 pub async fn start_server(
     config: ServerConfig,
     auth: Arc<AuthChain>,
     cedar: Arc<PolicyEngine>,
     backend: Arc<dyn ProxyBackend>,
-) -> Result<(), Error> {
+) -> Result<ProxyHandle, Error> {
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     // Base64 encode CA cert for kubeconfig
@@ -142,31 +157,18 @@ pub async fn start_server(
         .map_err(|e| Error::Internal(format!("Failed to set TCP keepalive: {}", e)))?;
     let listener: std::net::TcpListener = socket.into();
 
-    // Handle for graceful shutdown — on SIGTERM/SIGINT, immediately drop all
-    // connections so clients (istiod, kubectl) get EOF and reconnect to the
-    // new pod instead of hanging on a half-open connection forever.
     let handle = axum_server::Handle::new();
-    let shutdown_handle = handle.clone();
-    tokio::spawn(async move {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to listen for SIGTERM");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("Received SIGINT, closing all proxy connections");
-            }
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM, closing all proxy connections");
-            }
+    let server_handle = handle.clone();
+
+    let task = tokio::spawn(async move {
+        if let Err(e) = axum_server::from_tcp_rustls(listener, tls_config)
+            .handle(server_handle)
+            .serve(app.into_make_service())
+            .await
+        {
+            tracing::error!(error = %e, "Auth proxy server error");
         }
-        shutdown_handle.shutdown();
     });
 
-    axum_server::from_tcp_rustls(listener, tls_config)
-        .handle(handle)
-        .serve(app.into_make_service())
-        .await
-        .map_err(|e| Error::Internal(format!("Server error: {}", e)))?;
-
-    Ok(())
+    Ok(ProxyHandle { inner: handle, task })
 }
