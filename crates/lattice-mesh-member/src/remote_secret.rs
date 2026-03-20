@@ -1,9 +1,8 @@
 //! Remote secret reconciler for Istio multi-cluster discovery.
 //!
-//! Creates Istio remote secrets that tell istiod to discover services on remote
-//! clusters via the K8s API proxy. Each `LatticeClusterRoutes` CRD (one per
-//! source cluster) gets a corresponding `istio-remote-secret-{cluster}` Secret
-//! in `istio-system`.
+//! Creates Istio remote secrets so istiod can discover services on remote
+//! clusters. Local child clusters use a direct API server kubeconfig (copied
+//! pre-pivot). Peer clusters (from parent) use the parent's auth proxy.
 //!
 //! Also creates headless Service stubs on the local cluster for each advertised
 //! route so CoreDNS can resolve the remote service's DNS name. Istiod matches
@@ -11,10 +10,6 @@
 //!
 //! Updates the `meshNetworks` field in the `istio` ConfigMap so istiod knows
 //! how to reach endpoints on each remote network via the east-west gateway.
-//!
-//! Tokens are requested per-reconcile via the TokenRequest API against the
-//! read-only `lattice-istiod-proxy` ServiceAccount. Tokens expire after 24
-//! hours; reconcile requeues every hour to keep them fresh.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -118,9 +113,8 @@ pub async fn reconcile(
         "ensured remote secret, mesh network, and service stubs"
     );
 
-    // Requeue to refresh the proxy token and recreate any deleted service stubs.
-    // Token lifetime is 24h; reconciling every hour keeps it fresh while
-    // tolerating extended disconnects (up to ~23h before token expires).
+    // Requeue periodically to recreate any deleted service stubs and
+    // refresh peer proxy tokens (24h lifetime).
     Ok(Action::requeue(Duration::from_secs(3600)))
 }
 
