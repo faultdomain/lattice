@@ -549,7 +549,11 @@ impl<'a> WorkloadCompiler<'a> {
                     return params
                         .parsed_endpoints()
                         .into_values()
-                        .map(|ep| EgressRule::tcp(EgressTarget::Fqdn(ep.host), vec![ep.port]))
+                        .map(|ep| EgressRule {
+                            target: EgressTarget::for_host(&ep.host),
+                            ports: vec![ep.port],
+                            protocol: ep.network_protocol(),
+                        })
                         .collect();
                 }
                 vec![]
