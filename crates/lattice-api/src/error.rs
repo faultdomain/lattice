@@ -48,12 +48,25 @@ impl IntoResponse for Error {
         // Log the full error detail server-side, return generic message to client
         tracing::warn!(error = %self, status = %status, "API error response");
 
-        // Return K8s-style Status response
+        let reason = match &self {
+            Error::Unauthorized(_) => "Unauthorized",
+            Error::Forbidden(_) => "Forbidden",
+            Error::ClusterNotFound(_) | Error::Proxy(_) => "ServiceUnavailable",
+            Error::Config(_) | Error::Internal(_) => "InternalError",
+        };
+
+        // Return an exact K8s API server Status response so client-go
+        // handles it the same way it handles a real API server error.
         let body = serde_json::json!({
             "kind": "Status",
             "apiVersion": "v1",
+            "metadata": {},
             "status": "Failure",
             "message": client_message,
+            "reason": reason,
+            "details": {
+                "retryAfterSeconds": 1
+            },
             "code": status.as_u16()
         });
 

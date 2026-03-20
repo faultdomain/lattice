@@ -324,7 +324,10 @@ async fn run_controller(
         handle.graceful_shutdown(std::time::Duration::from_secs(10)).await;
     }
     tracing::info!("Shutdown complete");
-    Ok(())
+    // Force-exit to RST any connections that didn't close during drain.
+    // axum_server's graceful_shutdown drops the accept loop after the timeout
+    // but doesn't RST existing TCP connections.
+    std::process::exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +937,9 @@ async fn cell_activation_watcher(
         let extra_sans = vec![lb_address];
         let cluster_name = Some(self_cluster_name.clone());
 
-        if let Err(e) = activate_cell_services(
+        // Store the proxy handle so it lives as long as this task —
+        // dropping it would shut down the proxy immediately.
+        let _proxy_handle = match activate_cell_services(
             &client,
             &servers,
             &cluster_name,
@@ -948,10 +953,13 @@ async fn cell_activation_watcher(
         )
         .await
         {
-            tracing::error!(error = %e, "Failed to activate cell services during promotion");
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            continue;
-        }
+            Ok(handle) => handle,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to activate cell services during promotion");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                continue;
+            }
+        };
 
         tracing::info!("Cell infrastructure activated (cluster promoted to parent)");
         return;
@@ -1135,8 +1143,7 @@ async fn start_auth_proxy(
     let base_host = extra_sans.first().map(|s| s.as_str()).unwrap_or(&cell_dns);
     let base_url = format!("https://{}:{}", base_host, DEFAULT_AUTH_PROXY_PORT);
 
-    // Clone values needed for remote secret controller and peer route sync
-    let proxy_base_url = format!("https://{}:{}", cell_dns, DEFAULT_AUTH_PROXY_PORT);
+    // Clone values needed for peer route sync
     let proxy_ca_cert = ca_cert_pem.clone();
     let peer_proxy_url = base_url.clone();
 
@@ -1158,12 +1165,8 @@ async fn start_auth_proxy(
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
 
     // Start remote secret controller for Istio multi-cluster discovery.
-    // Tokens are requested per-reconcile via TokenRequest API.
-    controller_runner::spawn_remote_secret_controller(
-        client.clone(),
-        proxy_base_url,
-        proxy_ca_cert.clone(),
-    );
+    // Uses direct API server kubeconfig for local child clusters.
+    controller_runner::spawn_remote_secret_controller(client.clone());
 
     // Enable peer route sync: the gRPC server will push sibling/parent routes
     // to connected children using the external auth proxy URL.

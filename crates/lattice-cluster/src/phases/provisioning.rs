@@ -33,6 +33,14 @@ pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Res
     let name = cluster.name_any();
     let capi_namespace = capi_namespace(&name);
 
+    // Copy the CAPI kubeconfig BEFORE patching it for proxy access.
+    // Istiod needs the original direct API server kubeconfig for multi-cluster
+    // discovery. After patch_kubeconfig_for_proxy_access rewrites the server
+    // URL, the original is lost.
+    if let Some(ref client) = ctx.client {
+        let _ = copy_kubeconfig_for_istiod(client, &name, &capi_namespace).await;
+    }
+
     // Patch kubeconfig to use proxy as soon as the secret exists.
     // CAPI needs this to reach the child cluster through the gRPC tunnel
     // when clusters are on separate networks.
@@ -141,3 +149,81 @@ fn build_proxy_url(cluster: &LatticeCluster) -> String {
     )
 }
 
+/// Copy the CAPI kubeconfig to istio-system for direct istiod access.
+///
+/// Istiod uses this kubeconfig for multi-cluster endpoint discovery via the
+/// direct API server connection (not the auth proxy).
+async fn copy_kubeconfig_for_istiod(
+    client: &kube::Client,
+    cluster_name: &str,
+    capi_namespace: &str,
+) -> Result<(), lattice_common::Error> {
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::api::{Api, Patch, PatchParams};
+
+    let dest_name = format!("istiod-direct-kubeconfig-{}", cluster_name);
+    let dest_api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
+
+    // Only copy once — if the destination already exists, the original
+    // kubeconfig has already been captured before the proxy patch.
+    if dest_api
+        .get_opt(&dest_name)
+        .await
+        .map_err(|e| {
+            lattice_common::Error::internal(format!("failed to check istiod kubeconfig: {e}"))
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let secret_name = lattice_common::kubeconfig_secret_name(cluster_name);
+    let src_api: Api<Secret> = Api::namespaced(client.clone(), capi_namespace);
+
+    let src_secret = src_api.get(&secret_name).await.map_err(|e| {
+        lattice_common::Error::internal(format!(
+            "failed to read CAPI kubeconfig secret {}/{}: {}",
+            capi_namespace, secret_name, e
+        ))
+    })?;
+
+    let kubeconfig_data = src_secret
+        .data
+        .as_ref()
+        .and_then(|d| d.get("value"))
+        .ok_or_else(|| {
+            lattice_common::Error::internal(
+                "CAPI kubeconfig secret missing 'value' key".to_string(),
+            )
+        })?;
+
+    let dest_secret = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": dest_name,
+            "namespace": "istio-system",
+            "labels": {
+                "app.kubernetes.io/managed-by": "lattice",
+                "lattice.dev/cluster": cluster_name
+            }
+        },
+        "data": {
+            "kubeconfig": kubeconfig_data
+        }
+    });
+
+    let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
+    let params = PatchParams::apply("lattice-cluster-controller").force();
+    api.patch(&dest_name, &params, &Patch::Apply(&dest_secret))
+        .await
+        .map_err(|e| {
+            lattice_common::Error::internal(format!(
+                "failed to create istiod kubeconfig secret: {}",
+                e
+            ))
+        })?;
+
+    info!(cluster = %cluster_name, secret = %dest_name, "copied CAPI kubeconfig to istio-system for istiod");
+    Ok(())
+}
