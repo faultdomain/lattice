@@ -79,6 +79,13 @@ spec:
       action == Lattice::Action::"AccessSecret",
       resource == Lattice::SecretPath::"lattice-local:vpn-credentials"
     );
+
+    // external endpoint access for VPN gateway
+    permit(
+      principal == Lattice::Service::"media/nzbget",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"79.127.187.156:51820"
+    );
 ---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
@@ -136,6 +143,12 @@ spec:
           provider: lattice-local
           refreshInterval: 1h
           keys: [private_key, public_key, endpoint, address]
+      vpn-gateway:
+        type: external-service
+        direction: outbound
+        params:
+          endpoints:
+            wireguard: udp://79.127.187.156:51820
       sonarr:
         type: service
         direction: inbound
@@ -152,15 +165,27 @@ spec:
             [Interface]
             PrivateKey = ${secret.vpn-credentials.private_key}
             Address = ${secret.vpn-credentials.address}
-            DNS = 1.1.1.1
 
+            PostUp = GATEWAY=$(ip route | awk '/default/{print $3}'); EP_IP=$(echo ${secret.vpn-credentials.endpoint} | cut -d: -f1); ip route add $EP_IP via $GATEWAY
+            PostUp = DNS_IP=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); ip route add $DNS_IP via $GATEWAY || true
             PostUp = iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
+            PostUp = iptables -I OUTPUT -o eth0 -p udp --dport 51820 -j ACCEPT
+            PostUp = iptables -I OUTPUT -o eth0 -d 10.0.0.0/8 -j ACCEPT
+            PostUp = iptables -I OUTPUT -o eth0 -d 192.168.0.0/16 -j ACCEPT
+            PostUp = iptables -A OUTPUT -o eth0 -j REJECT
+            PostDown = EP_IP=$(echo ${secret.vpn-credentials.endpoint} | cut -d: -f1); GATEWAY=$(ip route | awk '/default/{print $3}'); ip route del $EP_IP via $GATEWAY || true
+            PostDown = DNS_IP=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); ip route del $DNS_IP via $GATEWAY || true
             PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE
+            PostDown = iptables -D OUTPUT -o eth0 -p udp --dport 51820 -j ACCEPT
+            PostDown = iptables -D OUTPUT -o eth0 -d 10.0.0.0/8 -j ACCEPT
+            PostDown = iptables -D OUTPUT -o eth0 -d 192.168.0.0/16 -j ACCEPT
+            PostDown = iptables -D OUTPUT -o eth0 -j REJECT
 
             [Peer]
             PublicKey = ${secret.vpn-credentials.public_key}
             Endpoint = ${secret.vpn-credentials.endpoint}
-            AllowedIPs = 0.0.0.0/0
+            AllowedIPs = 0.0.0.0/1, 128.0.0.0/1
+            PersistentKeepalive = 25
       security:
         runAsUser: 0
         readOnlyRootFilesystem: false
