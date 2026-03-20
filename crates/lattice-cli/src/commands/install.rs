@@ -1342,11 +1342,10 @@ impl Installer {
     }
 }
 
-/// Get LatticeCluster phase using dynamic API
+/// Get LatticeCluster phase using dynamic API.
 ///
 /// Returns the phase string, or "Unknown" for transient network errors.
-
-/// The caller should continue polling on "Unknown" - only "Failed" phase
+/// The caller should continue polling on "Unknown" — only "Failed" phase
 /// indicates a terminal failure.
 async fn get_latticecluster_phase(client: &Client, name: &str) -> String {
     use kube::api::{Api, DynamicObject};
