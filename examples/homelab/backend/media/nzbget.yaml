@@ -167,14 +167,18 @@ spec:
             Address = ${secret.vpn-credentials.address}
 
             PostUp = GATEWAY=$(ip route | awk '/default/{print $3}'); EP_IP=$(echo ${secret.vpn-credentials.endpoint} | cut -d: -f1); ip route add $EP_IP via $GATEWAY
-            PostUp = DNS_IP=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); ip route add $DNS_IP via $GATEWAY || true
+            PostUp = GATEWAY=$(ip route | awk '/default/{print $3}'); ip route add 10.0.0.0/8 via $GATEWAY || true
+            PostUp = GATEWAY=$(ip route | awk '/default/{print $3}'); ip route add 192.168.0.0/16 via $GATEWAY || true
+            PostUp = iptables -t nat -I ISTIO_OUTPUT 1 -p udp --dport 53 -j RETURN
             PostUp = iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
             PostUp = iptables -I OUTPUT -o eth0 -p udp --dport 51820 -j ACCEPT
             PostUp = iptables -I OUTPUT -o eth0 -d 10.0.0.0/8 -j ACCEPT
             PostUp = iptables -I OUTPUT -o eth0 -d 192.168.0.0/16 -j ACCEPT
             PostUp = iptables -A OUTPUT -o eth0 -j REJECT
             PostDown = EP_IP=$(echo ${secret.vpn-credentials.endpoint} | cut -d: -f1); GATEWAY=$(ip route | awk '/default/{print $3}'); ip route del $EP_IP via $GATEWAY || true
-            PostDown = DNS_IP=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); ip route del $DNS_IP via $GATEWAY || true
+            PostDown = GATEWAY=$(ip route | awk '/default/{print $3}'); ip route del 10.0.0.0/8 via $GATEWAY || true
+            PostDown = GATEWAY=$(ip route | awk '/default/{print $3}'); ip route del 192.168.0.0/16 via $GATEWAY || true
+            PostDown = iptables -t nat -D ISTIO_OUTPUT -p udp --dport 53 -j RETURN || true
             PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE
             PostDown = iptables -D OUTPUT -o eth0 -p udp --dport 51820 -j ACCEPT
             PostDown = iptables -D OUTPUT -o eth0 -d 10.0.0.0/8 -j ACCEPT
@@ -210,4 +214,4 @@ spec:
           allowedServices: ["*"]
         tls:
           issuerRef:
-            name: e2e-selfsigned
+            name: homelab-selfsigned

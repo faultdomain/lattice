@@ -19,12 +19,14 @@ use crate::pipeline::secrets::SecretRef;
 /// Compute a config hash from ConfigMap and Secret data.
 ///
 /// This hash is added as a pod annotation to trigger rollouts when config changes.
-/// Uses SHA-256 for FIPS compliance.
+/// Uses SHA-256 for FIPS compliance. The `eso_content_hash` captures the current
+/// content of ESO-managed K8s Secrets so that rotated secrets trigger rollouts.
 pub(crate) fn compute_config_hash(
     env_config_maps: &[ConfigMap],
     env_secrets: &[Secret],
     files_config_maps: &[ConfigMap],
     files_secrets: &[Secret],
+    eso_content_hash: &str,
 ) -> String {
     let mut data = String::new();
 
@@ -64,6 +66,12 @@ pub(crate) fn compute_config_hash(
             data.push_str(v);
             data.push('\n');
         }
+    }
+
+    if !eso_content_hash.is_empty() {
+        data.push_str("eso:");
+        data.push_str(eso_content_hash);
+        data.push('\n');
     }
 
     let hash = digest(&SHA256, data.as_bytes());

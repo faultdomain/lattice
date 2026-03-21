@@ -111,6 +111,7 @@ mod pivot_standalone_e2e;
 mod proxy_e2e;
 mod route_discovery_e2e;
 mod scaling_e2e;
+mod secret_rollout_e2e;
 mod secrets_e2e;
 mod topology_e2e;
 mod vault_secrets_e2e;

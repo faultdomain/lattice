@@ -21,27 +21,29 @@ spec:
         sourceNode: "poweredge-lg"
         templateId: 9000
         # kube-vip VIP for K8s API server
-        controlPlaneEndpoint: "10.0.0.100"
+        # IP ranges are offset from homelab (10.0.0.100-105, .200/28) so both
+        # can run on the same Proxmox host simultaneously.
+        controlPlaneEndpoint: "10.0.0.150"
         bridge: "vmbr0"
         # Node IPs assigned by CAPMOX (extra headroom for failed test cleanup)
         ipv4Pool:
-          range: "10.0.0.101-105/24"
+          range: "10.0.0.151-155/24"
           gateway: "10.0.0.1"
         dnsServers:
           - "10.0.0.1"
         virtualIpNetworkInterface: "ens18"
-        lbCidr: "10.0.0.200/28"
+        lbCidr: "10.0.0.240/28"
         # Additional NICs for direct L2 reachability to workload cluster networks.
         # Istio east-west gateway needs direct connectivity (no NAT) for mTLS.
         # Each network needs its own IP pool (CAPMOX requirement).
         additionalNetworks:
           - bridge: "vmbr1"
             ipv4Pool:
-              range: "10.0.1.201-210/24"
+              range: "10.0.1.241-250/24"
               gateway: "10.0.1.1"
           - bridge: "vmbr2"
             ipv4Pool:
-              range: "10.0.2.201-210/24"
+              range: "10.0.2.241-250/24"
               gateway: "10.0.2.1"
   registryMirrors:
     - upstream: docker.io

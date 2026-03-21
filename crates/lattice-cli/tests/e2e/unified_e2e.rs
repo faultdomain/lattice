@@ -194,6 +194,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Secret rollout tests (ESO secret rotation triggers pod rollout)
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Secret rollout",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::secret_rollout::run_secret_rollout_tests(&kc).await
+            }),
+        ));
+    }
+
     // Tetragon runtime enforcement
     {
         let kc = ctx.require_workload()?.to_string();

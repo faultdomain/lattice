@@ -50,6 +50,7 @@ pub mod pivot;
 pub mod proxy;
 pub mod route_discovery;
 pub mod scaling;
+pub mod secret_rollout;
 pub mod secrets;
 pub mod setup;
 pub mod tetragon;

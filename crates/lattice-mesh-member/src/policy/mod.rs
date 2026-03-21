@@ -189,7 +189,13 @@ impl<'a> PolicyCompiler<'a> {
 
             output
                 .service_entries
-                .push(self.compile_egress_service_entry(namespace, host, &rule.ports, is_ip));
+                .push(self.compile_egress_service_entry(
+                    namespace,
+                    host,
+                    &rule.ports,
+                    is_ip,
+                    &rule.protocol,
+                ));
             output
                 .authorization_policies
                 .push(self.compile_fqdn_egress_access_policy(
@@ -997,6 +1003,56 @@ pub(crate) mod tests {
         assert!(
             waypoint_policy.is_some(),
             "should have waypoint allow policy for FQDN egress"
+        );
+    }
+
+    #[test]
+    fn udp_egress_generates_service_entry_with_udp_protocol() {
+        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
+
+        let graph = ServiceGraph::new("lattice.test");
+        let ns = "media";
+
+        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                "nzbget".to_string(),
+            )])),
+            ports: vec![MeshMemberPort {
+                port: 6789,
+                service_port: None,
+                name: "http".to_string(),
+                peer_auth: lattice_common::crd::PeerAuth::Strict,
+            }],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![EgressRule::udp(
+                EgressTarget::Cidr("198.51.100.1/32".to_string()),
+                vec![51820],
+            )],
+            allow_peer_traffic: false,
+            ingress: None,
+            service_account: None,
+            depends_all: false,
+            ambient: true,
+        };
+        graph.put_mesh_member(ns, "nzbget", &spec);
+
+        let compiler = PolicyCompiler::new(&graph, vec![]);
+        let output = compiler.compile("nzbget", ns);
+
+        assert_eq!(output.service_entries.len(), 1);
+        let entry = &output.service_entries[0];
+        assert_eq!(entry.spec.ports.len(), 1);
+        assert_eq!(entry.spec.ports[0].number, 51820);
+        assert_eq!(
+            entry.spec.ports[0].protocol, "UDP",
+            "WireGuard port should use UDP protocol, not TCP"
+        );
+        assert_eq!(entry.spec.ports[0].name, "udp-51820");
+        assert_eq!(
+            entry.spec.resolution, "STATIC",
+            "IP target should use STATIC resolution"
         );
     }
 

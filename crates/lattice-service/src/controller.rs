@@ -112,6 +112,18 @@ pub trait ServiceKubeClient: Send + Sync {
         namespace: &str,
     ) -> Result<(), Error>;
 
+    /// Hash the `.data` field of all K8s Secrets owned by a service.
+    ///
+    /// Lists Secrets labeled `lattice.dev/service={service_name}` in the given namespace,
+    /// sorts keys deterministically, and returns a content hash. Same secret values produce
+    /// the same hash (content-addressable), so identical re-syncs by ESO don't trigger
+    /// spurious rollouts.
+    async fn hash_owned_secrets(
+        &self,
+        service_name: &str,
+        namespace: &str,
+    ) -> Result<String, Error>;
+
     /// Delete resources that were previously applied but are no longer in the compiled output.
     ///
     /// When a spec change causes compilation to produce fewer resources (e.g., removing
@@ -400,6 +412,55 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
                 .unwrap_or(false)),
             None => Ok(false),
         }
+    }
+
+    async fn hash_owned_secrets(
+        &self,
+        service_name: &str,
+        namespace: &str,
+    ) -> Result<String, Error> {
+        use k8s_openapi::api::core::v1::Secret as K8sSecret;
+
+        let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
+        let label_selector = format!("{}={}", lattice_common::LABEL_SERVICE_OWNER, service_name);
+        let lp = kube::api::ListParams::default().labels(&label_selector);
+
+        let list = api.list(&lp).await.map_err(|e| {
+            Error::internal_with_context(
+                "hash_owned_secrets",
+                format!("list Secrets for {}: {}", service_name, e),
+            )
+        })?;
+
+        if list.items.is_empty() {
+            return Ok(String::new());
+        }
+
+        // Sort secrets by name for deterministic ordering
+        let mut secrets: Vec<_> = list.items.iter().collect();
+        secrets.sort_by_key(|s| s.metadata.name.as_deref().unwrap_or(""));
+
+        let mut data = String::new();
+        for secret in secrets {
+            let secret_name = secret.metadata.name.as_deref().unwrap_or("");
+            if let Some(ref secret_data) = secret.data {
+                let mut keys: Vec<_> = secret_data.keys().collect();
+                keys.sort();
+                for key in keys {
+                    if let Some(value) = secret_data.get(key) {
+                        use std::fmt::Write;
+                        let _ = write!(data, "{}/{}=", secret_name, key);
+                        // Append raw bytes as hex — stable, no encoding dependency
+                        for byte in &value.0 {
+                            let _ = write!(data, "{:02x}", byte);
+                        }
+                        data.push('\n');
+                    }
+                }
+            }
+        }
+
+        Ok(lattice_common::kube_utils::deterministic_hash(&data))
     }
 
     async fn cleanup_orphaned_resources(
@@ -761,8 +822,17 @@ pub async fn reconcile(
     // All other phases share the same compile path with an inputs-hash guard.
     let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
     let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-    let inputs_hash =
+    let base_inputs_hash =
         lattice_common::graph::compute_edge_hash(&active_in, &active_out, ctx.cedar.reload_epoch());
+
+    // Hash ESO-managed secret content so rotated secrets trigger rollouts.
+    // Same content = same hash = no spurious rollout (content-addressable).
+    let eso_hash = ctx
+        .kube
+        .hash_owned_secrets(&name, namespace)
+        .await
+        .unwrap_or_default();
+    let inputs_hash = format!("{}:eso:{}", base_inputs_hash, eso_hash);
 
     // Skip reconcile when spec and external inputs are unchanged (Ready only).
     // Compiling and Failed services always re-enter the compile path.
@@ -786,7 +856,7 @@ pub async fn reconcile(
         );
     }
 
-    compile_and_apply(&service, &name, namespace, &ctx, &inputs_hash).await
+    compile_and_apply(&service, &name, namespace, &ctx, &inputs_hash, &eso_hash).await
 }
 
 /// Check which dependencies are missing from the graph
@@ -830,6 +900,7 @@ async fn compile_and_apply(
     namespace: &str,
     ctx: &ServiceContext,
     inputs_hash: &str,
+    eso_content_hash: &str,
 ) -> Result<Action, Error> {
     let compiler = ServiceCompiler::new(
         &ctx.graph,
@@ -838,7 +909,8 @@ async fn compile_and_apply(
         &ctx.cedar,
         ctx.monitoring.clone(),
     )
-    .with_phases(&ctx.extension_phases);
+    .with_phases(&ctx.extension_phases)
+    .with_eso_content_hash(eso_content_hash.to_string());
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
@@ -1283,6 +1355,8 @@ mod tests {
             .returning(|_, _| Ok(true));
         mock.expect_delete_revoked_external_secrets()
             .returning(|_, _| Ok(()));
+        mock.expect_hash_owned_secrets()
+            .returning(|_, _| Ok(String::new()));
         mock
     }
 
@@ -1583,16 +1657,15 @@ mod tests {
         assert!(!is_reconcile_current(&svc, "hash-NEW"));
     }
 
-    /// Failed services with matching inputs are skipped — recompiling with
-    /// the same spec and graph state produces the same error. The 30-second
-    /// requeue timer handles retries for transient failures without needing
-    /// to re-enter the compile path on every watch event.
+    /// Failed services always retry — the failure may be transient (webhook
+    /// down, API server blip) and the next attempt might succeed even with
+    /// identical inputs.
     #[test]
-    fn reconcile_guard_skips_failed_with_matching_inputs() {
+    fn reconcile_guard_retries_failed_even_with_matching_inputs() {
         let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
         assert!(
-            is_reconcile_current(&svc, "hash-abc"),
-            "Failed service with unchanged inputs should be skipped"
+            !is_reconcile_current(&svc, "hash-abc"),
+            "Failed service should always retry, even with unchanged inputs"
         );
     }
 

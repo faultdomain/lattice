@@ -54,6 +54,7 @@ pub struct WorkloadCompiler<'a> {
     ingress: Option<IngressSpec>,
     owner_references: Vec<OwnerReference>,
     has_topology: bool,
+    eso_content_hash: String,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -84,6 +85,7 @@ impl<'a> WorkloadCompiler<'a> {
             ingress: None,
             owner_references: Vec::new(),
             has_topology: false,
+            eso_content_hash: String::new(),
         }
     }
 
@@ -136,6 +138,12 @@ impl<'a> WorkloadCompiler<'a> {
     /// handled at the CRD-specific level (VCJob, ModelServing, Service PodGroup).
     pub fn with_topology(mut self) -> Self {
         self.has_topology = true;
+        self
+    }
+
+    /// Set the ESO content hash for triggering rollouts on secret rotation.
+    pub fn with_eso_content_hash(mut self, hash: String) -> Self {
+        self.eso_content_hash = hash;
         self
     }
 
@@ -472,6 +480,7 @@ impl<'a> WorkloadCompiler<'a> {
             &config.env_secrets,
             &config.files_config_maps,
             &config.files_secrets,
+            &self.eso_content_hash,
         );
 
         // Build LatticeMeshMember CR for mesh policy delegation.

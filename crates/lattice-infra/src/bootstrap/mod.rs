@@ -956,9 +956,7 @@ pub fn generate_cluster_access_cedar_policy() -> CedarPolicy {
     let mut policy = CedarPolicy::new(
         "proxy-cluster-access",
         CedarPolicySpec {
-            description: Some(
-                "Cluster access for lattice-operator peer route proxy".to_string(),
-            ),
+            description: Some("Cluster access for lattice-operator peer route proxy".to_string()),
             policies: r#"permit(
     principal == Lattice::User::"system:serviceaccount:lattice-system:lattice-operator",
     action == Lattice::Action::"AccessCluster",

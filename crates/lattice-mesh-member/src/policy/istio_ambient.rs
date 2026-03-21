@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 
 use lattice_common::crd::derived_name;
+use lattice_common::crd::NetworkProtocol;
 use lattice_common::graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
@@ -195,14 +196,18 @@ impl<'a> PolicyCompiler<'a> {
         host: &str,
         ports: &[u16],
         is_ip: bool,
+        network_protocol: &NetworkProtocol,
     ) -> ServiceEntry {
         let se_ports: Vec<ServiceEntryPort> = ports
             .iter()
             .map(|&p| {
-                let protocol = match p {
-                    443 => "HTTPS",
-                    80 => "HTTP",
-                    _ => "TCP",
+                let protocol = match network_protocol {
+                    NetworkProtocol::Udp => "UDP",
+                    NetworkProtocol::Tcp | _ => match p {
+                        443 => "HTTPS",
+                        80 => "HTTP",
+                        _ => "TCP",
+                    },
                 };
                 ServiceEntryPort {
                     number: p,
@@ -215,21 +220,26 @@ impl<'a> PolicyCompiler<'a> {
         let metadata = ObjectMeta::new(derived_name("se-auto-", &[namespace, host]), namespace)
             .with_label(mesh::USE_WAYPOINT_LABEL, mesh::waypoint_name(namespace));
 
-        let (resolution, endpoints) = if is_ip {
+        // Istio rejects bare IPs in the hosts field. For IP targets, use
+        // resolution: STATIC with the IP in endpoints and a synthetic hostname
+        // in hosts (dashes instead of dots so it's a valid DNS name).
+        let (se_host, resolution, endpoints) = if is_ip {
+            let synthetic = format!("ip-{}.svc.external", host.replace('.', "-"));
             (
+                synthetic,
                 "STATIC".to_string(),
                 vec![ServiceEntryEndpoint {
                     address: host.to_string(),
                 }],
             )
         } else {
-            ("DNS".to_string(), vec![])
+            (host.to_string(), "DNS".to_string(), vec![])
         };
 
         ServiceEntry::new(
             metadata,
             ServiceEntrySpec {
-                hosts: vec![host.to_string()],
+                hosts: vec![se_host],
                 endpoints,
                 ports: se_ports,
                 location: "MESH_EXTERNAL".to_string(),

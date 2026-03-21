@@ -37,12 +37,32 @@ pub enum Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message, reason) = match &self {
-            Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication failed", "Unauthorized"),
+            Error::Unauthorized(_) => (
+                StatusCode::UNAUTHORIZED,
+                "authentication failed",
+                "Unauthorized",
+            ),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, "authorization failed", "Forbidden"),
-            Error::ClusterNotFound(_) => (StatusCode::SERVICE_UNAVAILABLE, "cluster not available", "ServiceUnavailable"),
-            Error::Proxy(_) => (StatusCode::SERVICE_UNAVAILABLE, "proxy error", "ServiceUnavailable"),
-            Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error", "InternalError"),
-            Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error", "InternalError"),
+            Error::ClusterNotFound(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cluster not available",
+                "ServiceUnavailable",
+            ),
+            Error::Proxy(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "proxy error",
+                "ServiceUnavailable",
+            ),
+            Error::Config(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+                "InternalError",
+            ),
+            Error::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+                "InternalError",
+            ),
         };
 
         tracing::warn!(error = %self, status = %status, "API error response");

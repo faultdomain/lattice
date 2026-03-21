@@ -139,6 +139,7 @@ pub struct ServiceCompiler<'a> {
     cedar: &'a PolicyEngine,
     monitoring: MonitoringConfig,
     extension_phases: &'a [Arc<dyn CompilerPhase>],
+    eso_content_hash: String,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -164,6 +165,7 @@ impl<'a> ServiceCompiler<'a> {
             cedar,
             monitoring,
             extension_phases: &[],
+            eso_content_hash: String::new(),
         }
     }
 
@@ -173,6 +175,12 @@ impl<'a> ServiceCompiler<'a> {
     /// `DynamicResource` entries to `compiled.extensions`.
     pub fn with_phases(mut self, phases: &'a [Arc<dyn CompilerPhase>]) -> Self {
         self.extension_phases = phases;
+        self
+    }
+
+    /// Set the ESO content hash for triggering rollouts on secret rotation.
+    pub fn with_eso_content_hash(mut self, hash: String) -> Self {
+        self.eso_content_hash = hash;
         self
     }
 
@@ -224,7 +232,8 @@ impl<'a> ServiceCompiler<'a> {
         })
         .with_annotations(&service.metadata.annotations.clone().unwrap_or_default())
         .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)
-        .with_ingress(service.spec.ingress.clone());
+        .with_ingress(service.spec.ingress.clone())
+        .with_eso_content_hash(self.eso_content_hash.clone());
 
         if service.spec.topology.is_some() {
             compiler = compiler.with_topology();

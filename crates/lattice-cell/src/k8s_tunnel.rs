@@ -99,7 +99,7 @@ async fn send_request(
 
     let (response_tx, response_rx) = mpsc::channel::<KubernetesResponse>(RESPONSE_CHANNEL_SIZE);
     registry
-        .register_pending_k8s_response(&request_id, response_tx)
+        .register_pending_k8s_response(cluster_name, &request_id, response_tx)
         .await;
 
     let command = CellCommand {
@@ -125,7 +125,9 @@ async fn send_request(
                 request_id = %request_id,
                 "Command channel full (agent not reading), treating as disconnected"
             );
-            registry.take_pending_k8s_response(&request_id).await;
+            registry
+                .take_pending_k8s_response(cluster_name, &request_id)
+                .await;
             return Err(TunnelError::AgentNotConnected(format!(
                 "{cluster_name}: command channel full"
             )));
@@ -141,7 +143,9 @@ async fn send_request(
             request_id = %request_id,
             "Send failed on closed channel"
         );
-        registry.take_pending_k8s_response(&request_id).await;
+        registry
+            .take_pending_k8s_response(cluster_name, &request_id)
+            .await;
         return Err(TunnelError::SendFailed("agent channel closed".to_string()));
     }
 

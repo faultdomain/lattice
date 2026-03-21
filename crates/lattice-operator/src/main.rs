@@ -321,7 +321,9 @@ async fn run_controller(
     }
     if let Some(handle) = auth_proxy_handle {
         // Send GOAWAY to all HTTP/2 connections and wait for drain (up to 10s).
-        handle.graceful_shutdown(std::time::Duration::from_secs(10)).await;
+        handle
+            .graceful_shutdown(std::time::Duration::from_secs(10))
+            .await;
     }
     tracing::info!("Shutdown complete");
     Ok(())
@@ -959,7 +961,11 @@ async fn cell_activation_watcher(
         };
 
         tracing::info!("Cell infrastructure activated (cluster promoted to parent)");
-        return;
+        // Keep the proxy handle alive for the lifetime of this task.
+        // The proxy task runs independently but needs the handle alive
+        // so graceful_shutdown can be called if needed in the future.
+        // This task suspends here forever — the process exit handles cleanup.
+        std::future::pending::<()>().await;
     }
 }
 

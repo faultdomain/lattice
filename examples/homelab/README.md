@@ -1,8 +1,8 @@
-# Homelab: Edge HAProxy DMZ + Backend Workloads
+# Homelab: Edge HAProxy DMZ + Media Stack
 
 Two-cluster Proxmox setup. The edge cluster runs HAProxy as a DMZ/firewall.
-The backend cluster runs all workloads (webapp + media). Routes are discovered
-automatically via heartbeats — no manual IP management.
+The backend cluster runs the media stack (jellyfin, sonarr, nzbget + VPN).
+Routes are discovered automatically via heartbeats — no manual IP management.
 
 ## Architecture
 
@@ -19,12 +19,10 @@ flowchart TD
     subgraph Backend["Backend Cluster — vmbr1 (10.0.1.0/24)"]
         Agent[Lattice Agent]
         GW[Istio Ingress Gateway\n10.0.1.216/28]
-        Webapp[webapp]
         Media[media]
     end
 
     HAProxy -->|HTTP via Host header| GW
-    GW --> Webapp
     GW --> Media
     Agent -->|outbound gRPC\nheartbeats + routes| Edge
 ```
@@ -54,6 +52,7 @@ flowchart TD
 - SSH key configured on the template
 - Lattice operator installed on a bootstrap cluster (or use the edge cluster itself)
 - `kubectl` and `docker` CLI tools
+- A cert-manager `ClusterIssuer` named `homelab-selfsigned` (or change the issuer name in the media YAMLs)
 
 ## Before you start: customize the YAMLs
 
@@ -81,7 +80,7 @@ Default IP allocation:
 | Backend nodes | vmbr1 | 10.0.1.111-120 |
 | Backend LB (Cilium) | vmbr1 | 10.0.1.216/28 |
 
-These match the E2E test fixtures. Run `scripts/infra/proxmox-network-setup.sh` on the Proxmox host first to create the bridges.
+These are offset from the E2E test fixtures (which use `.150-.155` and `.240/28`) so both can run on the same Proxmox host simultaneously. Run `scripts/infra/proxmox-network-setup.sh` on the Proxmox host first to create the bridges.
 
 ## Step 1: Create the InfraProvider
 
@@ -150,14 +149,9 @@ BACKEND_KC=/tmp/backend-kubeconfig
 kubectl get secret backend-kubeconfig -o jsonpath='{.data.value}' | base64 -d > $BACKEND_KC
 ```
 
-## Step 7: Deploy workloads on the backend
+## Step 7: Deploy the media stack on the backend
 
 ```bash
-# Webapp stack (frontend, api, postgres, redis, worker)
-kubectl --kubeconfig=$BACKEND_KC apply -f backend/webapp/namespace.yaml
-kubectl --kubeconfig=$BACKEND_KC apply -f backend/webapp/
-
-# Media stack (jellyfin, sonarr, nzbget, vpn)
 kubectl --kubeconfig=$BACKEND_KC apply -f backend/media/namespace.yaml
 kubectl --kubeconfig=$BACKEND_KC apply -f backend/media/
 ```
@@ -176,7 +170,6 @@ Add to your router's DNS or `/etc/hosts`:
 <edge-lb-ip>  jellyfin.home.arpa
 <edge-lb-ip>  sonarr.home.arpa
 <edge-lb-ip>  nzbget.home.arpa
-<edge-lb-ip>  webapp.home.arpa
 ```
 
 ## Step 9: Verify
@@ -190,7 +183,7 @@ kubectl --kubeconfig=$BACKEND_KC get latticeservices -A
 
 # Access UIs
 curl http://jellyfin.home.arpa
-curl http://webapp.home.arpa
+curl http://sonarr.home.arpa
 ```
 
 ## Customization

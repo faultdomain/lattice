@@ -96,4 +96,4 @@ spec:
           allowedServices: ["*"]
         tls:
           issuerRef:
-            name: e2e-selfsigned
+            name: homelab-selfsigned

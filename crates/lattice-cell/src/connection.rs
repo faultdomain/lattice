@@ -24,17 +24,28 @@ use lattice_move::{BatchAck, CompleteAck};
 /// Trait for tracking pending K8s API responses
 ///
 /// Extracted for testing tunnel logic without a full AgentRegistry.
+/// `cluster_name` is required so pending responses can be scoped to the
+/// correct agent on disconnect.
 #[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub trait K8sResponseRegistry: Send + Sync {
     /// Register a channel for receiving K8s API responses
-    async fn register_pending_k8s_response(&self, request_id: &str, sender: K8sResponseSender);
+    async fn register_pending_k8s_response(
+        &self,
+        cluster_name: &str,
+        request_id: &str,
+        sender: K8sResponseSender,
+    );
 
     /// Get the sender for streaming responses (does not remove)
     async fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender>;
 
     /// Take and remove the pending response sender
-    async fn take_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender>;
+    async fn take_pending_k8s_response(
+        &self,
+        cluster_name: &str,
+        request_id: &str,
+    ) -> Option<K8sResponseSender>;
 
     /// Check if a request is pending
     fn has_pending_k8s_response(&self, request_id: &str) -> bool;
@@ -210,13 +221,16 @@ pub struct AgentRegistry {
     /// Pending complete acks keyed by request_id (CellCommand.command_id).
     /// Bounded by MAX_PENDING_ACKS to prevent unbounded growth if agent disconnects mid-pivot.
     pending_complete_acks: DashMap<String, oneshot::Sender<CompleteAck>>,
-    /// Pending K8s API proxy responses keyed by request_id
+    /// Pending K8s API proxy responses keyed by request_id.
     /// Uses mpsc::Sender to support streaming responses (watches).
-    /// Entries are removed on completion or agent disconnect.
     pending_k8s_responses: DashMap<String, K8sResponseSender>,
     /// Pending exec data responses keyed by request_id.
     /// Routes stdout/stderr from agent exec sessions to proxy handlers.
     pending_exec_data: DashMap<String, ExecDataSender>,
+    /// Maps cluster_name → set of pending request_ids for that cluster.
+    /// Used by disconnect_agent to clean up only the disconnecting cluster's
+    /// pending responses without affecting other clusters.
+    pending_by_cluster: DashMap<String, std::collections::HashSet<String>>,
     /// Proxy configuration for kubeconfig patching
     proxy_config: std::sync::OnceLock<KubeconfigProxyConfig>,
 }
@@ -257,6 +271,7 @@ impl Default for AgentRegistry {
             pending_complete_acks: DashMap::new(),
             pending_k8s_responses: DashMap::new(),
             pending_exec_data: DashMap::new(),
+            pending_by_cluster: DashMap::new(),
             proxy_config: std::sync::OnceLock::new(),
         }
     }
@@ -341,14 +356,25 @@ impl AgentRegistry {
         false
     }
 
-    /// Disconnect an agent: mark as disconnected and drop all pending response
-    /// senders so watch streams close immediately. Single point of disconnection
-    /// logic — called by both `unregister()` and `disconnect_stale_agents()`.
+    /// Mark an agent as disconnected and clean up its pending proxy responses.
+    /// Only removes entries belonging to this cluster (tracked in pending_by_cluster).
     fn disconnect_agent(&self, agent: &mut AgentConnection) {
         agent.connected = false;
         agent.disconnected_at = Some(Instant::now());
-        self.pending_k8s_responses.clear();
-        self.pending_exec_data.clear();
+
+        if let Some((_, request_ids)) = self.pending_by_cluster.remove(&agent.cluster_name) {
+            for id in &request_ids {
+                self.pending_k8s_responses.remove(id);
+                self.pending_exec_data.remove(id);
+            }
+            if !request_ids.is_empty() {
+                debug!(
+                    cluster = %agent.cluster_name,
+                    count = request_ids.len(),
+                    "Cleaned up pending responses for disconnected agent"
+                );
+            }
+        }
     }
 
     /// Get an agent connection by cluster name
@@ -717,10 +743,19 @@ impl AgentRegistry {
 
 #[async_trait::async_trait]
 impl K8sResponseRegistry for AgentRegistry {
-    async fn register_pending_k8s_response(&self, request_id: &str, sender: K8sResponseSender) {
+    async fn register_pending_k8s_response(
+        &self,
+        cluster_name: &str,
+        request_id: &str,
+        sender: K8sResponseSender,
+    ) {
         self.pending_k8s_responses
             .insert(request_id.to_string(), sender);
-        debug!(request_id = %request_id, "Registered pending K8s API response");
+        self.pending_by_cluster
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(request_id.to_string());
+        debug!(request_id = %request_id, cluster = %cluster_name, "Registered pending K8s API response");
     }
 
     async fn get_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
@@ -729,7 +764,14 @@ impl K8sResponseRegistry for AgentRegistry {
             .map(|r| r.clone())
     }
 
-    async fn take_pending_k8s_response(&self, request_id: &str) -> Option<K8sResponseSender> {
+    async fn take_pending_k8s_response(
+        &self,
+        cluster_name: &str,
+        request_id: &str,
+    ) -> Option<K8sResponseSender> {
+        if let Some(mut ids) = self.pending_by_cluster.get_mut(cluster_name) {
+            ids.remove(request_id);
+        }
         self.pending_k8s_responses
             .remove(request_id)
             .map(|(_, v)| v)
@@ -1240,7 +1282,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<KubernetesResponse>(16);
 
         registry
-            .register_pending_k8s_response("k8s-req-123", tx)
+            .register_pending_k8s_response("test-cluster", "k8s-req-123", tx)
             .await;
         assert!(registry.has_pending_k8s_response("k8s-req-123"));
 
@@ -1269,7 +1311,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<KubernetesResponse>(16);
 
         registry
-            .register_pending_k8s_response("watch-123", tx)
+            .register_pending_k8s_response("test-cluster", "watch-123", tx)
             .await;
 
         // Send multiple streaming responses
@@ -1290,7 +1332,9 @@ mod tests {
         }
 
         // On stream end, take the sender to remove it
-        let _ = registry.take_pending_k8s_response("watch-123").await;
+        let _ = registry
+            .take_pending_k8s_response("test-cluster", "watch-123")
+            .await;
         assert!(!registry.has_pending_k8s_response("watch-123"));
 
         // Verify we received all responses
@@ -1304,7 +1348,7 @@ mod tests {
     async fn test_pending_k8s_response_take_nonexistent() {
         let registry = AgentRegistry::new();
         assert!(registry
-            .take_pending_k8s_response("nonexistent")
+            .take_pending_k8s_response("test-cluster", "nonexistent")
             .await
             .is_none());
     }

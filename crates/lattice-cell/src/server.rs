@@ -728,7 +728,10 @@ async fn process_agent_message(
             // Deliver response to waiting proxy handler
             if resp.stream_end {
                 // Final message in stream - take the sender to remove it
-                if let Some(sender) = registry.take_pending_k8s_response(&resp.request_id).await {
+                if let Some(sender) = registry
+                    .take_pending_k8s_response(cluster_name, &resp.request_id)
+                    .await
+                {
                     if let Err(e) = sender.try_send(resp.clone()) {
                         warn!(
                             cluster = %cluster_name,
@@ -755,7 +758,9 @@ async fn process_agent_message(
                             "Failed to deliver streaming K8s API response"
                         );
                         // Channel is full or closed, clean up
-                        registry.take_pending_k8s_response(&resp.request_id).await;
+                        registry
+                            .take_pending_k8s_response(cluster_name, &resp.request_id)
+                            .await;
                     }
                 } else {
                     debug!(
