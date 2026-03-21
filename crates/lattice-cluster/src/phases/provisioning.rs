@@ -5,6 +5,8 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use k8s_openapi::api::core::v1::Secret;
+use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
@@ -38,7 +40,7 @@ pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Res
     // discovery. After patch_kubeconfig_for_proxy_access rewrites the server
     // URL, the original is lost.
     if let Some(ref client) = ctx.client {
-        let _ = copy_kubeconfig_for_istiod(client, &name, &capi_namespace).await;
+        let _ = copy_kubeconfig_for_istiod(client, cluster, &name, &capi_namespace).await;
     }
 
     // Patch kubeconfig to use proxy as soon as the secret exists.
@@ -155,23 +157,22 @@ fn build_proxy_url(cluster: &LatticeCluster) -> String {
 /// direct API server connection (not the auth proxy).
 async fn copy_kubeconfig_for_istiod(
     client: &kube::Client,
+    cluster: &LatticeCluster,
     cluster_name: &str,
     capi_namespace: &str,
-) -> Result<(), lattice_common::Error> {
-    use k8s_openapi::api::core::v1::Secret;
-    use kube::api::{Api, Patch, PatchParams};
-
+) -> Result<(), Error> {
     let dest_name = lattice_common::istiod_kubeconfig_secret_name(cluster_name);
-    let dest_api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
+    let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
 
-    // Only copy once — if the destination already exists, the original
-    // kubeconfig has already been captured before the proxy patch.
-    if dest_api
+    // Only copy once — the CAPI kubeconfig gets patched for proxy access
+    // after this function runs, so re-reading it would overwrite the direct
+    // kubeconfig with the proxied one. When the LatticeCluster is deleted,
+    // the ownerReference causes GC to delete this secret, so it gets
+    // recreated with the fresh (unpatched) kubeconfig on the next provision.
+    if api
         .get_opt(&dest_name)
         .await
-        .map_err(|e| {
-            lattice_common::Error::internal(format!("failed to check istiod kubeconfig: {e}"))
-        })?
+        .map_err(|e| Error::internal(format!("failed to check istiod kubeconfig: {e}")))?
         .is_some()
     {
         return Ok(());
@@ -181,7 +182,7 @@ async fn copy_kubeconfig_for_istiod(
     let src_api: Api<Secret> = Api::namespaced(client.clone(), capi_namespace);
 
     let src_secret = src_api.get(&secret_name).await.map_err(|e| {
-        lattice_common::Error::internal(format!(
+        Error::internal(format!(
             "failed to read CAPI kubeconfig secret {}/{}: {}",
             capi_namespace, secret_name, e
         ))
@@ -191,11 +192,7 @@ async fn copy_kubeconfig_for_istiod(
         .data
         .as_ref()
         .and_then(|d| d.get("value"))
-        .ok_or_else(|| {
-            lattice_common::Error::internal(
-                "CAPI kubeconfig secret missing 'value' key".to_string(),
-            )
-        })?;
+        .ok_or_else(|| Error::internal("CAPI kubeconfig secret missing 'value' key".to_string()))?;
 
     let dest_secret = serde_json::json!({
         "apiVersion": "v1",
@@ -206,23 +203,25 @@ async fn copy_kubeconfig_for_istiod(
             "labels": {
                 "app.kubernetes.io/managed-by": "lattice",
                 "lattice.dev/cluster": cluster_name
-            }
+            },
+            "ownerReferences": [{
+                "apiVersion": LatticeCluster::api_version(&()),
+                "kind": LatticeCluster::kind(&()),
+                "name": cluster_name,
+                "uid": cluster.uid().unwrap_or_default(),
+                "controller": true,
+                "blockOwnerDeletion": false
+            }]
         },
         "data": {
             "kubeconfig": kubeconfig_data
         }
     });
 
-    let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
     let params = PatchParams::apply("lattice-cluster-controller").force();
     api.patch(&dest_name, &params, &Patch::Apply(&dest_secret))
         .await
-        .map_err(|e| {
-            lattice_common::Error::internal(format!(
-                "failed to create istiod kubeconfig secret: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| Error::internal(format!("failed to create istiod kubeconfig secret: {e}")))?;
 
     info!(cluster = %cluster_name, secret = %dest_name, "copied CAPI kubeconfig to istio-system for istiod");
     Ok(())
