@@ -52,22 +52,20 @@ pub enum BootstrapError {
 
 impl IntoResponse for BootstrapError {
     fn into_response(self) -> Response {
+        // All auth-related errors return 401 with a generic message to
+        // prevent enumeration of cluster names, token states, etc.
         let (status, client_message) = match &self {
-            BootstrapError::InvalidToken | BootstrapError::MissingAuth => {
-                (StatusCode::UNAUTHORIZED, "authentication failed")
-            }
-            BootstrapError::TokenAlreadyUsed => (StatusCode::UNAUTHORIZED, "authentication failed"),
-            // Return 401 (not 404) to prevent cluster existence enumeration
-            BootstrapError::ClusterNotFound(_) => {
+            BootstrapError::InvalidToken
+            | BootstrapError::MissingAuth
+            | BootstrapError::TokenAlreadyUsed
+            | BootstrapError::ClusterNotFound(_)
+            | BootstrapError::InvalidCsrToken
+            | BootstrapError::CsrTokenAlreadyUsed => {
                 (StatusCode::UNAUTHORIZED, "authentication failed")
             }
             BootstrapError::CsrSigningFailed(_) => (StatusCode::BAD_REQUEST, "CSR signing failed"),
             BootstrapError::ClusterNotBootstrapped(_) => {
                 (StatusCode::PRECONDITION_FAILED, "cluster not bootstrapped")
-            }
-            BootstrapError::InvalidCsrToken => (StatusCode::UNAUTHORIZED, "authentication failed"),
-            BootstrapError::CsrTokenAlreadyUsed => {
-                (StatusCode::UNAUTHORIZED, "authentication failed")
             }
             BootstrapError::ManifestGeneration(_) | BootstrapError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")

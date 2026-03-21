@@ -199,38 +199,30 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             }
         }
 
+        let token = match existing_token {
+            Some(t) => BootstrapToken::from_string(t).unwrap_or_else(|_| {
+                warn!(cluster = %cluster_id, "Invalid existing token, generating new one");
+                BootstrapToken::generate()
+            }),
+            None => BootstrapToken::generate(),
+        };
+
         // Atomic check-and-insert using entry API — holds write lock for the
         // duration, preventing concurrent removal between check and insert.
         let entry = self.clusters.entry(cluster_id.clone());
         match entry {
             dashmap::Entry::Occupied(mut existing) => {
-                // Cluster already registered — generate a fresh token and update
-                // the stored hash so re-registration is idempotent. This handles
-                // controller re-reconciliation and operator restart recovery.
+                // Cluster already registered — update hash only if token hasn't
+                // been consumed yet. This handles controller re-reconciliation
+                // and operator restart recovery.
                 debug!(cluster = %cluster_id, "Cluster already registered (in memory), rotating token");
-                let token = match existing_token {
-                    Some(t) => BootstrapToken::from_string(t).unwrap_or_else(|_| {
-                        warn!(cluster = %cluster_id, "Invalid existing token, generating new one");
-                        BootstrapToken::generate()
-                    }),
-                    None => BootstrapToken::generate(),
-                };
                 let info = existing.get_mut();
                 if !info.token_used {
                     info.token_hash = token.hash();
                     info.token_created = Instant::now();
                 }
-                token
             }
             dashmap::Entry::Vacant(vacant) => {
-                let token = match existing_token {
-                    Some(t) => BootstrapToken::from_string(t).unwrap_or_else(|_| {
-                        warn!(cluster = %cluster_id, "Invalid existing token, generating new one");
-                        BootstrapToken::generate()
-                    }),
-                    None => BootstrapToken::generate(),
-                };
-
                 // If recovering with a CSR hash, mark bootstrap token as already used
                 let token_used = recovery_csr_hash.is_some();
 
@@ -258,8 +250,16 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 };
 
                 vacant.insert(info);
-                token
             }
+        }
+
+        token
+    }
+
+    /// Remove a cluster's bootstrap state when the LatticeCluster is deleted.
+    pub fn deregister(&self, cluster_id: &str) {
+        if self.clusters.remove(cluster_id).is_some() {
+            info!(cluster = %cluster_id, "Deregistered bootstrap state");
         }
     }
 
@@ -1015,6 +1015,58 @@ mod tests {
             csr_result,
             Err(BootstrapError::ClusterNotFound(_))
         ));
+    }
+
+    /// Story: Deregistering a cluster clears bootstrap state so the same
+    /// cluster name can be re-provisioned with a fresh token.
+    #[tokio::test]
+    async fn deregister_allows_re_registration() {
+        let state = test_state();
+
+        // Register and consume the token
+        let token = register_test_cluster(
+            &state,
+            "recyclable-cluster".to_string(),
+            "cell:8443:50051".to_string(),
+            "cert".to_string(),
+        )
+        .await;
+        state
+            .validate_and_consume("recyclable-cluster", token.as_str())
+            .await
+            .expect("bootstrap should succeed");
+
+        // Token is consumed — re-registration won't help
+        let token2 = register_test_cluster(
+            &state,
+            "recyclable-cluster".to_string(),
+            "cell:8443:50051".to_string(),
+            "cert".to_string(),
+        )
+        .await;
+        assert!(matches!(
+            state
+                .validate_and_consume("recyclable-cluster", token2.as_str())
+                .await,
+            Err(BootstrapError::TokenAlreadyUsed)
+        ));
+
+        // Deregister clears the state
+        state.deregister("recyclable-cluster");
+        assert!(!state.is_cluster_registered("recyclable-cluster"));
+
+        // Now re-registration works with a fresh token
+        let token3 = register_test_cluster(
+            &state,
+            "recyclable-cluster".to_string(),
+            "cell:8443:50051".to_string(),
+            "cert".to_string(),
+        )
+        .await;
+        state
+            .validate_and_consume("recyclable-cluster", token3.as_str())
+            .await
+            .expect("fresh token after deregister should succeed");
     }
 
     /// Story: Token expiration for time-limited bootstrap windows

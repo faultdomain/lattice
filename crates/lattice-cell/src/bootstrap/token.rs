@@ -100,124 +100,6 @@ impl std::fmt::Display for BootstrapToken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dashmap::DashMap;
-    use std::time::{Duration, Instant};
-
-    // =========================================================================
-    // Test-only TokenStore implementation
-    // =========================================================================
-    //
-    // This is used only for testing token lifecycle. Production code uses
-    // BootstrapState which has its own token management.
-
-    /// Token metadata stored in the token store
-    #[derive(Clone, Debug)]
-    struct TokenMetadata {
-        token_hash: String,
-        expires_at: Instant,
-        used: bool,
-    }
-
-    /// Thread-safe token store for testing
-    struct TokenStore {
-        tokens: DashMap<String, TokenMetadata>,
-        default_ttl: Duration,
-    }
-
-    impl TokenStore {
-        fn new() -> Self {
-            Self {
-                tokens: DashMap::new(),
-                default_ttl: Duration::from_secs(3600),
-            }
-        }
-
-        fn with_ttl(ttl: Duration) -> Self {
-            Self {
-                tokens: DashMap::new(),
-                default_ttl: ttl,
-            }
-        }
-
-        fn create_token(&self, cluster_id: &str) -> BootstrapToken {
-            let token = BootstrapToken::generate();
-            let now = Instant::now();
-
-            let metadata = TokenMetadata {
-                token_hash: token.hash(),
-                expires_at: now + self.default_ttl,
-                used: false,
-            };
-
-            self.tokens.insert(cluster_id.to_string(), metadata);
-            token
-        }
-
-        fn validate(&self, cluster_id: &str, token: &str) -> bool {
-            match self.tokens.get(cluster_id) {
-                Some(metadata) => {
-                    if Instant::now() > metadata.expires_at {
-                        return false;
-                    }
-                    if metadata.used {
-                        return false;
-                    }
-                    let provided = match BootstrapToken::from_string(token) {
-                        Ok(t) => t,
-                        Err(_) => return false,
-                    };
-                    provided.hash() == metadata.token_hash
-                }
-                None => false,
-            }
-        }
-
-        fn consume(&self, cluster_id: &str, token: &str) -> bool {
-            match self.tokens.get_mut(cluster_id) {
-                Some(mut metadata) => {
-                    if Instant::now() > metadata.expires_at {
-                        return false;
-                    }
-                    if metadata.used {
-                        return false;
-                    }
-                    let provided = match BootstrapToken::from_string(token) {
-                        Ok(t) => t,
-                        Err(_) => return false,
-                    };
-                    if provided.hash() != metadata.token_hash {
-                        return false;
-                    }
-                    metadata.used = true;
-                    true
-                }
-                None => false,
-            }
-        }
-
-        fn cleanup_expired(&self) {
-            let now = Instant::now();
-            self.tokens.retain(|_, v| now < v.expires_at);
-        }
-
-        fn len(&self) -> usize {
-            self.tokens.len()
-        }
-
-        fn is_empty(&self) -> bool {
-            self.tokens.is_empty()
-        }
-    }
-
-    impl Default for TokenStore {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    // =========================================================================
-    // Token Security Stories
-    // =========================================================================
 
     #[test]
     fn tokens_are_cryptographically_unique() {
@@ -242,21 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn token_hashes_enable_secure_validation() {
+    fn token_hashes_are_deterministic() {
         let token = BootstrapToken::generate();
 
         let hash1 = token.hash();
         let hash2 = token.hash();
-        assert_eq!(hash1, hash2, "Hash should be deterministic");
+        assert_eq!(hash1, hash2);
 
-        let token_str = token.as_str().to_string();
         let reconstructed =
-            BootstrapToken::from_string(&token_str).expect("valid base64 token should parse");
-        assert_eq!(
-            token.hash(),
-            reconstructed.hash(),
-            "Reconstructed token should hash the same"
-        );
+            BootstrapToken::from_string(token.as_str()).expect("valid base64 token should parse");
+        assert_eq!(token.hash(), reconstructed.hash());
     }
 
     #[test]
@@ -264,172 +141,24 @@ mod tests {
         let token = BootstrapToken::generate();
         let debug = format!("{:?}", token);
 
-        assert!(
-            !debug.contains(token.as_str()),
-            "Debug output must not expose token value"
-        );
-        assert!(
-            debug.contains("hash"),
-            "Debug output should show hash for traceability"
-        );
-    }
-
-    // =========================================================================
-    // Cluster Registration Flow Stories
-    // =========================================================================
-
-    #[test]
-    fn cell_creates_token_for_new_cluster() {
-        let store = TokenStore::new();
-        let token = store.create_token("workload-cluster-prod-1");
-
-        assert!(
-            store.validate("workload-cluster-prod-1", token.as_str()),
-            "Token should be valid for its cluster"
-        );
-        assert_eq!(store.len(), 1);
-    }
-
-    #[test]
-    fn agent_authenticates_with_valid_token() {
-        let store = TokenStore::new();
-        let token = store.create_token("new-workload");
-
-        let is_valid = store.validate("new-workload", token.as_str());
-        assert!(is_valid, "Valid token should authenticate");
-
-        let consumed = store.consume("new-workload", token.as_str());
-        assert!(consumed, "Token consumption should succeed");
-    }
-
-    #[test]
-    fn token_cannot_be_reused_after_consumption() {
-        let store = TokenStore::new();
-        let token = store.create_token("secure-cluster");
-
-        assert!(
-            store.consume("secure-cluster", token.as_str()),
-            "First use should succeed"
-        );
-        assert!(
-            !store.consume("secure-cluster", token.as_str()),
-            "Replay attempt should fail"
-        );
-        assert!(
-            !store.validate("secure-cluster", token.as_str()),
-            "Validation should fail for consumed token"
-        );
-    }
-
-    // =========================================================================
-    // Attack Prevention Stories
-    // =========================================================================
-
-    #[test]
-    fn forged_tokens_are_rejected() {
-        let store = TokenStore::new();
-        store.create_token("legitimate-cluster");
-
-        assert!(
-            !store.validate("legitimate-cluster", "forged-token-attempt"),
-            "Forged tokens must be rejected"
-        );
+        assert!(!debug.contains(token.as_str()));
+        assert!(debug.contains("hash"));
     }
 
     #[test]
     fn invalid_base64_fails_explicitly() {
-        // Valid base64 with sufficient entropy (32 bytes)
         let token = BootstrapToken::generate();
-        let valid = BootstrapToken::from_string(token.as_str());
-        assert!(
-            valid.is_ok(),
-            "Valid base64 with sufficient entropy should parse"
-        );
+        assert!(BootstrapToken::from_string(token.as_str()).is_ok());
 
         // Too short (4 bytes < MIN_TOKEN_BYTES)
-        let short = BootstrapToken::from_string("dGVzdA");
-        assert!(short.is_err(), "Short token should be rejected");
-
-        let invalid = BootstrapToken::from_string("not!valid@base64#");
-        assert!(invalid.is_err(), "Invalid base64 should fail");
-
-        let invalid2 = BootstrapToken::from_string("also-not-valid");
-        assert!(invalid2.is_err(), "Invalid base64 should fail");
+        assert!(BootstrapToken::from_string("dGVzdA").is_err());
+        assert!(BootstrapToken::from_string("not!valid@base64#").is_err());
     }
 
     #[test]
-    fn tokens_are_bound_to_specific_cluster() {
-        let store = TokenStore::new();
-        let token = store.create_token("cluster-alpha");
-
-        assert!(
-            !store.validate("cluster-beta", token.as_str()),
-            "Token should only work for its designated cluster"
-        );
-    }
-
-    #[test]
-    fn expired_tokens_are_rejected() {
-        let store = TokenStore::with_ttl(Duration::from_millis(1));
-        let token = store.create_token("slow-cluster");
-
-        std::thread::sleep(Duration::from_millis(10));
-
-        assert!(
-            !store.validate("slow-cluster", token.as_str()),
-            "Expired token validation should fail"
-        );
-        assert!(
-            !store.consume("slow-cluster", token.as_str()),
-            "Expired token consumption should fail"
-        );
-    }
-
-    // =========================================================================
-    // Token Store Maintenance Stories
-    // =========================================================================
-
-    #[test]
-    fn cleanup_removes_expired_tokens() {
-        let store = TokenStore::with_ttl(Duration::from_millis(1));
-
-        store.create_token("abandoned-cluster-1");
-        store.create_token("abandoned-cluster-2");
-        assert_eq!(store.len(), 2);
-
-        std::thread::sleep(Duration::from_millis(10));
-        store.cleanup_expired();
-
-        assert!(store.is_empty(), "Expired tokens should be cleaned up");
-    }
-
-    #[test]
-    fn cleanup_preserves_active_tokens() {
-        let store = TokenStore::with_ttl(Duration::from_secs(3600));
-        store.create_token("active-cluster");
-        store.cleanup_expired();
-
-        assert_eq!(store.len(), 1, "Active tokens should be preserved");
-    }
-
-    #[test]
-    fn token_store_has_sensible_defaults() {
-        let store = TokenStore::default();
-
-        assert!(store.is_empty());
-
-        let token = store.create_token("test-cluster");
-        assert!(store.validate("test-cluster", token.as_str()));
-    }
-
-    #[test]
-    fn token_display_shows_token_value() {
-        let store = TokenStore::default();
-        let token = store.create_token("display-test");
-
-        // Display should show the actual token value (used for embedding in commands)
+    fn display_shows_token_value() {
+        let token = BootstrapToken::generate();
         let displayed = format!("{}", token);
         assert_eq!(displayed, token.as_str());
-        assert!(!displayed.is_empty());
     }
 }

@@ -144,7 +144,12 @@ pub(crate) async fn handle_deletion(
             return Ok(Action::requeue(Duration::from_secs(10)));
         }
 
-        // CAPI Cluster is gone, remove finalizer
+        // CAPI Cluster is gone — clean up bootstrap state and remove finalizer
+        if let Some(ref servers) = ctx.parent_servers {
+            if let Some(state) = servers.bootstrap_state().await {
+                state.deregister(&name);
+            }
+        }
         info!(cluster = %name, "Infrastructure cleanup complete, removing finalizer");
         remove_finalizer(cluster, ctx).await?;
         return Ok(Action::await_change());
