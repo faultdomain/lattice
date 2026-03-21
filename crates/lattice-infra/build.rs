@@ -400,7 +400,9 @@ fn main() {
             "--set",
             "env.AMBIENT_ENABLE_MULTI_NETWORK=true",
             "--set",
-            "env.AMBIENT_ENABLE_BAGGAGE=true",
+            "env.AMBIENT_ENABLE_MULTI_NETWORK_INGRESS=true",
+            // AMBIENT_ENABLE_BAGGAGE disabled: causes 502s via missing upstream
+            // peer_metadata filter. https://github.com/istio/istio/issues/59117
             "--set",
             "pilot.resources.requests.cpu=100m",
             "--set",

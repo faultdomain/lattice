@@ -81,6 +81,8 @@ defaults
     timeout http-keep-alive 5s
     retries 3
     retry-on 502 conn-failure empty-response response-timeout
+    option http-server-close
+    http-reuse never
 
 frontend stats
     bind *:8405
