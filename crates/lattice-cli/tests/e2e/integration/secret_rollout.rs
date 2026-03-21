@@ -113,6 +113,9 @@ pub async fn run_secret_rollout_tests(kubeconfig: &str) -> Result<(), String> {
             rotated_data.insert("vpn-pass".to_string(), "rotated-password-new".to_string());
             seed_local_secret(kubeconfig, "local-rollout-vpn-creds", &rotated_data).await?;
 
+            // Force ESO to re-sync immediately (default refreshInterval is 1h)
+            force_eso_resync(kubeconfig, TEST_NAMESPACE, "rollout-svc-vpn-creds").await?;
+
             // Wait for ESO to re-sync the K8s Secret with new content
             wait_for_secret_content(
                 kubeconfig,
@@ -297,6 +300,41 @@ async fn wait_for_new_pods(
         },
     )
     .await
+}
+
+/// Force ESO to re-sync an ExternalSecret by annotating it with the reconcile trigger.
+///
+/// ESO watches for `force-sync` annotation changes and immediately re-syncs.
+/// Without this, ESO only re-syncs on its `refreshInterval` (default 1h).
+async fn force_eso_resync(
+    kubeconfig: &str,
+    namespace: &str,
+    external_secret_name: &str,
+) -> Result<(), String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+
+    run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "annotate",
+        "externalsecret",
+        external_secret_name,
+        "-n",
+        namespace,
+        &format!("force-sync={}", timestamp),
+        "--overwrite",
+    ])
+    .await?;
+
+    info!(
+        "[SecretRollout] Triggered ESO re-sync for {}/{}",
+        namespace, external_secret_name
+    );
+    Ok(())
 }
 
 /// Wait for an ESO-synced K8s Secret to exist.
