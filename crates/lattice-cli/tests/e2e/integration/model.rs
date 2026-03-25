@@ -31,7 +31,7 @@ const MODEL_NAMESPACE: &str = "serving";
 const MODEL_NAME: &str = "llm-serving";
 
 /// Timeout for waiting on phase transitions (e.g., Pending → Loading)
-const PHASE_TIMEOUT: Duration = Duration::from_secs(120);
+const PHASE_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// Timeout for longer operations (Serving phase, init container completion)
 const LONG_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// Interval between polls when waiting for a condition

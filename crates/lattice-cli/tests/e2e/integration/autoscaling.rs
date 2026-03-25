@@ -45,7 +45,7 @@ const CPU_BURNER_NAME: &str = "cpu-burner";
 const METRICS_SERVER_NAME: &str = "metrics-server";
 const CUSTOM_METRIC_NAME: &str = "test_scale_metric";
 
-const SCALEDOBJECT_TIMEOUT: Duration = Duration::from_secs(120);
+const SCALEDOBJECT_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 const SCALEUP_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 const PROM_SCALEUP_TIMEOUT: Duration = Duration::from_secs(420);
 const DEPLOY_TIMEOUT: Duration = DEFAULT_TIMEOUT;

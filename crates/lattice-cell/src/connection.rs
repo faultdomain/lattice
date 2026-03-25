@@ -55,7 +55,7 @@ pub trait K8sResponseRegistry: Send + Sync {
 ///
 /// Agents stay in the registry after disconnection to:
 /// - Detect reconnections (vs first-time connections)
-/// - Preserve state like pivot_complete across brief disconnections
+/// - Track generation for stale unregister prevention
 pub struct AgentConnection {
     /// Cluster name this agent manages
     pub cluster_name: String,
@@ -301,14 +301,14 @@ impl AgentRegistry {
         let cluster_name = connection.cluster_name.clone();
         connection.connected = true;
 
-        // Atomic read-modify-write: preserve pivot_complete from any existing
-        // entry, detect reconnect, and capture generation — all within a single
-        // DashMap shard lock to prevent TOCTOU races.
+        // Atomic read-modify-write: increment generation to detect stale
+        // unregister calls — all within a single DashMap shard lock.
+        //
+        // pivot_complete is NOT carried forward: if the cluster was deleted
+        // and recreated with the same name, the old entry's pivot state is
+        // stale. The agent will send PivotComplete again after a real pivot.
         let (is_reconnect, generation) = match self.agents.entry(cluster_name.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                if entry.get().pivot_complete {
-                    connection.pivot_complete = true;
-                }
                 connection.generation = entry.get().generation + 1;
                 let gen = connection.generation;
                 entry.insert(connection);
@@ -1441,30 +1441,23 @@ mod tests {
     }
 
     #[test]
-    fn test_pivot_complete_preserved_across_reconnection() {
+    fn test_pivot_complete_not_carried_forward_on_reconnect() {
         let registry = AgentRegistry::new();
 
-        // First connection
+        // First connection completes pivot
         let (conn1, _rx1) = create_test_connection("test-cluster");
         registry.register(conn1);
         registry.set_pivot_complete("test-cluster", true);
+        assert!(registry.get("test-cluster").unwrap().pivot_complete);
 
-        // Verify pivot_complete is set
-        {
-            let agent = registry.get("test-cluster").unwrap();
-            assert!(agent.pivot_complete);
-        }
-
-        // Disconnect
+        // Disconnect and reconnect (e.g., cluster deleted and recreated)
         registry.unregister("test-cluster", 0);
-
-        // Reconnect with new connection (would normally have pivot_complete=false)
         let (conn2, _rx2) = create_test_connection("test-cluster");
         registry.register(conn2);
 
-        // pivot_complete should be preserved from before
-        let agent = registry.get("test-cluster").unwrap();
-        assert!(agent.pivot_complete);
+        // pivot_complete must NOT carry forward — the new agent will send
+        // PivotComplete if it has genuinely pivoted
+        assert!(!registry.get("test-cluster").unwrap().pivot_complete);
     }
 
     // =========================================================================

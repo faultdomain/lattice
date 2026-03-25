@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{ProviderType, SecretRef};
 use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
     Error, AWS_CAPA_CREDENTIALS_SECRET, CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
     OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
@@ -786,14 +787,25 @@ impl NativeInstaller {
             "Applying provider manifests"
         );
 
-        kube_utils::apply_manifests(client, &all_documents, &ApplyOptions::default())
-            .await
-            .map_err(|e| {
-                Error::capi_installation(format!(
-                    "Failed to apply {} {}: {}",
-                    desired.provider_type, desired.name, e
-                ))
-            })?;
+        let provider_label = format!("{} {}", desired.provider_type, desired.name);
+        retry_with_backoff(
+            &RetryConfig {
+                initial_delay: Duration::from_secs(2),
+                ..RetryConfig::default()
+            },
+            &provider_label,
+            || {
+                let client = client.clone();
+                let docs = all_documents.clone();
+                async move {
+                    kube_utils::apply_manifests(&client, &docs, &ApplyOptions::default()).await
+                }
+            },
+        )
+        .await
+        .map_err(|e| {
+            Error::capi_installation(format!("Failed to apply {}: {}", provider_label, e))
+        })?;
 
         // Patch provider deployments with control-plane toleration so they
         // schedule on tainted CP nodes before workers are available.

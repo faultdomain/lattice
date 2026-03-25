@@ -127,10 +127,10 @@ pub async fn run_secret_rollout_tests(kubeconfig: &str) -> Result<(), String> {
             .await?;
 
             // Wait for the config-hash annotation to change (controller detected the rotation)
-            info!("[SecretRollout] Waiting for config-hash to change (up to 90s)...");
+            info!("[SecretRollout] Waiting for config-hash to change...");
             let new_hash = wait_for_condition(
                 "config-hash annotation to change after secret rotation",
-                Duration::from_secs(90),
+                DEFAULT_TIMEOUT,
                 Duration::from_secs(5),
                 || {
                     let kc = kubeconfig.to_string();
@@ -278,7 +278,7 @@ async fn wait_for_new_pods(
 
     wait_for_condition(
         "new pods after rollout",
-        Duration::from_secs(120),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(5),
         || {
             let kc = kc.clone();

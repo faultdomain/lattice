@@ -51,8 +51,35 @@ use lattice_common::{
     OPENSTACK_CREDENTIALS_SECRET, OPERATOR_NAME, PROXMOX_CREDENTIALS_SECRET, SECRET_TYPE_SA_TOKEN,
 };
 
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
+
 use super::CommandErrorExt;
 use crate::{Error, Result};
+
+/// Apply manifests with retry for transient API server failures.
+async fn apply_with_retry(
+    client: &Client,
+    manifests: &[impl AsRef<str>],
+    label: &str,
+) -> std::result::Result<(), lattice_common::Error> {
+    let strs: Vec<&str> = manifests.iter().map(|m| m.as_ref()).collect();
+    retry_with_backoff(
+        &RetryConfig {
+            initial_delay: Duration::from_secs(2),
+            ..RetryConfig::default()
+        },
+        label,
+        || {
+            let c = client.clone();
+            let docs: Vec<String> = strs.iter().map(|s| s.to_string()).collect();
+            async move {
+                let refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+                kube_utils::apply_manifests(&c, &refs, &Default::default()).await
+            }
+        },
+    )
+    .await
+}
 
 /// Install a self-managing Lattice cluster from a LatticeCluster CRD
 #[derive(Args, Debug)]
@@ -419,11 +446,9 @@ impl Installer {
             })
             .collect();
 
-        for manifest in &operator_manifests {
-            kube_utils::apply_manifests(client, &[manifest], &Default::default())
-                .await
-                .cmd_err()?;
-        }
+        apply_with_retry(client, &operator_manifests, "operator manifests")
+            .await
+            .cmd_err()?;
 
         info!("Waiting for Lattice operator to be ready...");
         kube_utils::wait_for_deployment(
@@ -543,18 +568,9 @@ impl Installer {
         let manifests = self.generate_bootstrap_manifests().await?;
         info!("Applying {} bootstrap manifests...", manifests.len());
 
-        let retry_config = lattice_common::retry::RetryConfig::default();
-        for manifest in &manifests {
-            let client = mgmt_client.clone();
-            let m = manifest.clone();
-            lattice_common::retry::retry_with_backoff(&retry_config, "apply_manifest", || {
-                let c = client.clone();
-                let manifest = m.clone();
-                async move { kube_utils::apply_manifests(&c, &[&manifest], &Default::default()).await }
-            })
+        apply_with_retry(&mgmt_client, &manifests, "bootstrap manifests")
             .await
             .cmd_err()?;
-        }
 
         info!("Waiting for control plane nodes to be ready...");
         wait_for_control_plane_ready(&mgmt_client, CONTROL_PLANE_READY_TIMEOUT).await?;
@@ -1182,18 +1198,14 @@ impl Installer {
         let admin_policy = lattice_infra::bootstrap::generate_admin_access_cedar_policy();
         let admin_json = serde_json::to_string(&admin_policy)
             .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {e}")))?;
-        kube_utils::apply_manifests(&mgmt_client, &[&admin_json], &Default::default())
-            .await
-            .cmd_err()?;
-        info!("Created lattice-admin-access CedarPolicy");
-
         let cluster_policy = lattice_infra::bootstrap::generate_cluster_access_cedar_policy();
         let cluster_json = serde_json::to_string(&cluster_policy)
             .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {e}")))?;
-        kube_utils::apply_manifests(&mgmt_client, &[&cluster_json], &Default::default())
+
+        apply_with_retry(&mgmt_client, &[&admin_json, &cluster_json], "Cedar policies")
             .await
             .cmd_err()?;
-        info!("Created istiod-proxy-cluster-access CedarPolicy");
+        info!("Created Cedar access policies");
 
         // Wait for token controller to populate the Secret
         info!("Waiting for admin token to be populated...");
