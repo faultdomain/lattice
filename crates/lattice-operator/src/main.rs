@@ -83,6 +83,9 @@ pub enum ControllerMode {
     Cluster,
     /// Run service mesh controller only (no cell infrastructure)
     Service,
+    /// Run auth proxy + gRPC agent server only (no controllers)
+    /// Deploy as a separate pod so operator restarts don't kill proxy connections
+    Proxy,
 }
 
 #[derive(Subcommand, Debug)]
@@ -239,6 +242,7 @@ async fn run_controller(
     let handle = match mode {
         ControllerMode::Cluster => run_cluster_slice(&client, &config).await?,
         ControllerMode::Service => run_service_slice(&client, &graph_holder, &config).await?,
+        ControllerMode::Proxy => run_proxy_slice(&client, &config).await?,
         ControllerMode::All => run_all_slices(&client, &graph_holder, &config).await?,
     };
 
@@ -532,6 +536,29 @@ fn spawn_webhook_infrastructure(client: kube::Client) {
             tracing::error!(error = %e, "failed to ensure local webhook infrastructure");
         }
     });
+}
+
+/// Proxy slice: auth proxy + gRPC agent server + route reconciler + CA rotation.
+/// No controllers, no CRD installation — just the networking infrastructure.
+/// Deploy as a separate pod so operator restarts don't kill proxy connections.
+async fn run_proxy_slice(
+    client: &kube::Client,
+    config: &SharedConfig,
+) -> anyhow::Result<SliceHandle> {
+    // Cedar is still needed for authorization on proxy requests
+    let cedar = load_cedar_engine(client).await;
+
+    let (parent_servers, agent_token, auth_proxy_supervisor, _route_update_tx) =
+        setup_cell_infra(client, &config.cluster_name.clone(), cedar, config).await?;
+
+    Ok(SliceHandle {
+        controllers: vec![], // No controllers in proxy mode
+        parent_servers: Some(parent_servers),
+        agent_token: Some(agent_token),
+        graph_auditor_token: None,
+        auth_proxy_supervisor,
+        infra_handle: None,
+    })
 }
 
 /// All slices: union of Cluster + Service + Provider. Same behavior as the
