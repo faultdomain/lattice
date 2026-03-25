@@ -75,6 +75,12 @@ pub struct ProxyHandle {
 }
 
 impl ProxyHandle {
+    /// Wait for the server task to exit (crash or shutdown).
+    /// Does NOT trigger shutdown — use this in the supervisor loop.
+    pub async fn wait(self) {
+        let _ = self.task.await;
+    }
+
     /// Send GOAWAY to all connections and wait for drain (up to timeout).
     pub async fn graceful_shutdown(self, timeout: std::time::Duration) {
         self.shutdown.notify_one();

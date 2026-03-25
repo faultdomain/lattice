@@ -1220,10 +1220,8 @@ async fn start_auth_proxy(
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(30);
 
-        // Wait for initial proxy to exit
-        proxy_handle
-            .graceful_shutdown(Duration::from_secs(0))
-            .await;
+        // Wait for initial proxy to exit (without triggering shutdown)
+        proxy_handle.wait().await;
 
         loop {
             tracing::warn!(
@@ -1243,9 +1241,7 @@ async fn start_auth_proxy(
                 Ok(handle) => {
                     tracing::info!("Auth proxy restarted");
                     backoff = Duration::from_secs(1);
-                    handle
-                        .graceful_shutdown(Duration::from_secs(0))
-                        .await;
+                    handle.wait().await;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Auth proxy restart failed");
