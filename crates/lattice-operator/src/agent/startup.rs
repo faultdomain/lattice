@@ -12,8 +12,7 @@ use kube::api::{Api, PostParams};
 use kube::Client;
 
 use lattice_agent::{
-    AgentClient, AgentClientConfig, AgentCredentials, ClientState, SharedExecForwarder,
-    SharedK8sForwarder,
+    AgentClient, AgentClientConfig, AgentCredentials, SharedExecForwarder, SharedK8sForwarder,
 };
 use lattice_common::{
     ParentConnectionConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE,
@@ -34,6 +33,9 @@ pub async fn start_agent_with_retry(
 ) {
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(30);
+    /// Minimum connection duration before we consider it "stable" and reset backoff.
+    /// Prevents rapid connect/disconnect cycles from resetting to 1s.
+    const STABLE_CONNECTION_THRESHOLD: Duration = Duration::from_secs(30);
 
     loop {
         match start_agent_if_needed(
@@ -44,19 +46,24 @@ pub async fn start_agent_with_retry(
         )
         .await
         {
-            Ok(Some(agent)) => {
+            Ok(Some(mut agent)) => {
                 tracing::info!("Agent connection to parent cell established");
-                retry_delay = Duration::from_secs(1);
+                let connected_at = tokio::time::Instant::now();
 
-                // Monitor connection health
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let state = agent.state().await;
-                    if state == ClientState::Disconnected || state == ClientState::Failed {
-                        tracing::warn!(state = ?state, "Agent disconnected, will reconnect...");
-                        break;
-                    }
+                // Wait for the command handler task to exit (stream closed, error, or shutdown).
+                // More reliable than polling state() — detects actual task completion.
+                agent.wait_disconnected().await;
+
+                // Only reset backoff if the connection was stable. Instant disconnects
+                // (e.g., cert rejected after handshake) should keep increasing backoff.
+                if connected_at.elapsed() >= STABLE_CONNECTION_THRESHOLD {
+                    retry_delay = Duration::from_secs(1);
                 }
+                tracing::warn!(
+                    connected_for = ?connected_at.elapsed(),
+                    retry_in = ?retry_delay,
+                    "Agent disconnected, will reconnect..."
+                );
             }
             Ok(None) => {
                 tracing::debug!("No parent cell configured, running as standalone");

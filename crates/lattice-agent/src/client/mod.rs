@@ -274,6 +274,17 @@ impl AgentClient {
         *self.state.read().await
     }
 
+    /// Wait until the connection is lost.
+    ///
+    /// Returns when the command handler task exits (stream closed, error, or
+    /// shutdown). More reliable than polling `state()` because it detects
+    /// task completion directly, even if the state update races.
+    pub async fn wait_disconnected(&mut self) {
+        if let Some(handle) = self.command_handler_handle.take() {
+            let _ = handle.await;
+        }
+    }
+
     /// Get current agent state
     pub async fn agent_state(&self) -> AgentState {
         *self.agent_state.read().await

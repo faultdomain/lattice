@@ -858,17 +858,22 @@ pub async fn delete_cluster_and_wait(
             let parent_kubeconfig = parent_kubeconfig.to_string();
             let cluster_name = cluster_name.to_string();
             async move {
-                // Issue the delete on the child (idempotent — safe to retry).
-                // Ignore errors: the child may already be dying.
-                let _ = run_kubectl(&[
-                    "--kubeconfig",
-                    &cluster_kubeconfig,
-                    "delete",
-                    "latticecluster",
-                    &cluster_name,
-                    "--wait=false",
-                ])
-                .await;
+                // Fire the delete at the child without blocking on retries.
+                // run_kubectl retries transient errors 60 times — if the child
+                // is dying, that blocks for minutes and the parent check never
+                // runs. Use a single attempt with a short timeout instead.
+                let _ = tokio::process::Command::new("kubectl")
+                    .args([
+                        "--kubeconfig",
+                        &cluster_kubeconfig,
+                        "delete",
+                        "latticecluster",
+                        &cluster_name,
+                        "--wait=false",
+                        "--request-timeout=10s",
+                    ])
+                    .output()
+                    .await;
 
                 // Check the PARENT for phase change — the parent is always
                 // reachable and won't stall on a dying child API server.
