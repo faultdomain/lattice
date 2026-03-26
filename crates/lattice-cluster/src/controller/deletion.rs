@@ -196,7 +196,7 @@ async fn handle_non_self_deletion(
 /// sends CAPI resources back. If the agent is disconnected, we requeue
 /// and wait — there is no fallback since we don't have the CAPI resources.
 async fn handle_pivoted_child_deletion(
-    cluster: &LatticeCluster,
+    _cluster: &LatticeCluster,
     ctx: &Context,
     name: &str,
 ) -> Result<Action, Error> {
@@ -212,13 +212,6 @@ async fn handle_pivoted_child_deletion(
             match registry.send_command(name, cmd).await {
                 Ok(()) => {
                     info!(cluster = %name, "Sent DeleteCluster to child agent");
-                    let status = cluster
-                        .status
-                        .clone()
-                        .unwrap_or_default()
-                        .phase(ClusterPhase::Deleting)
-                        .message("Waiting for child to unpivot CAPI resources");
-                    ctx.kube.patch_status(name, &status).await?;
                     return Ok(Action::requeue(Duration::from_secs(10)));
                 }
                 Err(e) => {
@@ -230,7 +223,7 @@ async fn handle_pivoted_child_deletion(
                 }
             }
         } else {
-            info!(
+            debug!(
                 cluster = %name,
                 "Agent not connected, waiting for reconnection to send DeleteCluster"
             );
@@ -238,13 +231,6 @@ async fn handle_pivoted_child_deletion(
     }
 
     // Requeue — agent will reconnect and we'll retry sending DeleteCluster
-    let status = cluster
-        .status
-        .clone()
-        .unwrap_or_default()
-        .phase(ClusterPhase::Deleting)
-        .message("Waiting for child agent to reconnect for unpivot");
-    ctx.kube.patch_status(name, &status).await?;
     Ok(Action::requeue(Duration::from_secs(10)))
 }
 
