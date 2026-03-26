@@ -123,7 +123,7 @@ async fn handle_non_self_deletion(
     let unpivot_import_complete = status.map_or(false, |s| s.unpivot_import_complete);
 
     if pivot_complete && !unpivot_import_complete {
-        return handle_pivoted_child_deletion(cluster, ctx, &name).await;
+        return handle_pivoted_child_deletion(ctx, &name).await;
     }
 
     // Pre-pivot or post-unpivot: CAPI resources are on this cluster.
@@ -196,7 +196,6 @@ async fn handle_non_self_deletion(
 /// sends CAPI resources back. If the agent is disconnected, we requeue
 /// and wait — there is no fallback since we don't have the CAPI resources.
 async fn handle_pivoted_child_deletion(
-    _cluster: &LatticeCluster,
     ctx: &Context,
     name: &str,
 ) -> Result<Action, Error> {
