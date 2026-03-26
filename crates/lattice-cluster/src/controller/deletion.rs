@@ -7,7 +7,7 @@
 //!
 //! - **Non-self (parent deleting child)**: For pivoted clusters, sends
 //!   `DeleteCluster` via gRPC to tell the child to self-delete and unpivot.
-//!   For pre-pivot or disconnected agents, deletes CAPI directly.
+//!   For pre-pivot clusters, deletes CAPI directly.
 //! - **Self with parent**: Pauses CAPI, waits for stability, sets phase to
 //!   Unpivoting. Agent detects deletion and sends CAPI resources to parent.
 //! - **Root (no parent)**: Just removes the finalizer.
@@ -89,12 +89,13 @@ pub(crate) async fn handle_deletion(
 ///
 /// - **Pre-pivot** (`pivot_complete` is false): CAPI resources are still on
 ///   this (parent) cluster. Delete the CAPI Cluster directly.
-/// - **Post-pivot** (`pivot_complete` is true): CAPI resources live on the
-///   child. Send `DeleteCluster` via gRPC to tell the child to self-delete
-///   and unpivot. If the agent is disconnected, requeue and wait for
-///   reconnection — we cannot delete CAPI resources we don't have.
-///   Once unpivot completes and CAPI resources arrive back on the parent,
-///   `pivot_complete` is cleared and the direct CAPI delete path takes over.
+/// - **Post-pivot** (`pivot_complete` and not `unpivot_import_complete`):
+///   CAPI resources live on the child. Send `DeleteCluster` via gRPC to tell
+///   the child to self-delete and unpivot. If the agent is disconnected,
+///   requeue and wait for reconnection — we cannot delete CAPI resources we
+///   don't have. Once unpivot completes and the cell sets
+///   `unpivot_import_complete`, CAPI resources are back on the parent and
+///   the direct CAPI delete path takes over.
 async fn handle_non_self_deletion(
     cluster: &LatticeCluster,
     ctx: &Context,
@@ -113,15 +114,15 @@ async fn handle_non_self_deletion(
         ctx.kube.patch_status(&name, &status).await?;
     }
 
-    // For pivoted clusters, CAPI resources are on the child — we must tell
-    // the child to self-delete via gRPC. There is no fallback: without the
-    // agent connection we cannot reach the CAPI resources.
-    let pivot_complete = cluster
-        .status
-        .as_ref()
-        .map_or(false, |s| s.pivot_complete);
+    // For pivoted clusters where unpivot hasn't completed yet, CAPI resources
+    // are on the child — we must tell the child to self-delete via gRPC.
+    // Once unpivot_import_complete is set, CAPI resources are back on the
+    // parent and we can proceed to direct CAPI delete.
+    let status = cluster.status.as_ref();
+    let pivot_complete = status.map_or(false, |s| s.pivot_complete);
+    let unpivot_import_complete = status.map_or(false, |s| s.unpivot_import_complete);
 
-    if pivot_complete {
+    if pivot_complete && !unpivot_import_complete {
         return handle_pivoted_child_deletion(cluster, ctx, &name).await;
     }
 
