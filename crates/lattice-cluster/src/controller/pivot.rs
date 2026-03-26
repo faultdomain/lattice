@@ -126,23 +126,26 @@ impl PivotOperations for PivotOperationsImpl {
             .update_state(cluster_name, AgentState::Ready);
         self.agent_registry.set_pivot_complete(cluster_name, true);
 
-        // Persist pivot_complete to CRD status
+        // Persist pivot_complete to CRD status — this MUST succeed for crash
+        // safety. Without it, the parent would re-trigger pivot on restart since
+        // in-memory registry state is lost on crash.
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
         let patch = serde_json::json!({
             "status": {
                 "pivotComplete": true
             }
         });
-        if let Err(e) = api
-            .patch_status(
-                cluster_name,
-                &PatchParams::apply(FIELD_MANAGER),
-                &Patch::Merge(&patch),
-            )
-            .await
-        {
-            warn!(cluster = %cluster_name, error = %e, "Failed to persist pivot_complete to status");
-        }
+        api.patch_status(
+            cluster_name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await
+        .map_err(|e| {
+            Error::pivot(format!(
+                "pivot succeeded but failed to persist pivot_complete: {e}"
+            ))
+        })?;
 
         Ok(())
     }
