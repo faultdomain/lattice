@@ -16,23 +16,11 @@
 
 use tracing::info;
 
-use super::super::context::{InfraContext, TestSession};
+use super::super::context::TestSession;
 use super::super::helpers::delete_cluster_and_wait;
 use super::super::providers::InfraProvider;
 
-/// Delete a cluster and verify CAPI resources unpivot to parent
-///
-/// This initiates deletion on the child cluster and waits for:
-/// 1. LatticeCluster to be deleted from parent
-/// 2. CAPI resources to move back to parent
-/// 3. Infrastructure to be cleaned up
-///
-/// # Arguments
-///
-/// * `child_kubeconfig` - Kubeconfig for the cluster being deleted
-/// * `parent_kubeconfig` - Kubeconfig for the parent cluster receiving CAPI resources
-/// * `cluster_name` - Name of the cluster to delete
-/// * `provider` - Infrastructure provider (affects cleanup verification)
+/// Delete a cluster from the child side and verify CAPI resources unpivot to parent.
 pub async fn delete_and_verify_unpivot(
     child_kubeconfig: &str,
     parent_kubeconfig: &str,
@@ -54,47 +42,11 @@ pub async fn delete_and_verify_unpivot(
     Ok(())
 }
 
-/// Delete workload cluster and verify unpivot to management
-pub async fn delete_workload_and_verify_unpivot(
-    ctx: &InfraContext,
-    cluster_name: &str,
-) -> Result<(), String> {
-    let workload_kubeconfig = ctx.require_workload()?;
-
-    delete_and_verify_unpivot(
-        workload_kubeconfig,
-        &ctx.mgmt_kubeconfig,
-        cluster_name,
-        ctx.provider,
-    )
-    .await
-}
-
-/// Start cluster deletion in background
-///
-/// Returns a join handle that can be awaited to wait for deletion completion.
-pub fn start_cluster_deletion_async(
-    child_kubeconfig: String,
-    parent_kubeconfig: String,
-    cluster_name: String,
-    provider: InfraProvider,
-) -> tokio::task::JoinHandle<Result<(), String>> {
-    tokio::spawn(async move {
-        delete_and_verify_unpivot(
-            &child_kubeconfig,
-            &parent_kubeconfig,
-            &cluster_name,
-            provider,
-        )
-        .await
-    })
-}
-
 // =============================================================================
 // Standalone Tests
 // =============================================================================
 
-/// Standalone test - this test requires manual setup and teardown
+/// Standalone test — requires manual setup and teardown.
 ///
 /// WARNING: This test deletes a cluster! Only run if you understand the implications.
 ///
@@ -102,8 +54,6 @@ pub fn start_cluster_deletion_async(
 /// - `LATTICE_WORKLOAD_KUBECONFIG`: Cluster to delete
 /// - `LATTICE_MGMT_KUBECONFIG`: Parent cluster
 /// - `LATTICE_CLUSTER_TO_DELETE`: Name of cluster to delete
-///
-/// Uses TestSession for consistent test initialization.
 #[tokio::test]
 #[ignore]
 async fn test_unpivot_standalone() {
@@ -124,7 +74,13 @@ async fn test_unpivot_standalone() {
     );
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    delete_workload_and_verify_unpivot(&session.ctx, &cluster_name)
-        .await
-        .unwrap();
+    let workload_kubeconfig = session.ctx.require_workload().unwrap();
+    delete_and_verify_unpivot(
+        workload_kubeconfig,
+        &session.ctx.mgmt_kubeconfig,
+        &cluster_name,
+        session.ctx.provider,
+    )
+    .await
+    .unwrap();
 }
