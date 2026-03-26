@@ -1,16 +1,11 @@
 //! Parent-initiated cluster deletion integration test.
 //!
 //! Verifies that deleting a LatticeCluster from the parent triggers the
-//! full unpivot flow: parent sends DeleteCluster via gRPC → child
-//! self-deletes → unpivot sends CAPI back → parent tears down infrastructure.
+//! full unpivot flow: parent sends DeleteCluster via gRPC, child
+//! self-deletes, unpivot sends CAPI back, parent tears down infrastructure.
 //!
-//! # Running Standalone
-//!
-//! ```bash
-//! LATTICE_MGMT_KUBECONFIG=/path/to/mgmt-kubeconfig \
-//! LATTICE_CLUSTER_TO_DELETE=e2e-workload \
-//! cargo test --features provider-e2e --test e2e test_parent_delete_standalone -- --ignored --nocapture
-//! ```
+//! Deletion is destructive and non-repeatable — there are no standalone tests.
+//! This is exercised by the unified E2E test (Phase 8c).
 
 #![cfg(feature = "provider-e2e")]
 
@@ -20,9 +15,6 @@ use super::super::helpers::delete_cluster_from_parent;
 use super::super::providers::InfraProvider;
 
 /// Delete a cluster from the parent and verify the full unpivot lifecycle.
-///
-/// The parent sends `DeleteCluster` via gRPC to the child agent, which
-/// initiates self-deletion and unpivots CAPI resources back to the parent.
 pub async fn delete_from_parent_and_verify(
     parent_kubeconfig: &str,
     cluster_name: &str,
