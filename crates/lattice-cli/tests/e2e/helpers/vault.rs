@@ -20,12 +20,8 @@ use super::{dev_service_reachable, dev_service_url, wait_for_condition};
 // Constants
 // =============================================================================
 
-fn vault_host_url() -> String {
-    dev_service_url("LATTICE_VAULT_HOST_URL", "http://127.0.0.1:8200")
-}
-
-fn vault_internal_url() -> String {
-    dev_service_url("LATTICE_VAULT_INTERNAL_URL", "http://lattice-vault:8200")
+fn vault_url() -> String {
+    dev_service_url("LATTICE_VAULT_URL", "http://127.0.0.1:8200")
 }
 
 /// Dev-mode root token (set via VAULT_DEV_ROOT_TOKEN_ID in docker-compose)
@@ -46,7 +42,7 @@ const VAULT_TOKEN_SECRET_NAME: &str = "vault-e2e-token";
 
 /// Check if Vault tests should run (Vault dev server is reachable)
 pub fn vault_tests_enabled() -> bool {
-    dev_service_reachable(&format!("{}/v1/sys/health", vault_host_url()))
+    dev_service_reachable(&format!("{}/v1/sys/health", vault_url()))
 }
 
 // =============================================================================
@@ -55,7 +51,7 @@ pub fn vault_tests_enabled() -> bool {
 
 /// Write a secret to Vault KV v2 at the given path.
 pub async fn vault_kv_put(path: &str, data: &BTreeMap<String, String>) -> Result<(), String> {
-    let url = format!("{}/v1/{}/data/{}", vault_host_url(), VAULT_KV_MOUNT, path);
+    let url = format!("{}/v1/{}/data/{}", vault_url(), VAULT_KV_MOUNT, path);
     let payload = serde_json::json!({ "data": data });
 
     let client = reqwest::Client::new();

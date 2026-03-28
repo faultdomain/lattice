@@ -17,6 +17,7 @@ pub mod diagnostics;
 pub mod docker;
 pub mod kubernetes;
 pub mod services;
+pub mod pihole;
 pub mod test_harness;
 pub mod vault;
 

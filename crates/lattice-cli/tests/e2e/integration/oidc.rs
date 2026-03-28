@@ -35,15 +35,8 @@ use super::cedar::apply_cedar_policy_allow_group;
 // Constants
 // =============================================================================
 
-fn keycloak_host_url() -> String {
-    dev_service_url("LATTICE_KEYCLOAK_HOST_URL", "http://127.0.0.1:8080")
-}
-
-fn keycloak_internal_url() -> String {
-    dev_service_url(
-        "LATTICE_KEYCLOAK_INTERNAL_URL",
-        "http://lattice-keycloak:8080",
-    )
+fn keycloak_url() -> String {
+    dev_service_url("LATTICE_KEYCLOAK_URL", "http://127.0.0.1:8080")
 }
 
 /// Keycloak realm
@@ -58,14 +51,14 @@ const KEYCLOAK_CLIENT_ID: &str = "lattice";
 
 /// Check if OIDC tests should run (Keycloak is reachable)
 pub fn oidc_tests_enabled() -> bool {
-    dev_service_reachable(&format!("{}/health/ready", keycloak_host_url()))
+    dev_service_reachable(&format!("{}/health/ready", keycloak_url()))
 }
 
 /// Get an access token from Keycloak using resource owner password grant
 async fn get_keycloak_token(username: &str, password: &str) -> Result<String, String> {
     let token_url = format!(
         "{}/realms/{}/protocol/openid-connect/token",
-        keycloak_host_url(),
+        keycloak_url(),
         KEYCLOAK_REALM
     );
 
@@ -101,8 +94,8 @@ async fn get_keycloak_token(username: &str, password: &str) -> Result<String, St
 
 /// Apply OIDCProvider CRD pointing to Keycloak
 async fn apply_oidc_provider(kubeconfig: &str) -> Result<(), String> {
-    let issuer_url = format!("{}/realms/{}", keycloak_internal_url(), KEYCLOAK_REALM);
-    let allow_insecure = keycloak_internal_url().starts_with("http://");
+    let issuer_url = format!("{}/realms/{}", keycloak_url(), KEYCLOAK_REALM);
+    let allow_insecure = keycloak_url().starts_with("http://");
 
     let yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1

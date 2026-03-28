@@ -25,28 +25,16 @@ use tracing::info;
 
 use super::super::helpers::cedar::apply_yaml;
 use super::super::helpers::docker::run_kubectl;
+use super::super::helpers::pihole::{pihole_url, pihole_resolver, PIHOLE_PASSWORD};
 use super::super::helpers::{wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT};
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/// PiHole is accessible from K8s nodes at this address (docker-compose on host network).
-const PIHOLE_HOST: &str = "10.0.0.131";
-
-/// PiHole web admin password (from docker-compose WEBPASSWORD env var).
-const PIHOLE_PASSWORD: &str = "lattice";
-
-/// DNS zone managed by PiHole for testing.
 const TEST_ZONE: &str = "e2e.local";
-
-/// Namespace for cert-manager test Certificate resources.
 const CERT_TEST_NAMESPACE: &str = "cert-manager-test";
-
-/// lattice-system namespace (where CRDs live).
 const LATTICE_NS: &str = "lattice-system";
-
-/// CRD names
 const PIHOLE_DNS_PROVIDER: &str = "pihole-e2e";
 const SELF_SIGNED_ISSUER: &str = "e2e-selfsigned";
 const ACME_HTTP_ISSUER: &str = "e2e-acme-http";
@@ -91,6 +79,9 @@ pub async fn run_cert_manager_tests(kubeconfig: &str) -> Result<(), String> {
 async fn test_dns_provider_lifecycle(kubeconfig: &str) -> Result<(), String> {
     info!("[DNS] Testing DNSProvider CRD lifecycle...");
 
+    let pihole = pihole_url();
+    let resolver = pihole_resolver();
+
     // Create the PiHole credentials secret first
     let secret_yaml = format!(
         r#"apiVersion: v1
@@ -115,12 +106,12 @@ metadata:
 spec:
   type: pihole
   zone: {TEST_ZONE}
-  resolver: "{PIHOLE_HOST}:53"
+  resolver: "{resolver}"
   credentialsSecretRef:
     name: pihole-api-key
     namespace: {LATTICE_NS}
   pihole:
-    url: "http://{PIHOLE_HOST}""#
+    url: "{pihole}""#
     );
 
     apply_yaml(kubeconfig, &dns_yaml).await?;
@@ -329,6 +320,7 @@ spec:
 
 async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[DNS] Testing external-dns deployment...");
+    let pihole = pihole_url();
 
     // The operator should have deployed external-dns for the PiHole provider
     // when we added the dns config to the cluster. First, patch the cluster
@@ -382,7 +374,7 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
     if !args.contains("--provider=pihole") {
         return Err(format!("external-dns missing --provider=pihole in args: {args}"));
     }
-    if !args.contains(&format!("--pihole-server=http://{PIHOLE_HOST}")) {
+    if !args.contains(&format!("--pihole-server={pihole}")) {
         return Err(format!("external-dns missing pihole-server arg: {args}"));
     }
 
@@ -397,6 +389,9 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
 async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
     info!("[DNS] Testing CoreDNS forwarding for private zone...");
 
+    let resolver = pihole_resolver();
+    let pihole = pihole_url();
+
     // The operator should have created a coredns-custom ConfigMap with a
     // forward block for the e2e.local zone pointing at PiHole.
     let cm_data = run_kubectl(&[
@@ -406,13 +401,13 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
     ]).await;
 
     match cm_data {
-        Ok(data) if data.contains(TEST_ZONE) && data.contains(PIHOLE_HOST) => {
-            info!("[DNS] CoreDNS custom ConfigMap has forward block for {} -> {}", TEST_ZONE, PIHOLE_HOST);
+        Ok(data) if data.contains(TEST_ZONE) && data.contains(&resolver) => {
+            info!("[DNS] CoreDNS custom ConfigMap has forward block for {} -> {}", TEST_ZONE, resolver);
         }
         Ok(data) => {
             return Err(format!(
                 "CoreDNS custom ConfigMap missing zone/resolver: expected {} -> {}, got: {}",
-                TEST_ZONE, PIHOLE_HOST, data
+                TEST_ZONE, resolver, data
             ));
         }
         Err(e) => {
@@ -420,16 +415,14 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
         }
     }
 
-    // Verify DNS resolution works from a pod by launching a curl pod
-    // and trying to resolve a name in the test zone via dig.
-    // First, add a test record to PiHole via its API.
+    // Add a test record to PiHole via its API, then verify CoreDNS resolves it.
     let add_record_result = run_kubectl(&[
         "--kubeconfig", kubeconfig,
         "run", "dns-test", "--rm", "-i", "--restart=Never",
         "--image=curlimages/curl:8.5.0",
         "--", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
         &format!(
-            "http://{PIHOLE_HOST}/admin/api.php?customdns&action=add&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
+            "{pihole}/admin/api.php?customdns&action=add&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
         ),
     ]).await;
 
@@ -542,13 +535,14 @@ async fn cleanup_test_resources(kubeconfig: &str) {
     ]).await;
 
     // Clean up PiHole test record
+    let pihole = pihole_url();
     let _ = run_kubectl(&[
         "--kubeconfig", kubeconfig,
         "run", "dns-cleanup", "--rm", "-i", "--restart=Never",
         "--image=curlimages/curl:8.5.0",
         "--", "curl", "-s",
         &format!(
-            "http://{PIHOLE_HOST}/admin/api.php?customdns&action=delete&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
+            "{pihole}/admin/api.php?customdns&action=delete&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
         ),
     ]).await;
 
