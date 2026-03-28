@@ -338,13 +338,14 @@ async fn test_scale_down_to_zero(kubeconfig: &str) -> Result<(), String> {
                     "get", "machinedeployment", &md_name, "-n", &capi_ns,
                     "-o", "jsonpath={.spec.replicas}",
                 ]).await;
-                let at_zero = replicas.map(|r| r.trim() == "0").unwrap_or(false);
-                if !at_zero {
-                    if let Ok(r) = replicas {
+                match &replicas {
+                    Ok(r) if r.trim() == "0" => Ok(true),
+                    Ok(r) => {
                         info!("[NodeAutoscaling] MD replicas still at {}, waiting...", r.trim());
+                        Ok(false)
                     }
+                    Err(_) => Ok(false),
                 }
-                Ok(at_zero)
             }
         },
     )
