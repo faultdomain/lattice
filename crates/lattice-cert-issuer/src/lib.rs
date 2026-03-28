@@ -5,6 +5,7 @@
 
 #![deny(missing_docs)]
 
+pub mod builder;
 mod controller;
 
 pub use controller::reconcile;

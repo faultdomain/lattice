@@ -2,18 +2,24 @@
 //!
 //! Reconciles infrastructure and worker pools for self-managing clusters.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
+use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams};
+use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
-use kube::{Resource, ResourceExt};
+use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_capi::provider::{format_capi_version, pool_resource_suffix};
-use lattice_common::crd::{LatticeCluster, LatticeClusterStatus, WorkerPoolStatus};
+use lattice_cert_issuer::builder::{self, MANAGED_BY_LABEL, MANAGED_BY_VALUE};
+use lattice_common::crd::{
+    CertIssuer, CertIssuerPhase, DNSProvider, LatticeCluster, LatticeClusterStatus,
+    WorkerPoolStatus,
+};
 use lattice_common::events::{actions, reasons};
-use lattice_common::{capi_namespace, Error};
+use lattice_common::{capi_namespace, Error, LATTICE_SYSTEM_NAMESPACE};
 
 use crate::controller::{
     autoscaling_warning, build_gpu_cordon_plan, determine_gpu_action, determine_scaling_action,
@@ -361,6 +367,12 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             if let Err(e) = reconcile_infrastructure(client, cluster).await {
                 warn!(error = %e, "failed to reconcile infrastructure, will retry");
             }
+            if let Err(e) = reconcile_issuers(client, cluster).await {
+                warn!(error = %e, "failed to reconcile issuers, will retry");
+            }
+            if let Err(e) = reconcile_dns_forwarding(client, cluster).await {
+                warn!(error = %e, "failed to reconcile DNS forwarding, will retry");
+            }
         }
     }
 
@@ -452,6 +464,248 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
         );
         Ok(Action::requeue(Duration::from_secs(10)))
     }
+}
+
+/// Reconcile cert-manager ClusterIssuers from the cluster's `spec.issuers` map.
+///
+/// For each issuer entry, fetches the CertIssuer CRD, builds a ClusterIssuer JSON,
+/// and applies it via server-side apply. After applying all issuers, removes stale
+/// ClusterIssuers that are labeled as managed but no longer referenced in the spec.
+async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<(), Error> {
+    if cluster.spec.issuers.is_empty() {
+        return Ok(());
+    }
+
+    let ns = cluster
+        .namespace()
+        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let cert_issuer_api: Api<CertIssuer> = Api::namespaced(client.clone(), &ns);
+    let dns_provider_api: Api<DNSProvider> = Api::namespaced(client.clone(), &ns);
+
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "cert-manager.io",
+        "v1",
+        "ClusterIssuer",
+    ));
+    let cluster_issuer_api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+
+    let mut applied_names: HashSet<String> = HashSet::new();
+
+    for (key, cert_issuer_name) in &cluster.spec.issuers {
+        let issuer_crd = match cert_issuer_api.get(cert_issuer_name).await {
+            Ok(crd) => crd,
+            Err(e) => {
+                warn!(
+                    issuer = %cert_issuer_name,
+                    error = %e,
+                    "failed to fetch CertIssuer CRD, skipping"
+                );
+                continue;
+            }
+        };
+
+        // Only process Ready issuers
+        let phase = issuer_crd
+            .status
+            .as_ref()
+            .map(|s| &s.phase)
+            .unwrap_or(&CertIssuerPhase::Pending);
+        if *phase != CertIssuerPhase::Ready {
+            debug!(
+                issuer = %cert_issuer_name,
+                phase = %phase,
+                "CertIssuer not Ready, skipping"
+            );
+            continue;
+        }
+
+        // Fetch DNSProvider if needed for ACME DNS-01
+        let dns_provider = if let Some(ref acme) = issuer_crd.spec.acme {
+            if let Some(ref dns_ref) = acme.dns_provider_ref {
+                match dns_provider_api.get(dns_ref).await {
+                    Ok(dp) => Some(dp),
+                    Err(e) => {
+                        warn!(
+                            issuer = %cert_issuer_name,
+                            dns_provider = %dns_ref,
+                            error = %e,
+                            "failed to fetch DNSProvider, skipping issuer"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let issuer_json = match builder::build_cluster_issuer(
+            key,
+            &issuer_crd.spec,
+            dns_provider.as_ref().map(|dp| &dp.spec),
+        ) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!(
+                    issuer = %cert_issuer_name,
+                    key = %key,
+                    error = %e,
+                    "failed to build ClusterIssuer JSON, skipping"
+                );
+                continue;
+            }
+        };
+
+        let issuer_name = format!("lattice-{}", key);
+        match cluster_issuer_api
+            .patch(
+                &issuer_name,
+                &PatchParams::apply("lattice-cluster-controller"),
+                &Patch::Apply(&issuer_json),
+            )
+            .await
+        {
+            Ok(_) => {
+                info!(cluster_issuer = %issuer_name, "Applied ClusterIssuer");
+                applied_names.insert(issuer_name);
+            }
+            Err(e) => {
+                warn!(
+                    cluster_issuer = %issuer_name,
+                    error = %e,
+                    "failed to apply ClusterIssuer"
+                );
+            }
+        }
+    }
+
+    // Clean up stale ClusterIssuers: managed by us but not in current spec
+    let expected_names: HashSet<String> = cluster
+        .spec
+        .issuers
+        .keys()
+        .map(|k| format!("lattice-{}", k))
+        .collect();
+
+    let label_selector = format!("{}={}", MANAGED_BY_LABEL, MANAGED_BY_VALUE);
+    let list_params = ListParams::default().labels(&label_selector);
+
+    match cluster_issuer_api.list(&list_params).await {
+        Ok(list) => {
+            for item in list.items {
+                if let Some(name) = item.metadata.name.as_deref() {
+                    if !expected_names.contains(name) {
+                        info!(cluster_issuer = %name, "Deleting stale ClusterIssuer");
+                        if let Err(e) = cluster_issuer_api
+                            .delete(name, &Default::default())
+                            .await
+                        {
+                            warn!(
+                                cluster_issuer = %name,
+                                error = %e,
+                                "failed to delete stale ClusterIssuer"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to list ClusterIssuers for cleanup");
+        }
+    }
+
+    Ok(())
+}
+
+/// Reconcile CoreDNS forwarding for DNS zones defined via DNSProvider CRDs.
+///
+/// For each DNS provider in the cluster's `spec.dns.providers` map, fetches the
+/// DNSProvider CRD and (for PiHole providers) adds a conditional forward block to
+/// a `coredns-custom` ConfigMap. CoreDNS's `import` directive picks up custom
+/// zone files automatically.
+///
+/// Cloud providers (Route53, Cloudflare, etc.) don't need CoreDNS forwarding —
+/// they're authoritative DNS managed by external-dns, resolved via public DNS.
+async fn reconcile_dns_forwarding(
+    client: &Client,
+    cluster: &LatticeCluster,
+) -> Result<(), Error> {
+    let dns_config = match &cluster.spec.dns {
+        Some(dns) if !dns.providers.is_empty() => dns,
+        _ => return Ok(()),
+    };
+
+    let ns = cluster
+        .namespace()
+        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let dns_api: Api<DNSProvider> = Api::namespaced(client.clone(), &ns);
+
+    // Collect forward blocks for providers that declare a resolver address.
+    // Public DNS providers (Route53, Cloudflare, etc.) don't set resolver —
+    // their records resolve via the public DNS hierarchy after external-dns creates them.
+    let mut custom_blocks = Vec::new();
+
+    for (_key, provider_name) in &dns_config.providers {
+        let provider = match dns_api.get(provider_name).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(provider = %provider_name, error = %e, "failed to fetch DNSProvider, skipping");
+                continue;
+            }
+        };
+
+        if let Some(ref resolver) = provider.spec.resolver {
+            let zone = &provider.spec.zone;
+            custom_blocks.push(format!(
+                "{zone}:53 {{\n    forward . {resolver}\n    cache 30\n    errors\n}}"
+            ));
+
+            debug!(zone = %zone, resolver = %resolver, "adding CoreDNS forward for private zone");
+        }
+    }
+
+    if custom_blocks.is_empty() {
+        return Ok(());
+    }
+
+    // Build the coredns-custom ConfigMap with all forward blocks
+    let corefile_custom = custom_blocks.join("\n\n");
+    let configmap = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "coredns-custom",
+            "namespace": "kube-system",
+            "labels": {
+                MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+            }
+        },
+        "data": {
+            "lattice-dns.server": corefile_custom,
+        }
+    });
+
+    // Apply via SSA
+    let cm_api: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(client.clone(), "kube-system");
+    cm_api
+        .patch(
+            "coredns-custom",
+            &PatchParams::apply("lattice-cluster-controller"),
+            &Patch::Apply(&configmap),
+        )
+        .await
+        .map_err(|e| Error::internal(format!("failed to apply coredns-custom ConfigMap: {e}")))?;
+
+    info!(
+        zones = custom_blocks.len(),
+        "CoreDNS custom forwarding ConfigMap applied"
+    );
+
+    Ok(())
 }
 
 /// Reconcile all worker pools and return (total_desired, pool_statuses).

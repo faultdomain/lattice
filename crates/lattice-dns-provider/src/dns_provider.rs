@@ -201,6 +201,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         )
     }
@@ -223,6 +225,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         )
     }
@@ -242,6 +246,8 @@ mod tests {
                 cloudflare: Some(CloudflareConfig { proxied: true }),
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         )
     }
@@ -281,6 +287,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         );
         assert!(provider.spec.validate().is_err());
@@ -299,6 +307,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         );
         assert!(provider.spec.validate().is_err());
@@ -319,6 +329,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         );
         assert!(provider.spec.validate().is_err());
@@ -337,6 +349,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         );
         assert!(provider.spec.validate().is_err());
@@ -355,6 +369,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         );
         assert!(provider.spec.validate().is_err());
@@ -385,6 +401,8 @@ mod tests {
                 cloudflare: None,
                 google: None,
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         );
         // Spec validation passes (credentialsSecretRef is not checked there)
@@ -507,6 +525,8 @@ mod tests {
                     project: "my-project".to_string(),
                 }),
                 azure: None,
+                designate: None,
+                resolver: None,
             },
         );
         assert!(provider.spec.validate().is_ok());
@@ -531,6 +551,8 @@ mod tests {
                     subscription_id: "sub-123".to_string(),
                     resource_group: "rg-dns".to_string(),
                 }),
+                designate: None,
+                resolver: None,
             },
         );
         assert!(provider.spec.validate().is_ok());

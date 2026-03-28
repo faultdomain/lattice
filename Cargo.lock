@@ -2722,6 +2722,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lattice-common",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -2796,6 +2797,7 @@ dependencies = [
  "lattice-agent",
  "lattice-capi",
  "lattice-cell",
+ "lattice-cert-issuer",
  "lattice-common",
  "lattice-infra",
  "lattice-move",

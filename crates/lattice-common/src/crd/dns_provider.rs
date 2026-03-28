@@ -64,6 +64,13 @@ pub struct DNSProviderSpec {
     /// DNS zone to manage (e.g., "example.com")
     pub zone: String,
 
+    /// DNS resolver address for private zone forwarding (e.g., "10.0.0.53:53").
+    /// When set, the operator adds a CoreDNS forward block so pods can resolve
+    /// names in this zone. Omit for public zones (Route53, Cloudflare, etc.)
+    /// where resolution works via the public DNS hierarchy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolver: Option<String>,
+
     /// Reference to secret containing provider credentials
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_secret_ref: Option<SecretRef>,
@@ -87,6 +94,10 @@ pub struct DNSProviderSpec {
     /// Azure DNS-specific configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure: Option<AzureDnsConfig>,
+
+    /// OpenStack Designate-specific configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub designate: Option<DesignateConfig>,
 }
 
 /// Supported DNS provider types
@@ -104,6 +115,8 @@ pub enum DNSProviderType {
     Google,
     /// Azure DNS
     Azure,
+    /// OpenStack Designate DNS-as-a-Service
+    Designate,
 }
 
 impl std::fmt::Display for DNSProviderType {
@@ -114,6 +127,7 @@ impl std::fmt::Display for DNSProviderType {
             Self::Cloudflare => write!(f, "Cloudflare"),
             Self::Google => write!(f, "Google"),
             Self::Azure => write!(f, "Azure"),
+            Self::Designate => write!(f, "Designate"),
         }
     }
 }
@@ -165,6 +179,19 @@ pub struct AzureDnsConfig {
 
     /// Azure resource group containing the DNS zone
     pub resource_group: String,
+}
+
+/// OpenStack Designate-specific configuration
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesignateConfig {
+    /// Designate zone ID (if not provided, looked up by zone name)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_id: Option<String>,
+
+    /// OpenStack region
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 /// DNSProvider status
@@ -249,6 +276,13 @@ impl DNSProviderSpec {
                     ));
                 }
             }
+            DNSProviderType::Designate => {
+                if self.designate.is_none() {
+                    return Err(crate::Error::validation(
+                        "designate config required when type is designate",
+                    ));
+                }
+            }
             // Route53 and Cloudflare provider-specific configs are optional
             DNSProviderType::Route53 | DNSProviderType::Cloudflare => {}
         }
@@ -298,6 +332,8 @@ spec:
             cloudflare: None,
             google: None,
             azure: None,
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_err());
     }
@@ -315,6 +351,8 @@ spec:
             cloudflare: None,
             google: None,
             azure: None,
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_err());
     }
@@ -375,6 +413,8 @@ spec:
             cloudflare: None,
             google: None,
             azure: None,
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_err());
     }
@@ -390,6 +430,8 @@ spec:
             cloudflare: None,
             google: None,
             azure: None,
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_err());
     }
@@ -405,6 +447,8 @@ spec:
             cloudflare: None,
             google: None,
             azure: None,
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_err());
     }
@@ -423,6 +467,8 @@ spec:
             cloudflare: None,
             google: None,
             azure: None,
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_ok());
     }
@@ -440,6 +486,8 @@ spec:
                 project: "my-project".to_string(),
             }),
             azure: None,
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_ok());
     }
@@ -458,6 +506,8 @@ spec:
                 subscription_id: "sub-123".to_string(),
                 resource_group: "rg-dns".to_string(),
             }),
+            designate: None,
+            resolver: None,
         };
         assert!(spec.validate().is_ok());
     }
@@ -476,5 +526,42 @@ spec:
         assert_eq!(DNSProviderPhase::Pending.to_string(), "Pending");
         assert_eq!(DNSProviderPhase::Ready.to_string(), "Ready");
         assert_eq!(DNSProviderPhase::Failed.to_string(), "Failed");
+    }
+
+    #[test]
+    fn designate_requires_config() {
+        let spec = DNSProviderSpec {
+            provider_type: DNSProviderType::Designate,
+            zone: "internal.cloud".to_string(),
+            resolver: Some("10.0.0.53:53".to_string()),
+            credentials_secret_ref: None,
+            pihole: None,
+            route53: None,
+            cloudflare: None,
+            google: None,
+            azure: None,
+            designate: None,
+        };
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn designate_with_config_valid() {
+        let spec = DNSProviderSpec {
+            provider_type: DNSProviderType::Designate,
+            zone: "internal.cloud".to_string(),
+            resolver: Some("10.0.0.53:53".to_string()),
+            credentials_secret_ref: None,
+            pihole: None,
+            route53: None,
+            cloudflare: None,
+            google: None,
+            azure: None,
+            designate: Some(DesignateConfig {
+                zone_id: Some("zone-123".to_string()),
+                region: Some("RegionOne".to_string()),
+            }),
+        };
+        assert!(spec.validate().is_ok());
     }
 }

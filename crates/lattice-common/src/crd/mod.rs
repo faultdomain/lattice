@@ -31,7 +31,8 @@ pub use backup_store::{
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
 pub use dns_provider::{
     AzureDnsConfig, CloudflareConfig, DNSProvider, DNSProviderPhase, DNSProviderSpec,
-    DNSProviderStatus, DNSProviderType, GoogleDnsConfig, PiholeConfig, Route53Config,
+    DNSProviderStatus, DNSProviderType, DesignateConfig, GoogleDnsConfig, PiholeConfig,
+    Route53Config,
 };
 pub use cluster::{
     BackupsConfig, ChildClusterHealth, InfraComponentPhase, InfraComponentStatus, LatticeCluster,
