@@ -49,7 +49,8 @@ pub use cluster_routes::{
 };
 pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use issuer::{
-    AcmeIssuerSpec, CaIssuerSpec, DnsConfig, IssuerSpec, IssuerType, VaultIssuerSpec,
+    AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,
+    DnsConfig, IssuerType, VaultIssuerSpec,
 };
 pub use infra_provider::{
     AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,

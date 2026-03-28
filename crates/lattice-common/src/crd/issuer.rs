@@ -1,39 +1,47 @@
-//! Certificate issuer types for LatticeCluster
+//! CertIssuer CRD for certificate issuer management
 //!
-//! Named issuer configurations that the operator reconciles into cert-manager
-//! ClusterIssuer resources. Supports ACME, CA, self-signed, and Vault PKI.
+//! A CertIssuer represents a named certificate issuer configuration that the
+//! operator reconciles into cert-manager ClusterIssuer resources. Supports
+//! ACME, CA, self-signed, and Vault PKI.
 
+use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::SecretRef;
 
-/// A named certificate issuer configuration.
+/// CertIssuer defines a certificate issuer configuration.
 ///
-/// Each entry in `LatticeClusterSpec.issuers` generates a cert-manager
-/// ClusterIssuer named `lattice-{key}`. Services reference these issuers
-/// via `IngressTls.issuerRef`.
+/// Each CertIssuer generates a cert-manager ClusterIssuer named
+/// `lattice-{metadata.name}`. Services reference these issuers via
+/// `IngressTls.issuerRef`.
 ///
 /// Example YAML:
 /// ```yaml
-/// issuers:
-///   public:
-///     type: acme
-///     acme:
-///       email: ops@example.com
-///       server: https://acme-v2.api.letsencrypt.org/directory
-///       dnsProviderRef: public
-///   internal:
-///     type: ca
-///     ca:
-///       secretRef:
-///         name: internal-ca
-///   dev:
-///     type: selfSigned
+/// apiVersion: lattice.dev/v1alpha1
+/// kind: CertIssuer
+/// metadata:
+///   name: public
+/// spec:
+///   type: acme
+///   acme:
+///     email: ops@example.com
+///     server: https://acme-v2.api.letsencrypt.org/directory
+///     dnsProviderRef: public
 /// ```
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[kube(
+    group = "lattice.dev",
+    version = "v1alpha1",
+    kind = "CertIssuer",
+    namespaced,
+    status = "CertIssuerStatus",
+    printcolumn = r#"{"name":"Type","type":"string","jsonPath":".spec.type"}"#,
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
 #[serde(rename_all = "camelCase")]
-pub struct IssuerSpec {
+pub struct CertIssuerSpec {
     /// Issuer type
     #[serde(rename = "type")]
     pub type_: IssuerType,
@@ -88,7 +96,7 @@ pub struct AcmeIssuerSpec {
     /// ACME server URL (e.g., "https://acme-v2.api.letsencrypt.org/directory")
     pub server: String,
 
-    /// Reference to a key in `dns.providers` for DNS-01 challenges.
+    /// Reference to a DNSProvider CRD for DNS-01 challenges.
     /// When set, generates a DNS-01 solver using the referenced DNSProvider's
     /// credentials. When absent, generates an HTTP-01 solver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,58 +140,98 @@ pub struct DnsConfig {
     pub providers: std::collections::BTreeMap<String, String>,
 }
 
-impl IssuerSpec {
-    /// Validate the issuer spec.
-    pub fn validate(
-        &self,
-        name: &str,
-        dns_providers: &std::collections::BTreeMap<String, String>,
-    ) -> Result<(), String> {
-        crate::crd::validate_dns_label(name, "issuer name")?;
+/// CertIssuer status
+///
+/// All optional fields serialize as `null` (no `skip_serializing_if`) so that
+/// merge-patch status updates correctly clear stale values.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CertIssuerStatus {
+    /// Current phase
+    #[serde(default)]
+    pub phase: CertIssuerPhase,
 
+    /// Human-readable message
+    #[serde(default)]
+    pub message: Option<String>,
+
+    /// Last time the issuer was validated
+    #[serde(default)]
+    pub last_validated: Option<String>,
+
+    /// Generation of the spec that was last reconciled
+    #[serde(default)]
+    pub observed_generation: Option<i64>,
+}
+
+/// CertIssuer phase
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CertIssuerPhase {
+    /// Issuer is being validated
+    #[default]
+    Pending,
+    /// Issuer validated, ready for use
+    Ready,
+    /// Issuer validation failed
+    Failed,
+}
+
+impl std::fmt::Display for CertIssuerPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Ready => write!(f, "Ready"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
+impl CertIssuerSpec {
+    /// Validate the issuer spec. Returns an error if invalid.
+    pub fn validate(&self) -> Result<(), crate::Error> {
         match self.type_ {
             IssuerType::Acme => {
                 let acme = self.acme.as_ref().ok_or_else(|| {
-                    format!("issuer '{name}': acme config required when type is acme")
+                    crate::Error::validation("acme config required when type is acme")
                 })?;
                 if acme.email.is_empty() {
-                    return Err(format!("issuer '{name}': acme.email cannot be empty"));
+                    return Err(crate::Error::validation("acme.email cannot be empty"));
                 }
                 if acme.server.is_empty() {
-                    return Err(format!("issuer '{name}': acme.server cannot be empty"));
+                    return Err(crate::Error::validation("acme.server cannot be empty"));
                 }
                 if let Some(ref dns_ref) = acme.dns_provider_ref {
-                    if !dns_providers.contains_key(dns_ref) {
-                        return Err(format!(
-                            "issuer '{name}': dnsProviderRef '{dns_ref}' not found in dns.providers (available: {:?})",
-                            dns_providers.keys().collect::<Vec<_>>()
+                    if dns_ref.is_empty() {
+                        return Err(crate::Error::validation(
+                            "acme.dnsProviderRef cannot be empty when specified",
                         ));
                     }
                 }
             }
             IssuerType::Ca => {
                 if self.ca.is_none() {
-                    return Err(format!(
-                        "issuer '{name}': ca config required when type is ca"
+                    return Err(crate::Error::validation(
+                        "ca config required when type is ca",
                     ));
                 }
             }
             IssuerType::Vault => {
                 let vault = self.vault.as_ref().ok_or_else(|| {
-                    format!("issuer '{name}': vault config required when type is vault")
+                    crate::Error::validation("vault config required when type is vault")
                 })?;
                 if vault.server.is_empty() {
-                    return Err(format!("issuer '{name}': vault.server cannot be empty"));
+                    return Err(crate::Error::validation("vault.server cannot be empty"));
                 }
                 if vault.path.is_empty() {
-                    return Err(format!("issuer '{name}': vault.path cannot be empty"));
+                    return Err(crate::Error::validation("vault.path cannot be empty"));
                 }
             }
             IssuerType::SelfSigned => {
                 // No config needed — but reject extraneous fields
                 if self.acme.is_some() || self.ca.is_some() || self.vault.is_some() {
-                    return Err(format!(
-                        "issuer '{name}': selfSigned type must not have acme, ca, or vault config"
+                    return Err(crate::Error::validation(
+                        "selfSigned type must not have acme, ca, or vault config",
                     ));
                 }
             }
@@ -215,12 +263,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn empty_providers() -> BTreeMap<String, String> {
-        BTreeMap::new()
-    }
-
-    fn with_provider(key: &str, value: &str) -> BTreeMap<String, String> {
-        BTreeMap::from([(key.to_string(), value.to_string())])
+    fn make_issuer(name: &str, spec: CertIssuerSpec) -> CertIssuer {
+        CertIssuer::new(name, spec)
     }
 
     // =========================================================================
@@ -229,22 +273,293 @@ mod tests {
 
     #[test]
     fn acme_valid() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Acme,
-            acme: Some(AcmeIssuerSpec {
-                email: "ops@example.com".to_string(),
-                server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
-                dns_provider_ref: None,
-            }),
-            ca: None,
-            vault: None,
-        };
-        assert!(spec.validate("public", &empty_providers()).is_ok());
+        let issuer = make_issuer(
+            "public",
+            CertIssuerSpec {
+                type_: IssuerType::Acme,
+                acme: Some(AcmeIssuerSpec {
+                    email: "ops@example.com".to_string(),
+                    server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
+                    dns_provider_ref: None,
+                }),
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_ok());
     }
 
     #[test]
     fn acme_with_dns_provider_ref_valid() {
-        let spec = IssuerSpec {
+        let issuer = make_issuer(
+            "public",
+            CertIssuerSpec {
+                type_: IssuerType::Acme,
+                acme: Some(AcmeIssuerSpec {
+                    email: "ops@example.com".to_string(),
+                    server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
+                    dns_provider_ref: Some("public".to_string()),
+                }),
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_ok());
+    }
+
+    #[test]
+    fn acme_empty_dns_provider_ref_fails() {
+        let issuer = make_issuer(
+            "public",
+            CertIssuerSpec {
+                type_: IssuerType::Acme,
+                acme: Some(AcmeIssuerSpec {
+                    email: "ops@example.com".to_string(),
+                    server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
+                    dns_provider_ref: Some(String::new()),
+                }),
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    #[test]
+    fn acme_missing_config_fails() {
+        let issuer = make_issuer(
+            "public",
+            CertIssuerSpec {
+                type_: IssuerType::Acme,
+                acme: None,
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    #[test]
+    fn acme_empty_email_fails() {
+        let issuer = make_issuer(
+            "public",
+            CertIssuerSpec {
+                type_: IssuerType::Acme,
+                acme: Some(AcmeIssuerSpec {
+                    email: String::new(),
+                    server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
+                    dns_provider_ref: None,
+                }),
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    #[test]
+    fn acme_empty_server_fails() {
+        let issuer = make_issuer(
+            "public",
+            CertIssuerSpec {
+                type_: IssuerType::Acme,
+                acme: Some(AcmeIssuerSpec {
+                    email: "ops@example.com".to_string(),
+                    server: String::new(),
+                    dns_provider_ref: None,
+                }),
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    // =========================================================================
+    // CA Issuer Tests
+    // =========================================================================
+
+    #[test]
+    fn ca_valid() {
+        let issuer = make_issuer(
+            "internal",
+            CertIssuerSpec {
+                type_: IssuerType::Ca,
+                acme: None,
+                ca: Some(CaIssuerSpec {
+                    secret_ref: SecretRef {
+                        name: "internal-ca".to_string(),
+                        namespace: "lattice-system".to_string(),
+                    },
+                }),
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_ok());
+    }
+
+    #[test]
+    fn ca_missing_config_fails() {
+        let issuer = make_issuer(
+            "internal",
+            CertIssuerSpec {
+                type_: IssuerType::Ca,
+                acme: None,
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    // =========================================================================
+    // Self-Signed Issuer Tests
+    // =========================================================================
+
+    #[test]
+    fn self_signed_valid() {
+        let issuer = make_issuer(
+            "dev",
+            CertIssuerSpec {
+                type_: IssuerType::SelfSigned,
+                acme: None,
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_ok());
+    }
+
+    #[test]
+    fn self_signed_with_acme_config_fails() {
+        let issuer = make_issuer(
+            "dev",
+            CertIssuerSpec {
+                type_: IssuerType::SelfSigned,
+                acme: Some(AcmeIssuerSpec {
+                    email: "ops@example.com".to_string(),
+                    server: "https://acme.example.com".to_string(),
+                    dns_provider_ref: None,
+                }),
+                ca: None,
+                vault: None,
+            },
+        );
+        let err = issuer.spec.validate().unwrap_err();
+        assert!(err.to_string().contains("must not have"));
+    }
+
+    // =========================================================================
+    // Vault Issuer Tests
+    // =========================================================================
+
+    #[test]
+    fn vault_valid() {
+        let issuer = make_issuer(
+            "vault-pki",
+            CertIssuerSpec {
+                type_: IssuerType::Vault,
+                acme: None,
+                ca: None,
+                vault: Some(VaultIssuerSpec {
+                    server: "https://vault.example.com".to_string(),
+                    path: "pki".to_string(),
+                    auth_secret_ref: SecretRef {
+                        name: "vault-auth".to_string(),
+                        namespace: "lattice-system".to_string(),
+                    },
+                }),
+            },
+        );
+        assert!(issuer.spec.validate().is_ok());
+    }
+
+    #[test]
+    fn vault_missing_config_fails() {
+        let issuer = make_issuer(
+            "vault-pki",
+            CertIssuerSpec {
+                type_: IssuerType::Vault,
+                acme: None,
+                ca: None,
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    #[test]
+    fn vault_empty_server_fails() {
+        let issuer = make_issuer(
+            "vault-pki",
+            CertIssuerSpec {
+                type_: IssuerType::Vault,
+                acme: None,
+                ca: None,
+                vault: Some(VaultIssuerSpec {
+                    server: String::new(),
+                    path: "pki".to_string(),
+                    auth_secret_ref: SecretRef {
+                        name: "vault-auth".to_string(),
+                        namespace: "lattice-system".to_string(),
+                    },
+                }),
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    #[test]
+    fn vault_empty_path_fails() {
+        let issuer = make_issuer(
+            "vault-pki",
+            CertIssuerSpec {
+                type_: IssuerType::Vault,
+                acme: None,
+                ca: None,
+                vault: Some(VaultIssuerSpec {
+                    server: "https://vault.example.com".to_string(),
+                    path: String::new(),
+                    auth_secret_ref: SecretRef {
+                        name: "vault-auth".to_string(),
+                        namespace: "lattice-system".to_string(),
+                    },
+                }),
+            },
+        );
+        assert!(issuer.spec.validate().is_err());
+    }
+
+    // =========================================================================
+    // IssuerType Display
+    // =========================================================================
+
+    #[test]
+    fn issuer_type_display() {
+        assert_eq!(IssuerType::Acme.to_string(), "ACME");
+        assert_eq!(IssuerType::Ca.to_string(), "CA");
+        assert_eq!(IssuerType::SelfSigned.to_string(), "SelfSigned");
+        assert_eq!(IssuerType::Vault.to_string(), "Vault");
+    }
+
+    // =========================================================================
+    // CertIssuerPhase Display
+    // =========================================================================
+
+    #[test]
+    fn cert_issuer_phase_display() {
+        assert_eq!(CertIssuerPhase::Pending.to_string(), "Pending");
+        assert_eq!(CertIssuerPhase::Ready.to_string(), "Ready");
+        assert_eq!(CertIssuerPhase::Failed.to_string(), "Failed");
+    }
+
+    // =========================================================================
+    // YAML Roundtrip
+    // =========================================================================
+
+    #[test]
+    fn cert_issuer_spec_json_roundtrip() {
+        let spec = CertIssuerSpec {
             type_: IssuerType::Acme,
             acme: Some(AcmeIssuerSpec {
                 email: "ops@example.com".to_string(),
@@ -254,218 +569,18 @@ mod tests {
             ca: None,
             vault: None,
         };
-        assert!(spec
-            .validate("public", &with_provider("public", "route53-prod"))
-            .is_ok());
-    }
-
-    #[test]
-    fn acme_missing_dns_provider_ref_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Acme,
-            acme: Some(AcmeIssuerSpec {
-                email: "ops@example.com".to_string(),
-                server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
-                dns_provider_ref: Some("nonexistent".to_string()),
-            }),
-            ca: None,
-            vault: None,
-        };
-        let err = spec.validate("public", &empty_providers()).unwrap_err();
-        assert!(err.contains("not found in dns.providers"));
-    }
-
-    #[test]
-    fn acme_missing_config_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Acme,
-            acme: None,
-            ca: None,
-            vault: None,
-        };
-        assert!(spec.validate("public", &empty_providers()).is_err());
-    }
-
-    #[test]
-    fn acme_empty_email_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Acme,
-            acme: Some(AcmeIssuerSpec {
-                email: String::new(),
-                server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
-                dns_provider_ref: None,
-            }),
-            ca: None,
-            vault: None,
-        };
-        assert!(spec.validate("public", &empty_providers()).is_err());
-    }
-
-    #[test]
-    fn acme_empty_server_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Acme,
-            acme: Some(AcmeIssuerSpec {
-                email: "ops@example.com".to_string(),
-                server: String::new(),
-                dns_provider_ref: None,
-            }),
-            ca: None,
-            vault: None,
-        };
-        assert!(spec.validate("public", &empty_providers()).is_err());
+        let json = serde_json::to_string(&spec).expect("serialize");
+        let parsed: CertIssuerSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(spec, parsed);
     }
 
     // =========================================================================
-    // CA Issuer Tests
+    // DnsConfig Validation (unchanged)
     // =========================================================================
 
-    #[test]
-    fn ca_valid() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Ca,
-            acme: None,
-            ca: Some(CaIssuerSpec {
-                secret_ref: SecretRef {
-                    name: "internal-ca".to_string(),
-                    namespace: "lattice-system".to_string(),
-                },
-            }),
-            vault: None,
-        };
-        assert!(spec.validate("internal", &empty_providers()).is_ok());
+    fn with_provider(key: &str, value: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(key.to_string(), value.to_string())])
     }
-
-    #[test]
-    fn ca_missing_config_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Ca,
-            acme: None,
-            ca: None,
-            vault: None,
-        };
-        assert!(spec.validate("internal", &empty_providers()).is_err());
-    }
-
-    // =========================================================================
-    // Self-Signed Issuer Tests
-    // =========================================================================
-
-    #[test]
-    fn self_signed_valid() {
-        let spec = IssuerSpec {
-            type_: IssuerType::SelfSigned,
-            acme: None,
-            ca: None,
-            vault: None,
-        };
-        assert!(spec.validate("dev", &empty_providers()).is_ok());
-    }
-
-    #[test]
-    fn self_signed_with_acme_config_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::SelfSigned,
-            acme: Some(AcmeIssuerSpec {
-                email: "ops@example.com".to_string(),
-                server: "https://acme.example.com".to_string(),
-                dns_provider_ref: None,
-            }),
-            ca: None,
-            vault: None,
-        };
-        let err = spec.validate("dev", &empty_providers()).unwrap_err();
-        assert!(err.contains("must not have"));
-    }
-
-    // =========================================================================
-    // Vault Issuer Tests
-    // =========================================================================
-
-    #[test]
-    fn vault_valid() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Vault,
-            acme: None,
-            ca: None,
-            vault: Some(VaultIssuerSpec {
-                server: "https://vault.example.com".to_string(),
-                path: "pki".to_string(),
-                auth_secret_ref: SecretRef {
-                    name: "vault-auth".to_string(),
-                    namespace: "lattice-system".to_string(),
-                },
-            }),
-        };
-        assert!(spec.validate("vault-pki", &empty_providers()).is_ok());
-    }
-
-    #[test]
-    fn vault_missing_config_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Vault,
-            acme: None,
-            ca: None,
-            vault: None,
-        };
-        assert!(spec.validate("vault-pki", &empty_providers()).is_err());
-    }
-
-    #[test]
-    fn vault_empty_server_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Vault,
-            acme: None,
-            ca: None,
-            vault: Some(VaultIssuerSpec {
-                server: String::new(),
-                path: "pki".to_string(),
-                auth_secret_ref: SecretRef {
-                    name: "vault-auth".to_string(),
-                    namespace: "lattice-system".to_string(),
-                },
-            }),
-        };
-        assert!(spec.validate("vault-pki", &empty_providers()).is_err());
-    }
-
-    #[test]
-    fn vault_empty_path_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Vault,
-            acme: None,
-            ca: None,
-            vault: Some(VaultIssuerSpec {
-                server: "https://vault.example.com".to_string(),
-                path: String::new(),
-                auth_secret_ref: SecretRef {
-                    name: "vault-auth".to_string(),
-                    namespace: "lattice-system".to_string(),
-                },
-            }),
-        };
-        assert!(spec.validate("vault-pki", &empty_providers()).is_err());
-    }
-
-    // =========================================================================
-    // Issuer Name Validation
-    // =========================================================================
-
-    #[test]
-    fn invalid_issuer_name_fails() {
-        let spec = IssuerSpec {
-            type_: IssuerType::SelfSigned,
-            acme: None,
-            ca: None,
-            vault: None,
-        };
-        let err = spec.validate("My_Issuer", &empty_providers()).unwrap_err();
-        assert!(err.contains("issuer name"));
-    }
-
-    // =========================================================================
-    // DnsConfig Validation
-    // =========================================================================
 
     #[test]
     fn dns_config_valid() {
@@ -489,39 +604,6 @@ mod tests {
             providers: BTreeMap::from([("My_Provider".to_string(), "route53-prod".to_string())]),
         };
         assert!(config.validate().is_err());
-    }
-
-    // =========================================================================
-    // IssuerType Display
-    // =========================================================================
-
-    #[test]
-    fn issuer_type_display() {
-        assert_eq!(IssuerType::Acme.to_string(), "ACME");
-        assert_eq!(IssuerType::Ca.to_string(), "CA");
-        assert_eq!(IssuerType::SelfSigned.to_string(), "SelfSigned");
-        assert_eq!(IssuerType::Vault.to_string(), "Vault");
-    }
-
-    // =========================================================================
-    // YAML Roundtrip
-    // =========================================================================
-
-    #[test]
-    fn issuer_spec_json_roundtrip() {
-        let spec = IssuerSpec {
-            type_: IssuerType::Acme,
-            acme: Some(AcmeIssuerSpec {
-                email: "ops@example.com".to_string(),
-                server: "https://acme-v2.api.letsencrypt.org/directory".to_string(),
-                dns_provider_ref: Some("public".to_string()),
-            }),
-            ca: None,
-            vault: None,
-        };
-        let json = serde_json::to_string(&spec).expect("serialize");
-        let parsed: IssuerSpec = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(spec, parsed);
     }
 
     #[test]

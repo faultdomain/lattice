@@ -26,9 +26,10 @@ use lattice_cell::parent::ParentServers;
 use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
-    BackupStore, CedarPolicy, ClusterConfig, InfraProvider, LatticeCluster, LatticeClusterBackup,
-    LatticeClusterRoutes, LatticeJob, LatticeMeshMember, LatticeModel, LatticeRestore,
-    LatticeService, MonitoringConfig, OIDCProvider, ProviderType, SecretProvider,
+    BackupStore, CedarPolicy, CertIssuer, ClusterConfig, DNSProvider, InfraProvider,
+    LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember,
+    LatticeModel, LatticeRestore, LatticeService, MonitoringConfig, OIDCProvider, ProviderType,
+    SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
@@ -475,6 +476,8 @@ pub fn build_cluster_provider_controllers(
     tracing::info!("- SecretProvider controller");
     tracing::info!("- CedarPolicy controller");
     tracing::info!("- OIDCProvider controller");
+    tracing::info!("- DNSProvider controller");
+    tracing::info!("- CertIssuer controller");
 
     vec![
         simple_controller(
@@ -496,10 +499,22 @@ pub fn build_cluster_provider_controllers(
             "CedarPolicy",
         ),
         simple_controller(
-            Api::<OIDCProvider>::all(client),
+            Api::<OIDCProvider>::all(client.clone()),
             oidc_provider_ctrl::reconcile,
-            ctx,
+            ctx.clone(),
             "OIDCProvider",
+        ),
+        simple_controller(
+            Api::<DNSProvider>::all(client.clone()),
+            lattice_dns_provider::reconcile,
+            ctx.clone(),
+            "DNSProvider",
+        ),
+        simple_controller(
+            Api::<CertIssuer>::all(client),
+            lattice_cert_issuer::reconcile,
+            ctx,
+            "CertIssuer",
         ),
     ]
 }
@@ -577,6 +592,8 @@ pub fn build_all_provider_controllers(
     tracing::info!("- SecretProvider controller");
     tracing::info!("- CedarPolicy controller");
     tracing::info!("- OIDCProvider controller");
+    tracing::info!("- DNSProvider controller");
+    tracing::info!("- CertIssuer controller");
     tracing::info!("- BackupStore controller");
     tracing::info!("- LatticeClusterBackup controller");
     tracing::info!("- LatticeRestore controller");
@@ -606,6 +623,18 @@ pub fn build_all_provider_controllers(
             oidc_provider_ctrl::reconcile,
             ctx.clone(),
             "OIDCProvider",
+        ),
+        simple_controller(
+            Api::<DNSProvider>::all(client.clone()),
+            lattice_dns_provider::reconcile,
+            ctx.clone(),
+            "DNSProvider",
+        ),
+        simple_controller(
+            Api::<CertIssuer>::all(client.clone()),
+            lattice_cert_issuer::reconcile,
+            ctx.clone(),
+            "CertIssuer",
         ),
         simple_controller(
             Api::<BackupStore>::all(client.clone()),

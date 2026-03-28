@@ -27,6 +27,8 @@ members = [
     "crates/lattice-cost",
     "crates/lattice-daemonset",
     "crates/lattice-gpu-monitor",
+    "crates/lattice-dns-provider",
+    "crates/lattice-cert-issuer",
 ]
 
 [workspace.package]
@@ -60,6 +62,8 @@ lattice-webhook = { path = "crates/lattice-webhook" }
 lattice-cost = { path = "crates/lattice-cost" }
 lattice-daemonset = { path = "crates/lattice-daemonset" }
 lattice-gpu-monitor = { path = "crates/lattice-gpu-monitor" }
+lattice-dns-provider = { path = "crates/lattice-dns-provider" }
+lattice-cert-issuer = { path = "crates/lattice-cert-issuer" }
 
 # ML inference
 burn = { version = "0.20", default-features = false, features = ["ndarray", "autodiff"] }

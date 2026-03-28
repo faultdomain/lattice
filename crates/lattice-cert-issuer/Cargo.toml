@@ -1,0 +1,25 @@
+[package]
+name = "lattice-cert-issuer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CertIssuer controller for Lattice - validates certificate issuer configuration"
+
+[dependencies]
+lattice-common = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

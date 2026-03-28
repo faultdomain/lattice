@@ -7,7 +7,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::issuer::{DnsConfig, IssuerSpec};
+use super::issuer::DnsConfig;
 use super::topology::NetworkTopologyConfig;
 use super::types::{
     ClusterPhase, Condition, EndpointsSpec, NodeSpec, ProviderSpec, RegistryMirror,
@@ -127,10 +127,12 @@ pub struct LatticeClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<DnsConfig>,
 
-    /// Named cert-manager issuers to create as ClusterIssuers.
-    /// Each key becomes a ClusterIssuer named `lattice-{key}`.
+    /// Named cert-manager issuer references.
+    /// Keys are logical names (e.g., "public", "internal"), values are
+    /// names of CertIssuer CRD resources. Each referenced CertIssuer generates
+    /// a cert-manager ClusterIssuer named `lattice-{key}`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub issuers: std::collections::BTreeMap<String, IssuerSpec>,
+    pub issuers: std::collections::BTreeMap<String, String>,
 
     /// Container image for the Lattice operator on this cluster.
     pub lattice_image: String,
@@ -166,17 +168,14 @@ impl LatticeClusterSpec {
             dns.validate().map_err(crate::Error::validation)?;
         }
 
-        // Validate issuers
-        let dns_providers = self
-            .dns
-            .as_ref()
-            .map(|d| &d.providers)
-            .cloned()
-            .unwrap_or_default();
-        for (name, issuer) in &self.issuers {
-            issuer
-                .validate(name, &dns_providers)
-                .map_err(crate::Error::validation)?;
+        // Validate issuer references
+        for (key, cert_issuer_ref) in &self.issuers {
+            crate::crd::validate_dns_label(key, "issuer key").map_err(crate::Error::validation)?;
+            if cert_issuer_ref.is_empty() {
+                return Err(crate::Error::validation(format!(
+                    "issuers['{key}']: CertIssuer reference cannot be empty"
+                )));
+            }
         }
 
         Ok(())

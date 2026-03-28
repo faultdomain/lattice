@@ -2715,6 +2715,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-cert-issuer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-cli"
 version = "0.1.0"
 dependencies = [
@@ -2886,6 +2898,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-dns-provider"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-gpu-monitor"
 version = "0.1.0"
 dependencies = [
@@ -3052,10 +3077,12 @@ dependencies = [
  "lattice-capi",
  "lattice-cedar",
  "lattice-cell",
+ "lattice-cert-issuer",
  "lattice-cloud-provider",
  "lattice-cluster",
  "lattice-common",
  "lattice-cost",
+ "lattice-dns-provider",
  "lattice-infra",
  "lattice-job",
  "lattice-mesh-member",
