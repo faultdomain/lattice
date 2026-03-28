@@ -360,6 +360,7 @@ async fn check_cedar_wildcards(
                 let req = MeshWildcardRequest {
                     service_name: sa_name.to_string(),
                     namespace: namespace.to_string(),
+                    kind: "service".to_string(),
                     direction,
                 };
                 cedar.authorize_mesh_wildcard(&req).await.is_allowed()

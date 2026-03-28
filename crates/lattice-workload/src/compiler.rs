@@ -31,7 +31,7 @@ use crate::pipeline::{env, files, pod_template::PodTemplateCompiler, secrets::Se
 /// Uses a builder pattern for optional features:
 ///
 /// ```rust,ignore
-/// let compiled = WorkloadCompiler::new(name, namespace, workload, runtime, provider_type, cedar)
+/// let compiled = WorkloadCompiler::new(name, namespace, "service", workload, runtime, provider_type, cedar)
 ///     .with_cluster_name(cluster_name)
 ///     .with_volume_authorization(VolumeAuthorizationMode::Full { graph })
 ///     .with_annotations(&annotations)
@@ -41,6 +41,7 @@ use crate::pipeline::{env, files, pod_template::PodTemplateCompiler, secrets::Se
 pub struct WorkloadCompiler<'a> {
     name: &'a str,
     namespace: &'a str,
+    kind: &'a str,
     workload: &'a WorkloadSpec,
     runtime: &'a RuntimeSpec,
     provider_type: ProviderType,
@@ -61,9 +62,12 @@ impl<'a> WorkloadCompiler<'a> {
     /// Create a new WorkloadCompiler with required parameters.
     ///
     /// Cedar is required — authorization cannot be bypassed.
+    /// `kind` identifies the workload type ("service", "job", "model") for
+    /// Cedar policy evaluation.
     pub fn new(
         name: &'a str,
         namespace: &'a str,
+        kind: &'a str,
         workload: &'a WorkloadSpec,
         runtime: &'a RuntimeSpec,
         provider_type: ProviderType,
@@ -72,6 +76,7 @@ impl<'a> WorkloadCompiler<'a> {
         Self {
             name,
             namespace,
+            kind,
             workload,
             runtime,
             provider_type,
@@ -208,6 +213,7 @@ impl<'a> WorkloadCompiler<'a> {
             self.cedar,
             self.name,
             self.namespace,
+            self.kind,
             self.workload,
         )
         .await?;
@@ -226,6 +232,7 @@ impl<'a> WorkloadCompiler<'a> {
                         graph,
                         self.name,
                         self.namespace,
+                        self.kind,
                         self.workload,
                     )
                     .await?;
@@ -235,6 +242,7 @@ impl<'a> WorkloadCompiler<'a> {
                         self.cedar,
                         self.name,
                         self.namespace,
+                        self.kind,
                         self.workload,
                     )
                     .await?;
@@ -246,6 +254,7 @@ impl<'a> WorkloadCompiler<'a> {
             self.cedar,
             self.name,
             self.namespace,
+            self.kind,
             self.workload,
             self.runtime,
         )
@@ -255,6 +264,7 @@ impl<'a> WorkloadCompiler<'a> {
             self.cedar,
             self.name,
             self.namespace,
+            self.kind,
             self.workload,
         )
         .await?;

@@ -16,6 +16,8 @@ pub struct ExternalEndpointAuthzRequest {
     pub service_name: String,
     /// Service namespace
     pub namespace: String,
+    /// Workload kind ("service", "job", "model")
+    pub kind: String,
     /// (resource_name, host, port, protocol)
     pub endpoints: Vec<(String, String, u16, String)>,
 }
@@ -76,6 +78,7 @@ impl PolicyEngine {
                 engine: self,
                 namespace: &request.namespace,
                 service_name: &request.service_name,
+                kind: &request.kind,
                 resource_name,
                 host,
                 port: *port,
@@ -98,6 +101,7 @@ struct EndpointEvalContext<'a> {
     engine: &'a PolicyEngine,
     namespace: &'a str,
     service_name: &'a str,
+    kind: &'a str,
     resource_name: &'a str,
     host: &'a str,
     port: u16,
@@ -109,7 +113,7 @@ struct EndpointEvalContext<'a> {
 impl EndpointEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), ExternalEndpointDenial> {
         let service_entity =
-            build_service_entity(self.namespace, self.service_name).map_err(|e| {
+            build_service_entity(self.namespace, self.service_name, self.kind).map_err(|e| {
                 self.denial(DenialReason::InternalError(format!(
                     "service entity: {}",
                     e
@@ -179,6 +183,7 @@ mod tests {
         ExternalEndpointAuthzRequest {
             service_name: service.to_string(),
             namespace: namespace.to_string(),
+            kind: "service".to_string(),
             endpoints: endpoints
                 .into_iter()
                 .map(|(name, host, port, proto)| {

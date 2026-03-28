@@ -57,6 +57,8 @@ pub struct MeshWildcardRequest {
     pub service_name: String,
     /// Service namespace
     pub namespace: String,
+    /// Workload kind ("service", "job", "model")
+    pub kind: String,
     /// Which wildcard direction
     pub direction: WildcardDirection,
 }
@@ -98,7 +100,8 @@ impl PolicyEngine {
             Ok(uid) => uid,
             Err(e) => return deny(DenialReason::InternalError(format!("action uid: {}", e))),
         };
-        let service_entity = match build_service_entity(&request.namespace, &request.service_name) {
+        let service_entity =
+            match build_service_entity(&request.namespace, &request.service_name, &request.kind) {
             Ok(e) => e,
             Err(e) => {
                 return deny(DenialReason::InternalError(format!(
@@ -145,6 +148,7 @@ mod tests {
         MeshWildcardRequest {
             service_name: name.to_string(),
             namespace: ns.to_string(),
+            kind: "service".to_string(),
             direction: WildcardDirection::Inbound,
         }
     }
@@ -153,6 +157,7 @@ mod tests {
         MeshWildcardRequest {
             service_name: name.to_string(),
             namespace: ns.to_string(),
+            kind: "service".to_string(),
             direction: WildcardDirection::Outbound,
         }
     }

@@ -268,6 +268,45 @@ impl PolicyEngine {
         self.reload_epoch.load(Ordering::Acquire)
     }
 
+    /// Generic single-request authorization.
+    ///
+    /// Used by the API authorization middleware. Domain-specific batch methods
+    /// (authorize_secrets, etc.) remain for workload compilation.
+    pub async fn authorize(
+        &self,
+        principal: &EntityUid,
+        action: &EntityUid,
+        resource: &EntityUid,
+        context: Context,
+        entities: Entities,
+    ) -> Result<()> {
+        let policy_set = self.policy_set.read().await;
+        let response =
+            self.evaluate_raw(principal, action, resource, context, &entities, &policy_set)?;
+        let action_str = action.to_string();
+        match response.decision() {
+            Decision::Allow => {
+                lattice_common::metrics::record_cedar_decision(
+                    lattice_common::metrics::AuthDecision::Allow,
+                    &action_str,
+                );
+                Ok(())
+            }
+            Decision::Deny => {
+                lattice_common::metrics::record_cedar_decision(
+                    lattice_common::metrics::AuthDecision::Deny,
+                    &action_str,
+                );
+                let reason = if response.diagnostics().reason().next().is_some() {
+                    "explicitly forbidden by policy"
+                } else {
+                    "no permit policy matched"
+                };
+                Err(Error::Forbidden(reason.to_string()))
+            }
+        }
+    }
+
     /// Evaluate a Cedar authorization request with an arbitrary principal, action,
     /// resource, and entity set. Returns the raw Cedar response.
     ///
@@ -898,5 +937,86 @@ mod tests {
             "test",
         );
         assert_eq!(result.unwrap_err(), DenialReason::ExplicitForbid);
+    }
+
+    // ========================================================================
+    // Generic authorize() Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_authorize_allows() {
+        use crate::entities::build_entity_uid;
+        use std::collections::HashSet;
+
+        let engine = PolicyEngine::with_policies("permit(principal, action, resource);").unwrap();
+
+        let principal_uid = build_entity_uid("User", "alice").unwrap();
+        let action_uid = build_entity_uid("Action", "ReadEndpoint").unwrap();
+        let resource_uid = build_entity_uid("ApiRoute", "GET:/api/v1/endpoints").unwrap();
+
+        let principal =
+            Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let resource =
+            Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let entities = Entities::from_entities(vec![principal, resource], None).unwrap();
+
+        assert!(engine
+            .authorize(&principal_uid, &action_uid, &resource_uid, Context::empty(), entities)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_authorize_denies_no_policies() {
+        use crate::entities::build_entity_uid;
+        use std::collections::HashSet;
+
+        let engine = PolicyEngine::new();
+
+        let principal_uid = build_entity_uid("User", "alice").unwrap();
+        let action_uid = build_entity_uid("Action", "ReadEndpoint").unwrap();
+        let resource_uid = build_entity_uid("ApiRoute", "GET:/api/v1/endpoints").unwrap();
+
+        let principal =
+            Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let resource =
+            Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let entities = Entities::from_entities(vec![principal, resource], None).unwrap();
+
+        let err = engine
+            .authorize(&principal_uid, &action_uid, &resource_uid, Context::empty(), entities)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_authorize_denies_explicit_forbid() {
+        use crate::entities::build_entity_uid;
+        use std::collections::HashSet;
+
+        let engine = PolicyEngine::with_policies(
+            "permit(principal, action, resource); forbid(principal, action, resource);",
+        )
+        .unwrap();
+
+        let principal_uid = build_entity_uid("User", "alice").unwrap();
+        let action_uid = build_entity_uid("Action", "ReadEndpoint").unwrap();
+        let resource_uid = build_entity_uid("ApiRoute", "GET:/api/v1/endpoints").unwrap();
+
+        let principal =
+            Entity::new(principal_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let resource =
+            Entity::new(resource_uid.clone(), HashMap::new(), HashSet::new()).unwrap();
+        let entities = Entities::from_entities(vec![principal, resource], None).unwrap();
+
+        let err = engine
+            .authorize(&principal_uid, &action_uid, &resource_uid, Context::empty(), entities)
+            .await
+            .unwrap_err();
+        match err {
+            Error::Forbidden(msg) => assert!(msg.contains("forbidden")),
+            _ => panic!("expected Forbidden"),
+        }
     }
 }

@@ -16,6 +16,8 @@ pub struct SecretAuthzRequest {
     pub service_name: String,
     /// Service namespace
     pub namespace: String,
+    /// Workload kind ("service", "job", "model")
+    pub kind: String,
     /// (resource_name, remote_key, provider_name)
     pub secret_paths: Vec<(String, String, String)>,
 }
@@ -74,6 +76,7 @@ impl PolicyEngine {
                 engine: self,
                 namespace: &request.namespace,
                 service_name: &request.service_name,
+                kind: &request.kind,
                 resource_name,
                 remote_key,
                 provider,
@@ -95,6 +98,7 @@ struct SecretEvalContext<'a> {
     engine: &'a PolicyEngine,
     namespace: &'a str,
     service_name: &'a str,
+    kind: &'a str,
     resource_name: &'a str,
     remote_key: &'a str,
     provider: &'a str,
@@ -105,7 +109,7 @@ struct SecretEvalContext<'a> {
 impl SecretEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecretDenial> {
         let service_entity =
-            build_service_entity(self.namespace, self.service_name).map_err(|e| {
+            build_service_entity(self.namespace, self.service_name, self.kind).map_err(|e| {
                 self.denial(DenialReason::InternalError(format!(
                     "service entity: {}",
                     e
@@ -170,6 +174,7 @@ mod tests {
         SecretAuthzRequest {
             service_name: service.to_string(),
             namespace: namespace.to_string(),
+            kind: "service".to_string(),
             secret_paths: paths
                 .into_iter()
                 .map(|(name, path, provider)| {
@@ -430,5 +435,72 @@ mod tests {
 
         let result = engine.authorize_secrets(&request).await;
         assert!(result.is_allowed()); // empty paths = nothing to deny
+    }
+
+    // ========================================================================
+    // Kind-Based Policy Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_kind_attribute_permits_model() {
+        let engine = PolicyEngine::with_policies(
+            r#"
+            permit(
+                principal,
+                action == Lattice::Action::"AccessSecret",
+                resource
+            ) when {
+                principal.kind == "model" &&
+                resource.path like "gpu/*"
+            };
+            "#,
+        )
+        .unwrap();
+
+        // Model accessing gpu secrets — allowed
+        let mut request = make_request(
+            "ml",
+            "llama",
+            vec![("weights", "gpu/model-weights", "vault")],
+        );
+        request.kind = "model".to_string();
+        assert!(engine.authorize_secrets(&request).await.is_allowed());
+
+        // Service accessing gpu secrets — denied
+        let mut request = make_request(
+            "ml",
+            "llama",
+            vec![("weights", "gpu/model-weights", "vault")],
+        );
+        request.kind = "service".to_string();
+        assert!(!engine.authorize_secrets(&request).await.is_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_kind_agnostic_policy_works_for_all_kinds() {
+        let engine = PolicyEngine::with_policies(
+            r#"
+            permit(
+                principal == Lattice::Service::"payments/checkout",
+                action == Lattice::Action::"AccessSecret",
+                resource
+            );
+            "#,
+        )
+        .unwrap();
+
+        for kind in ["service", "job", "model"] {
+            let mut request = make_request(
+                "payments",
+                "checkout",
+                vec![("secret", "some/path", "vault")],
+            );
+            request.kind = kind.to_string();
+            assert!(
+                engine.authorize_secrets(&request).await.is_allowed(),
+                "kind '{}' should be allowed by kind-agnostic policy",
+                kind
+            );
+        }
     }
 }

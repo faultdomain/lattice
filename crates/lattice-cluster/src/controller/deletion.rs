@@ -119,8 +119,8 @@ async fn handle_non_self_deletion(
     // Once unpivot_import_complete is set, CAPI resources are back on the
     // parent and we can proceed to direct CAPI delete.
     let status = cluster.status.as_ref();
-    let pivot_complete = status.map_or(false, |s| s.pivot_complete);
-    let unpivot_import_complete = status.map_or(false, |s| s.unpivot_import_complete);
+    let pivot_complete = status.is_some_and(|s| s.pivot_complete);
+    let unpivot_import_complete = status.is_some_and(|s| s.unpivot_import_complete);
 
     if pivot_complete && !unpivot_import_complete {
         return handle_pivoted_child_deletion(ctx, &name).await;

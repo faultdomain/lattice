@@ -220,6 +220,7 @@ impl<'a> ServiceCompiler<'a> {
         let mut compiler = lattice_workload::WorkloadCompiler::new(
             name,
             namespace,
+            "service",
             &service.spec.workload,
             &service.spec.runtime,
             self.provider_type,

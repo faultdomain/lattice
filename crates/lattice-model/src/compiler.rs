@@ -235,6 +235,7 @@ async fn compile_workload(
     let mut compiler = WorkloadCompiler::new(
         workload_name,
         ctx.namespace,
+        "model",
         workload,
         runtime,
         ctx.provider_type,

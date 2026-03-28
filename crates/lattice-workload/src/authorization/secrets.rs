@@ -13,6 +13,7 @@ pub(crate) async fn authorize_secrets(
     cedar: &PolicyEngine,
     name: &str,
     namespace: &str,
+    kind: &str,
     workload: &WorkloadSpec,
 ) -> Result<(), CompilationError> {
     let secret_paths: Vec<_> = workload
@@ -34,6 +35,7 @@ pub(crate) async fn authorize_secrets(
         .authorize_secrets(&SecretAuthzRequest {
             service_name: name.to_string(),
             namespace: namespace.to_string(),
+            kind: kind.to_string(),
             secret_paths,
         })
         .await;

@@ -17,7 +17,7 @@ const NAMESPACE: &str = "Lattice";
 // =============================================================================
 
 /// Build an entity UID for a given type and ID
-pub(crate) fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
+pub fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
     let full_type_name = format!("{}::{}", NAMESPACE, type_name);
     let entity_type: EntityTypeName =
         full_type_name
@@ -43,7 +43,7 @@ pub(crate) fn build_entity_uid(type_name: &str, id: &str) -> Result<EntityUid> {
 /// - `Lattice::User::<username>` entity with group parents
 ///
 /// Returns all entities (user + groups).
-pub(crate) fn build_user_entity(username: &str, groups: &[String]) -> Result<Vec<Entity>> {
+pub fn build_user_entity(username: &str, groups: &[String]) -> Result<Vec<Entity>> {
     let mut entities = Vec::new();
 
     // Create group entities and collect UIDs for user membership
@@ -109,17 +109,18 @@ pub(crate) fn build_cluster_entity(
 }
 
 // =============================================================================
-// Service Entity (for secret access)
+// Service Entity
 // =============================================================================
 
-/// Build a service entity for secret access authorization
+/// Build a service entity for authorization
 ///
 /// UID: `Lattice::Service::"namespace/name"`
 ///
 /// Attributes:
 /// - `namespace`: service namespace
 /// - `name`: service name
-pub(crate) fn build_service_entity(namespace: &str, name: &str) -> Result<Entity> {
+/// - `kind`: workload kind ("service", "job", "model")
+pub fn build_service_entity(namespace: &str, name: &str, kind: &str) -> Result<Entity> {
     let uid_str = format!("{}/{}", namespace, name);
     let uid = build_entity_uid("Service", &uid_str)?;
 
@@ -131,6 +132,10 @@ pub(crate) fn build_service_entity(namespace: &str, name: &str) -> Result<Entity
     attrs.insert(
         "name".to_string(),
         RestrictedExpression::new_string(name.to_string()),
+    );
+    attrs.insert(
+        "kind".to_string(),
+        RestrictedExpression::new_string(kind.to_string()),
     );
 
     Entity::new(uid, attrs, HashSet::new())
@@ -278,6 +283,35 @@ pub(crate) fn build_external_endpoint_entity(
 }
 
 // =============================================================================
+// ApiRoute Entity (for route-level authorization)
+// =============================================================================
+
+/// Build an API route entity for route-level authorization
+///
+/// UID: `Lattice::ApiRoute::"METHOD:/path/pattern"`
+///
+/// Attributes:
+/// - `method`: HTTP method (GET, POST, etc.)
+/// - `path`: route path pattern
+pub fn build_api_route_entity(method: &str, path: &str) -> Result<Entity> {
+    let uid_str = format!("{}:{}", method, path);
+    let uid = build_entity_uid("ApiRoute", &uid_str)?;
+
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "method".to_string(),
+        RestrictedExpression::new_string(method.to_string()),
+    );
+    attrs.insert(
+        "path".to_string(),
+        RestrictedExpression::new_string(path.to_string()),
+    );
+
+    Entity::new(uid, attrs, HashSet::new())
+        .map_err(|e| Error::Internal(format!("Failed to create API route entity: {}", e)))
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -339,8 +373,31 @@ mod tests {
 
     #[test]
     fn test_build_service_entity() {
-        let entity = build_service_entity("payments", "checkout").unwrap();
+        let entity = build_service_entity("payments", "checkout", "service").unwrap();
         assert!(entity.uid().to_string().contains("payments/checkout"));
+    }
+
+    #[test]
+    fn test_build_service_entity_kind_variations() {
+        for kind in ["service", "job", "model"] {
+            let entity = build_service_entity("ns", "name", kind).unwrap();
+            assert!(entity.uid().to_string().contains("ns/name"));
+        }
+    }
+
+    #[test]
+    fn test_build_api_route_entity() {
+        let entity = build_api_route_entity("GET", "/api/v1/clusters").unwrap();
+        let uid_str = entity.uid().to_string();
+        assert!(uid_str.contains("ApiRoute"));
+        assert!(uid_str.contains("GET:/api/v1/clusters"));
+    }
+
+    #[test]
+    fn test_api_route_entity_different_methods() {
+        let get = build_api_route_entity("GET", "/api/v1/endpoints").unwrap();
+        let post = build_api_route_entity("POST", "/api/v1/endpoints").unwrap();
+        assert_ne!(get.uid(), post.uid());
     }
 
     #[test]

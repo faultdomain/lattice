@@ -17,6 +17,8 @@ pub struct VolumeAuthzRequest {
     pub service_name: String,
     /// Service namespace
     pub namespace: String,
+    /// Workload kind ("service", "job", "model")
+    pub kind: String,
     /// Volume references to authorize: (resource_name, volume_namespace, volume_id)
     pub volume_refs: Vec<(String, String, String)>,
     /// When true, an explicit `permit` policy is required (default-deny).
@@ -82,6 +84,7 @@ impl PolicyEngine {
                 engine: self,
                 namespace: &request.namespace,
                 service_name: &request.service_name,
+                kind: &request.kind,
                 resource_name,
                 vol_ns,
                 volume_id,
@@ -104,6 +107,7 @@ struct VolumeEvalContext<'a> {
     engine: &'a PolicyEngine,
     namespace: &'a str,
     service_name: &'a str,
+    kind: &'a str,
     resource_name: &'a str,
     vol_ns: &'a str,
     volume_id: &'a str,
@@ -115,7 +119,7 @@ struct VolumeEvalContext<'a> {
 impl VolumeEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), VolumeDenial> {
         let service_entity =
-            build_service_entity(self.namespace, self.service_name).map_err(|e| {
+            build_service_entity(self.namespace, self.service_name, self.kind).map_err(|e| {
                 self.denial(DenialReason::InternalError(format!(
                     "service entity: {}",
                     e
@@ -222,6 +226,7 @@ mod tests {
         VolumeAuthzRequest {
             service_name: service.to_string(),
             namespace: namespace.to_string(),
+            kind: "service".to_string(),
             volume_refs: refs
                 .into_iter()
                 .map(|(name, ns, id)| (name.to_string(), ns.to_string(), id.to_string()))
@@ -238,6 +243,7 @@ mod tests {
         VolumeAuthzRequest {
             service_name: service.to_string(),
             namespace: namespace.to_string(),
+            kind: "service".to_string(),
             volume_refs: refs
                 .into_iter()
                 .map(|(name, ns, id)| (name.to_string(), ns.to_string(), id.to_string()))

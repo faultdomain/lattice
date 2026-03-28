@@ -793,6 +793,7 @@ mod tests {
         let compiled = lattice_workload::WorkloadCompiler::new(
             name,
             namespace,
+            "service",
             &service.spec.workload,
             &service.spec.runtime,
             crate::crd::ProviderType::Docker,

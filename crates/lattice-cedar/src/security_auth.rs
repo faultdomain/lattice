@@ -17,6 +17,8 @@ pub struct SecurityAuthzRequest {
     pub service_name: String,
     /// Service namespace
     pub namespace: String,
+    /// Workload kind ("service", "job", "model")
+    pub kind: String,
     /// Security overrides to authorize
     pub overrides: Vec<SecurityOverrideRequest>,
 }
@@ -85,6 +87,7 @@ impl PolicyEngine {
                 engine: self,
                 namespace: &request.namespace,
                 service_name: &request.service_name,
+                kind: &request.kind,
                 override_req,
                 action_uid: &action_uid,
                 policy_set: &policy_set,
@@ -104,6 +107,7 @@ struct SecurityEvalContext<'a> {
     engine: &'a PolicyEngine,
     namespace: &'a str,
     service_name: &'a str,
+    kind: &'a str,
     override_req: &'a SecurityOverrideRequest,
     action_uid: &'a cedar_policy::EntityUid,
     policy_set: &'a cedar_policy::PolicySet,
@@ -112,7 +116,7 @@ struct SecurityEvalContext<'a> {
 impl SecurityEvalContext<'_> {
     fn evaluate(&self) -> std::result::Result<(), SecurityDenial> {
         let service_entity =
-            build_service_entity(self.namespace, self.service_name).map_err(|e| {
+            build_service_entity(self.namespace, self.service_name, self.kind).map_err(|e| {
                 self.denial(DenialReason::InternalError(format!(
                     "service entity: {}",
                     e
@@ -181,6 +185,7 @@ mod tests {
         SecurityAuthzRequest {
             service_name: service.to_string(),
             namespace: namespace.to_string(),
+            kind: "service".to_string(),
             overrides: overrides
                 .into_iter()
                 .map(|(id, category, container)| SecurityOverrideRequest {

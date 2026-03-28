@@ -132,6 +132,7 @@ pub async fn compile_job(
         let mut compiler = WorkloadCompiler::new(
             &task_full_name,
             namespace,
+            "job",
             &task_spec.workload,
             &task_spec.runtime,
             provider_type,

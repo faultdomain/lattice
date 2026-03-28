@@ -42,6 +42,7 @@ pub(crate) async fn authorize_security_overrides(
     cedar: &PolicyEngine,
     name: &str,
     namespace: &str,
+    kind: &str,
     workload: &WorkloadSpec,
     runtime: &RuntimeSpec,
 ) -> Result<(), CompilationError> {
@@ -55,6 +56,7 @@ pub(crate) async fn authorize_security_overrides(
         .authorize_security_overrides(&SecurityAuthzRequest {
             service_name: name.to_string(),
             namespace: namespace.to_string(),
+            kind: kind.to_string(),
             overrides,
         })
         .await;

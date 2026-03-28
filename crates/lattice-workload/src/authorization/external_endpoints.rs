@@ -14,6 +14,7 @@ pub(crate) async fn authorize_external_endpoints(
     cedar: &PolicyEngine,
     name: &str,
     namespace: &str,
+    kind: &str,
     workload: &WorkloadSpec,
 ) -> Result<(), CompilationError> {
     let endpoints: Vec<_> = workload
@@ -41,6 +42,7 @@ pub(crate) async fn authorize_external_endpoints(
         .authorize_external_endpoints(&ExternalEndpointAuthzRequest {
             service_name: name.to_string(),
             namespace: namespace.to_string(),
+            kind: kind.to_string(),
             endpoints,
         })
         .await;

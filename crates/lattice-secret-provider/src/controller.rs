@@ -961,6 +961,7 @@ mod tests {
             .map(|ep| EgressRule {
                 target: EgressTarget::Fqdn(ep.host.clone()),
                 ports: vec![ep.port],
+                protocol: Default::default(),
             })
             .collect();
 

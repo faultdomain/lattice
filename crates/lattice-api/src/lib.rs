@@ -37,7 +37,7 @@ pub mod server;
 
 pub use auth::{OidcConfig, OidcValidator, UserIdentity};
 pub use auth_chain::AuthChain;
-pub use auth_context::AuthContext;
+pub use auth_context::{auth_context_default, auth_context_from_request, AuthContext};
 pub use backend::{
     ExecSessionHandle, ExecTunnelRequest, K8sTunnelRequest, ProxyBackend, ProxyError,
     ProxyRouteInfo,

@@ -29,6 +29,7 @@ async fn authorize_cedar(
     cedar: &PolicyEngine,
     name: &str,
     namespace: &str,
+    kind: &str,
     volume_refs: Vec<(String, String, String)>,
     require_explicit_permit: bool,
 ) -> Result<(), CompilationError> {
@@ -36,6 +37,7 @@ async fn authorize_cedar(
         .authorize_volumes(&VolumeAuthzRequest {
             service_name: name.to_string(),
             namespace: namespace.to_string(),
+            kind: kind.to_string(),
             volume_refs,
             require_explicit_permit,
         })
@@ -69,6 +71,7 @@ pub(crate) async fn authorize_volumes(
     graph: &ServiceGraph,
     name: &str,
     namespace: &str,
+    kind: &str,
     workload: &WorkloadSpec,
 ) -> Result<(), CompilationError> {
     let volume_refs = collect_volume_refs(namespace, workload);
@@ -116,7 +119,7 @@ pub(crate) async fn authorize_volumes(
     }
 
     // Layer 2: Cedar policy authorization (permissive — owner consent is primary gate)
-    authorize_cedar(cedar, name, namespace, volume_refs, false).await
+    authorize_cedar(cedar, name, namespace, kind, volume_refs, false).await
 }
 
 /// Authorize volume access using Cedar policies only (no owner consent check).
@@ -128,6 +131,7 @@ pub(crate) async fn authorize_volumes_cedar_only(
     cedar: &PolicyEngine,
     name: &str,
     namespace: &str,
+    kind: &str,
     workload: &WorkloadSpec,
 ) -> Result<(), CompilationError> {
     let volume_refs = collect_volume_refs(namespace, workload);
@@ -136,5 +140,5 @@ pub(crate) async fn authorize_volumes_cedar_only(
     }
 
     // Strict mode — Cedar is the sole authorization gate, require explicit permit
-    authorize_cedar(cedar, name, namespace, volume_refs, true).await
+    authorize_cedar(cedar, name, namespace, kind, volume_refs, true).await
 }

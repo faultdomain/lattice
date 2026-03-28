@@ -1,133 +1,38 @@
-//! Authentication context for Cedar policy evaluation
+//! HTTP request → Cedar AuthContext adapter
 //!
-//! Extracts context from HTTP requests for time-based and conditional policies.
-//! All times are UTC.
+//! Extracts temporal and request metadata from Axum HTTP requests and builds
+//! `lattice_cedar::AuthContext` for policy evaluation. All times are UTC.
 
 use axum::body::Body;
 use axum::http::Request;
-use cedar_policy::{Context, RestrictedExpression};
 use chrono::{Datelike, Timelike, Utc};
 
-/// Authentication context extracted from HTTP requests
+pub use lattice_cedar::AuthContext;
+
+/// Build an `AuthContext` from an HTTP request.
 ///
-/// Contains temporal and request metadata for Cedar policy evaluation.
-/// All times are UTC for consistency.
-#[derive(Debug, Clone)]
-pub struct AuthContext {
-    /// Current UTC timestamp in ISO8601 format
-    pub now: String,
-    /// Current hour (0-23 UTC)
-    pub hour: i64,
-    /// Day of week (Mon, Tue, Wed, Thu, Fri, Sat, Sun)
-    pub weekday: String,
-    /// Client IP address
-    pub source_ip: String,
-    /// Emergency access flag (from X-Lattice-Break-Glass header)
-    pub break_glass: bool,
-    /// Break-glass TTL in ISO8601 format (from X-Lattice-Break-Glass-Expires header)
-    pub break_glass_expires: Option<String>,
-    /// Incident reference (from X-Lattice-Incident-Id header)
-    pub incident_id: Option<String>,
+/// Extracts temporal context (always present) and client IP.
+/// Break-glass fields are NOT extracted from client headers to prevent
+/// spoofing — they must be set through trusted server-side mechanisms.
+pub fn auth_context_from_request(req: &Request<Body>) -> AuthContext {
+    let now = Utc::now();
+    AuthContext::new(
+        now.to_rfc3339(),
+        i64::from(now.hour()),
+        weekday_str(now.weekday()),
+        extract_client_ip(req),
+    )
 }
 
-impl AuthContext {
-    /// Create AuthContext from an HTTP request
-    ///
-    /// Extracts temporal context (always present) and client IP.
-    /// Break-glass fields are NOT extracted from client headers to prevent
-    /// spoofing — they must be set through trusted server-side mechanisms.
-    pub fn from_request(req: &Request<Body>) -> Self {
-        let now = Utc::now();
-
-        Self {
-            now: now.to_rfc3339(),
-            hour: i64::from(now.hour()),
-            weekday: weekday_str(now.weekday()),
-            source_ip: extract_client_ip(req),
-            break_glass: false,
-            break_glass_expires: None,
-            incident_id: None,
-        }
-    }
-
-    /// Create AuthContext with explicit values (for testing)
-    #[cfg(test)]
-    pub fn new_for_test(
-        now: &str,
-        hour: i64,
-        weekday: &str,
-        source_ip: &str,
-        break_glass: bool,
-        break_glass_expires: Option<&str>,
-        incident_id: Option<&str>,
-    ) -> Self {
-        Self {
-            now: now.to_string(),
-            hour,
-            weekday: weekday.to_string(),
-            source_ip: source_ip.to_string(),
-            break_glass,
-            break_glass_expires: break_glass_expires.map(String::from),
-            incident_id: incident_id.map(String::from),
-        }
-    }
-
-    /// Convert to Cedar Context for policy evaluation
-    ///
-    /// Creates a Cedar Context with all available fields. Optional fields
-    /// (break_glass_expires, incident_id) are only included when present.
-    pub fn to_cedar_context(&self) -> Result<Context, crate::error::Error> {
-        let mut pairs: Vec<(String, RestrictedExpression)> = vec![
-            (
-                "now".into(),
-                RestrictedExpression::new_string(self.now.clone()),
-            ),
-            ("hour".into(), RestrictedExpression::new_long(self.hour)),
-            (
-                "weekday".into(),
-                RestrictedExpression::new_string(self.weekday.clone()),
-            ),
-            (
-                "sourceIp".into(),
-                RestrictedExpression::new_string(self.source_ip.clone()),
-            ),
-            (
-                "breakGlass".into(),
-                RestrictedExpression::new_bool(self.break_glass),
-            ),
-        ];
-
-        if let Some(ref expires) = self.break_glass_expires {
-            pairs.push((
-                "breakGlassExpires".into(),
-                RestrictedExpression::new_string(expires.clone()),
-            ));
-        }
-        if let Some(ref incident) = self.incident_id {
-            pairs.push((
-                "incidentId".into(),
-                RestrictedExpression::new_string(incident.clone()),
-            ));
-        }
-
-        Context::from_pairs(pairs)
-            .map_err(|e| crate::error::Error::Internal(format!("cedar context: {}", e)))
-    }
-}
-
-impl Default for AuthContext {
-    fn default() -> Self {
-        let now = Utc::now();
-        Self {
-            now: now.to_rfc3339(),
-            hour: i64::from(now.hour()),
-            weekday: weekday_str(now.weekday()),
-            source_ip: "unknown".to_string(),
-            break_glass: false,
-            break_glass_expires: None,
-            incident_id: None,
-        }
-    }
+/// Build a default `AuthContext` with current time and unknown IP.
+pub fn auth_context_default() -> AuthContext {
+    let now = Utc::now();
+    AuthContext::new(
+        now.to_rfc3339(),
+        i64::from(now.hour()),
+        weekday_str(now.weekday()),
+        "unknown".to_string(),
+    )
 }
 
 /// Convert chrono Weekday to string format
@@ -151,7 +56,6 @@ fn weekday_str(day: chrono::Weekday) -> String {
 ///
 /// Falls back to "unknown" if ConnectInfo is not available (e.g., in tests).
 fn extract_client_ip(req: &Request<Body>) -> String {
-    // Use the TCP peer address from axum's ConnectInfo — this cannot be spoofed
     if let Some(connect_info) = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -217,7 +121,6 @@ mod tests {
 
     #[test]
     fn test_extract_client_ip_ignores_xff_headers() {
-        // X-Forwarded-For must NOT be trusted — it's spoofable
         let req = make_request_with_headers(vec![("X-Forwarded-For", "10.0.1.100")]);
         assert_eq!(extract_client_ip(&req), "unknown");
     }
@@ -244,7 +147,7 @@ mod tests {
                 [10, 0, 1, 100],
                 12345,
             ))));
-        let ctx = AuthContext::from_request(&req);
+        let ctx = auth_context_from_request(&req);
 
         assert!(!ctx.now.is_empty());
         assert!(ctx.hour >= 0 && ctx.hour <= 23);
@@ -257,15 +160,13 @@ mod tests {
 
     #[test]
     fn test_auth_context_from_request_ignores_break_glass_headers() {
-        // Break-glass headers from clients are ignored to prevent spoofing.
-        // They must be set through trusted server-side mechanisms.
         let req = make_request_with_headers(vec![
             ("X-Forwarded-For", "10.0.1.100"),
             ("X-Lattice-Break-Glass", "true"),
             ("X-Lattice-Break-Glass-Expires", "2024-06-01T00:00:00Z"),
             ("X-Lattice-Incident-Id", "INC-12345"),
         ]);
-        let ctx = AuthContext::from_request(&req);
+        let ctx = auth_context_from_request(&req);
 
         assert!(
             !ctx.break_glass,
@@ -283,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_auth_context_default() {
-        let ctx = AuthContext::default();
+        let ctx = auth_context_default();
 
         assert!(!ctx.now.is_empty());
         assert!(ctx.hour >= 0 && ctx.hour <= 23);
@@ -300,50 +201,38 @@ mod tests {
 
     #[test]
     fn test_to_cedar_context_basic_fields() {
-        let ctx = AuthContext::new_for_test(
-            "2024-01-15T10:30:00Z",
+        let ctx = AuthContext::new(
+            "2024-01-15T10:30:00Z".to_string(),
             10,
-            "Mon",
-            "10.0.1.100",
-            false,
-            None,
-            None,
+            "Mon".to_string(),
+            "10.0.1.100".to_string(),
         );
-
-        // Verifies to_cedar_context doesn't panic
         let _cedar_ctx = ctx.to_cedar_context().unwrap();
     }
 
     #[test]
     fn test_to_cedar_context_with_break_glass() {
-        let ctx = AuthContext::new_for_test(
-            "2024-01-15T10:30:00Z",
+        let mut ctx = AuthContext::new(
+            "2024-01-15T10:30:00Z".to_string(),
             10,
-            "Mon",
-            "10.0.1.100",
-            true,
-            Some("2024-06-01T00:00:00Z"),
-            Some("INC-12345"),
+            "Mon".to_string(),
+            "10.0.1.100".to_string(),
         );
-
-        // Verifies to_cedar_context doesn't panic with optional fields
+        ctx.break_glass = true;
+        ctx.break_glass_expires = Some("2024-06-01T00:00:00Z".to_string());
+        ctx.incident_id = Some("INC-12345".to_string());
         let _cedar_ctx = ctx.to_cedar_context().unwrap();
     }
 
     #[test]
     fn test_to_cedar_context_partial_break_glass() {
-        // Break glass true but no expires or incident - should still work
-        let ctx = AuthContext::new_for_test(
-            "2024-01-15T10:30:00Z",
+        let mut ctx = AuthContext::new(
+            "2024-01-15T10:30:00Z".to_string(),
             10,
-            "Mon",
-            "10.0.1.100",
-            true,
-            None,
-            None,
+            "Mon".to_string(),
+            "10.0.1.100".to_string(),
         );
-
-        // Verifies to_cedar_context doesn't panic with partial break glass
+        ctx.break_glass = true;
         let _cedar_ctx = ctx.to_cedar_context().unwrap();
     }
 }

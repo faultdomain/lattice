@@ -408,6 +408,7 @@ mod tests {
                 jwks_refresh_interval_seconds: 3600,
                 propagate: true,
                 allow_child_override: false,
+                allow_insecure_http: false,
             },
         );
         provider.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
