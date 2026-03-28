@@ -666,7 +666,7 @@ async fn reconcile_dns_forwarding(
     // their records resolve via the public DNS hierarchy after external-dns creates them.
     let mut custom_blocks = Vec::new();
 
-    for (_key, provider_name) in &dns_config.providers {
+    for provider_name in dns_config.providers.values() {
         let provider = match dns_api.get(provider_name).await {
             Ok(p) => p,
             Err(e) => {

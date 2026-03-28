@@ -195,7 +195,7 @@ mod tests {
                 pihole: Some(PiholeConfig {
                     url: "http://pihole.local".to_string(),
                 }),
-                ..DNSProviderSpec::test(DNSProviderType::Pihole, "home.local")
+                ..DNSProviderSpec::new(DNSProviderType::Pihole, "home.local")
             },
         )
     }
@@ -212,7 +212,7 @@ mod tests {
                     region: Some("us-east-1".to_string()),
                     hosted_zone_id: Some("Z1234567890".to_string()),
                 }),
-                ..DNSProviderSpec::test(DNSProviderType::Route53, "example.com")
+                ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
             },
         )
     }
@@ -226,7 +226,7 @@ mod tests {
                     namespace: "lattice-system".to_string(),
                 }),
                 cloudflare: Some(CloudflareConfig { proxied: true }),
-                ..DNSProviderSpec::test(DNSProviderType::Cloudflare, "example.com")
+                ..DNSProviderSpec::new(DNSProviderType::Cloudflare, "example.com")
             },
         )
     }
@@ -257,7 +257,7 @@ mod tests {
     async fn empty_zone_fails() {
         let provider = DNSProvider::new(
             "bad",
-            DNSProviderSpec::test(DNSProviderType::Route53, ""),
+            DNSProviderSpec::new(DNSProviderType::Route53, ""),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -266,7 +266,7 @@ mod tests {
     async fn pihole_missing_config_fails() {
         let provider = DNSProvider::new(
             "bad-pihole",
-            DNSProviderSpec::test(DNSProviderType::Pihole, "home.local"),
+            DNSProviderSpec::new(DNSProviderType::Pihole, "home.local"),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -279,7 +279,7 @@ mod tests {
                 pihole: Some(PiholeConfig {
                     url: String::new(),
                 }),
-                ..DNSProviderSpec::test(DNSProviderType::Pihole, "home.local")
+                ..DNSProviderSpec::new(DNSProviderType::Pihole, "home.local")
             },
         );
         assert!(provider.spec.validate().is_err());
@@ -289,7 +289,7 @@ mod tests {
     async fn google_missing_config_fails() {
         let provider = DNSProvider::new(
             "bad-google",
-            DNSProviderSpec::test(DNSProviderType::Google, "example.com"),
+            DNSProviderSpec::new(DNSProviderType::Google, "example.com"),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -298,7 +298,7 @@ mod tests {
     async fn azure_missing_config_fails() {
         let provider = DNSProvider::new(
             "bad-azure",
-            DNSProviderSpec::test(DNSProviderType::Azure, "example.com"),
+            DNSProviderSpec::new(DNSProviderType::Azure, "example.com"),
         );
         assert!(provider.spec.validate().is_err());
     }
@@ -319,7 +319,7 @@ mod tests {
     async fn route53_requires_credentials_secret_ref() {
         let provider = DNSProvider::new(
             "route53-no-creds",
-            DNSProviderSpec::test(DNSProviderType::Route53, "example.com"),
+            DNSProviderSpec::new(DNSProviderType::Route53, "example.com"),
         );
         // Spec validation passes (credentialsSecretRef is not checked there)
         assert!(provider.spec.validate().is_ok());
@@ -432,7 +432,7 @@ mod tests {
                 google: Some(GoogleDnsConfig {
                     project: "my-project".to_string(),
                 }),
-                ..DNSProviderSpec::test(DNSProviderType::Google, "example.com")
+                ..DNSProviderSpec::new(DNSProviderType::Google, "example.com")
             },
         );
         assert!(provider.spec.validate().is_ok());
@@ -451,7 +451,7 @@ mod tests {
                     subscription_id: "sub-123".to_string(),
                     resource_group: "rg-dns".to_string(),
                 }),
-                ..DNSProviderSpec::test(DNSProviderType::Azure, "example.com")
+                ..DNSProviderSpec::new(DNSProviderType::Azure, "example.com")
             },
         );
         assert!(provider.spec.validate().is_ok());

@@ -52,7 +52,7 @@ pub async fn reconcile_external_dns(
         .await
         .map_err(|e| Error::internal(format!("failed to apply external-dns namespace: {e}")))?;
 
-    for (_key, provider_name) in &dns_config.providers {
+    for provider_name in dns_config.providers.values() {
         let provider = match dns_api.get(provider_name).await {
             Ok(p) => p,
             Err(e) => {

@@ -357,7 +357,7 @@ mod tests {
                 region: Some("us-east-1".to_string()),
                 hosted_zone_id: Some("Z1234567890".to_string()),
             }),
-            ..DNSProviderSpec::test(DNSProviderType::Route53, "example.com")
+            ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
         };
 
         let result = build_cluster_issuer("public", &spec, Some(&dp)).unwrap();
@@ -395,7 +395,7 @@ mod tests {
                 namespace: "lattice-system".to_string(),
             }),
             cloudflare: Some(CloudflareConfig { proxied: false }),
-            ..DNSProviderSpec::test(DNSProviderType::Cloudflare, "example.com")
+            ..DNSProviderSpec::new(DNSProviderType::Cloudflare, "example.com")
         };
 
         let result = build_cluster_issuer("cf", &spec, Some(&dp)).unwrap();
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn cloudflare_missing_creds_errors() {
-        let dp = DNSProviderSpec::test(DNSProviderType::Cloudflare, "example.com");
+        let dp = DNSProviderSpec::new(DNSProviderType::Cloudflare, "example.com");
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("credentials_secret_ref required"));
     }
@@ -436,7 +436,7 @@ mod tests {
             google: Some(GoogleDnsConfig {
                 project: "my-project".to_string(),
             }),
-            ..DNSProviderSpec::test(DNSProviderType::Google, "example.com")
+            ..DNSProviderSpec::new(DNSProviderType::Google, "example.com")
         };
 
         let result = build_cluster_issuer("gcp", &spec, Some(&dp)).unwrap();
@@ -454,7 +454,7 @@ mod tests {
                 name: "gcp-sa-key".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            ..DNSProviderSpec::test(DNSProviderType::Google, "example.com")
+            ..DNSProviderSpec::new(DNSProviderType::Google, "example.com")
         };
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("google config required"));
@@ -466,7 +466,7 @@ mod tests {
             google: Some(GoogleDnsConfig {
                 project: "my-project".to_string(),
             }),
-            ..DNSProviderSpec::test(DNSProviderType::Google, "example.com")
+            ..DNSProviderSpec::new(DNSProviderType::Google, "example.com")
         };
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("credentials_secret_ref required"));
@@ -493,7 +493,7 @@ mod tests {
                 subscription_id: "sub-123".to_string(),
                 resource_group: "rg-dns".to_string(),
             }),
-            ..DNSProviderSpec::test(DNSProviderType::Azure, "example.com")
+            ..DNSProviderSpec::new(DNSProviderType::Azure, "example.com")
         };
 
         let result = build_cluster_issuer("az", &spec, Some(&dp)).unwrap();
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn azure_missing_config_errors() {
-        let dp = DNSProviderSpec::test(DNSProviderType::Azure, "example.com");
+        let dp = DNSProviderSpec::new(DNSProviderType::Azure, "example.com");
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("azure config required"));
     }
@@ -522,7 +522,7 @@ mod tests {
             pihole: Some(PiholeConfig {
                 url: "http://pihole.local".to_string(),
             }),
-            ..DNSProviderSpec::test(DNSProviderType::Pihole, "home.local")
+            ..DNSProviderSpec::new(DNSProviderType::Pihole, "home.local")
         };
         let err = build_dns01_solver(&dp).unwrap_err();
         assert!(err.contains("webhook solver"));
@@ -604,7 +604,7 @@ mod tests {
                 name: "aws-creds".to_string(),
                 namespace: "lattice-system".to_string(),
             }),
-            ..DNSProviderSpec::test(DNSProviderType::Route53, "example.com")
+            ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
         };
         let solver = build_dns01_solver(&dp).unwrap();
         let r53 = &solver["dns01"]["route53"];
