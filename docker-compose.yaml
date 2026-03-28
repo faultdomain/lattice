@@ -80,7 +80,29 @@ services:
     networks:
       - lattice
 
+  pihole:
+    image: pihole/pihole:2024.07.0
+    container_name: lattice-pihole
+    ports:
+      - "8053:80"
+      - "5353:53/tcp"
+      - "5353:53/udp"
+    environment:
+      WEBPASSWORD: "lattice"
+      DNSMASQ_LISTENING: "all"
+      PIHOLE_DNS_: "8.8.8.8;8.8.4.4"
+    volumes:
+      - pihole-data:/etc/pihole
+    healthcheck:
+      test: ["CMD", "dig", "+short", "@127.0.0.1", "pi.hole"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - lattice
+
 volumes:
+  pihole-data:
   registry-mirror-data:
   ghcr-mirror-data:
 

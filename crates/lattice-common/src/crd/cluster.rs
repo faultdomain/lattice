@@ -7,6 +7,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::issuer::{DnsConfig, IssuerSpec};
 use super::topology::NetworkTopologyConfig;
 use super::types::{
     ClusterPhase, Condition, EndpointsSpec, NodeSpec, ProviderSpec, RegistryMirror,
@@ -122,6 +123,15 @@ pub struct LatticeClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_mirrors: Option<Vec<RegistryMirror>>,
 
+    /// DNS provider configuration for external-dns and ACME DNS-01 challenges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<DnsConfig>,
+
+    /// Named cert-manager issuers to create as ClusterIssuers.
+    /// Each key becomes a ClusterIssuer named `lattice-{key}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub issuers: std::collections::BTreeMap<String, IssuerSpec>,
+
     /// Container image for the Lattice operator on this cluster.
     pub lattice_image: String,
 
@@ -149,6 +159,24 @@ impl LatticeClusterSpec {
         // Validate parent config if present
         if let Some(ref pc) = self.parent_config {
             pc.validate()?;
+        }
+
+        // Validate DNS config
+        if let Some(ref dns) = self.dns {
+            dns.validate().map_err(crate::Error::validation)?;
+        }
+
+        // Validate issuers
+        let dns_providers = self
+            .dns
+            .as_ref()
+            .map(|d| &d.providers)
+            .cloned()
+            .unwrap_or_default();
+        for (name, issuer) in &self.issuers {
+            issuer
+                .validate(name, &dns_providers)
+                .map_err(crate::Error::validation)?;
         }
 
         Ok(())
@@ -533,6 +561,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            dns: None,
+            issuers: std::collections::BTreeMap::new(),
             lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
             cascade_upgrade: false,
         };
@@ -558,6 +588,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            dns: None,
+            issuers: std::collections::BTreeMap::new(),
             lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
             cascade_upgrade: false,
         };
@@ -588,6 +620,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            dns: None,
+            issuers: std::collections::BTreeMap::new(),
             lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
             cascade_upgrade: false,
         };
@@ -615,6 +649,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            dns: None,
+            issuers: std::collections::BTreeMap::new(),
             lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
             cascade_upgrade: false,
         };
@@ -655,6 +691,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            dns: None,
+            issuers: std::collections::BTreeMap::new(),
             lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
             cascade_upgrade: false,
         };
@@ -682,6 +720,8 @@ mod tests {
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            dns: None,
+            issuers: std::collections::BTreeMap::new(),
             lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
             cascade_upgrade: false,
         };
@@ -871,6 +911,8 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
             backups: BackupsConfig::default(),
             network_topology: None,
             registry_mirrors: None,
+            dns: None,
+            issuers: std::collections::BTreeMap::new(),
             lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
             cascade_upgrade: false,
         };
@@ -1031,6 +1073,8 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
                 backups: BackupsConfig::default(),
                 network_topology: None,
                 registry_mirrors: None,
+                dns: None,
+                issuers: std::collections::BTreeMap::new(),
                 lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
                 cascade_upgrade: false,
             },

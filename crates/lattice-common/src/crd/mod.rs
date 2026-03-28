@@ -7,8 +7,10 @@ mod cedar_policy;
 mod cluster;
 mod cluster_backup;
 mod cluster_routes;
+mod dns_provider;
 mod external_endpoint;
 mod infra_provider;
+mod issuer;
 mod job;
 mod mesh_member;
 mod model_serving;
@@ -27,6 +29,10 @@ pub use backup_store::{
     BackupStoreSpec, BackupStoreStatus, GcsStorageConfig, S3StorageConfig,
 };
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
+pub use dns_provider::{
+    AzureDnsConfig, CloudflareConfig, DNSProvider, DNSProviderPhase, DNSProviderSpec,
+    DNSProviderStatus, DNSProviderType, GoogleDnsConfig, PiholeConfig, Route53Config,
+};
 pub use cluster::{
     BackupsConfig, ChildClusterHealth, InfraComponentPhase, InfraComponentStatus, LatticeCluster,
     LatticeClusterSpec, LatticeClusterStatus, MonitoringConfig, PoolResourceSummary,
@@ -42,6 +48,9 @@ pub use cluster_routes::{
     LatticeClusterRoutesStatus,
 };
 pub use external_endpoint::{ParsedEndpoint, Resolution};
+pub use issuer::{
+    AcmeIssuerSpec, CaIssuerSpec, DnsConfig, IssuerSpec, IssuerType, VaultIssuerSpec,
+};
 pub use infra_provider::{
     AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,
     InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
