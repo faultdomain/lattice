@@ -233,6 +233,32 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Cert-manager: DNS providers, issuers, ClusterIssuer materialization
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Cert-manager",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::cert_manager::run_cert_manager_tests(&kc).await
+            }),
+        ));
+    }
+
+    // Node autoscaling: CAPI scale-from-zero
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Node autoscaling",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::node_autoscaling::run_node_autoscaling_tests(&kc).await
+            }),
+        ));
+    }
+
     // Job: Volcano gang scheduling
     {
         let kc = ctx.require_workload()?.to_string();
