@@ -112,8 +112,7 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests (pool=3)...");
 
     // Each task uses its own namespace, so concurrency is safe.
-    // Limit to 6 to avoid overwhelming the API server.
-    let pool = Arc::new(Semaphore::new(6));
+    let pool = Arc::new(Semaphore::new(20));
     let mut handles: Vec<(&str, tokio::task::JoinHandle<Result<(), String>>)> = Vec::new();
 
     // Mesh: fixed test
