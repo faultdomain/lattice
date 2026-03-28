@@ -13,13 +13,7 @@ use crate::auth_chain::AuthChain;
 use crate::error::{Error, Result};
 use lattice_cedar::{ClusterAttributes, PolicyEngine};
 
-/// Extract bearer token from Authorization header
-pub fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-}
+pub use lattice_auth::extract_bearer_token;
 
 /// Authenticate and authorize a request in one call
 ///

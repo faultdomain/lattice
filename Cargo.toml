@@ -29,6 +29,7 @@ members = [
     "crates/lattice-gpu-monitor",
     "crates/lattice-dns-provider",
     "crates/lattice-cert-issuer",
+    "crates/lattice-auth",
 ]
 
 [workspace.package]
@@ -64,6 +65,7 @@ lattice-daemonset = { path = "crates/lattice-daemonset" }
 lattice-gpu-monitor = { path = "crates/lattice-gpu-monitor" }
 lattice-dns-provider = { path = "crates/lattice-dns-provider" }
 lattice-cert-issuer = { path = "crates/lattice-cert-issuer" }
+lattice-auth = { path = "crates/lattice-auth" }
 
 # ML inference
 burn = { version = "0.20", default-features = false, features = ["ndarray", "autodiff"] }

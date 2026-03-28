@@ -838,6 +838,25 @@ async fn apply_layers(
         layer1.push("Service", svc_name, svc, &svc_ar)?;
     }
 
+    // Ingress Gateway + Certificate (from routing.ingress compilation)
+    if let Some(ref routing) = compiled.routing {
+        if let Some(ref gateway) = routing.gateway {
+            if let Some(ref gw_ar) = registry.resolve(CrdKind::Gateway).await? {
+                layer1.push("Gateway", &gateway.metadata.name, gateway, gw_ar)?;
+            }
+        }
+        if let Some(ref certificate) = routing.certificate {
+            if let Some(ref cert_ar) = registry.resolve(CrdKind::Certificate).await? {
+                layer1.push(
+                    "Certificate",
+                    &certificate.metadata.name,
+                    certificate,
+                    cert_ar,
+                )?;
+            }
+        }
+    }
+
     layer1.run("layer-1-infrastructure").await?;
 
     // Layer 2: ModelServing (after mesh/security is ready)
@@ -899,12 +918,17 @@ async fn apply_layers(
         }
     }
 
+    let has_ingress = compiled
+        .routing
+        .as_ref()
+        .is_some_and(|r| r.gateway.is_some());
     info!(
         namespace = %namespace,
         model_serving = %compiled.model_serving.metadata.name,
         mesh_members = compiled.mesh_members.len(),
         tracing_policies = compiled.tracing_policies.len(),
         has_routing = compiled.routing.is_some(),
+        has_ingress,
         has_autoscaling = compiled.autoscaling.is_some(),
         "applied compiled model resources"
     );

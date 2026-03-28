@@ -29,7 +29,7 @@ use futures::StreamExt;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, CustomResourceExt};
 
-use lattice_api::{AuthChain, OidcValidator, SaValidator, ServerConfig as AuthProxyConfig};
+use lattice_api::{oidc_from_crd, AuthChain, SaValidator, ServerConfig as AuthProxyConfig};
 use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
@@ -1113,7 +1113,7 @@ async fn start_auth_proxy(
     ]));
 
     // Try to load OIDC provider from CRD
-    let oidc_validator = match OidcValidator::from_crd(client).await {
+    let oidc_validator = match oidc_from_crd(client).await {
         Ok(v) => {
             tracing::info!(issuer = %v.config().issuer_url, "OIDC authentication enabled");
             Some(Arc::new(v))
@@ -1277,7 +1277,7 @@ fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>)
                 | Some(Ok(Event::InitApply(_)))
                 | Some(Ok(Event::Delete(_))) => {
                     tracing::info!("OIDCProvider changed, reloading...");
-                    match OidcValidator::from_crd(&client).await {
+                    match oidc_from_crd(&client).await {
                         Ok(v) => {
                             tracing::info!(issuer = %v.config().issuer_url, "OIDC validator reloaded");
                             auth_chain.set_oidc(Some(Arc::new(v))).await;

@@ -1,0 +1,32 @@
+[package]
+name = "lattice-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared authentication primitives for Lattice services"
+
+[features]
+fips = []
+
+[dependencies]
+# HTTP
+axum = { workspace = true }
+
+# Auth
+jsonwebtoken = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# HTTP client (for OIDC discovery)
+reqwest = { workspace = true }

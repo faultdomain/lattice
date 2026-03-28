@@ -2600,6 +2600,7 @@ dependencies = [
  "jsonwebtoken",
  "k8s-openapi",
  "kube",
+ "lattice-auth",
  "lattice-cedar",
  "lattice-common",
  "lattice-proto",
@@ -2620,6 +2621,20 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "lattice-auth"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -99,3 +99,13 @@ impl From<kube::Error> for Error {
         Error::Internal(e.to_string())
     }
 }
+
+impl From<lattice_auth::AuthError> for Error {
+    fn from(e: lattice_auth::AuthError) -> Self {
+        match e {
+            lattice_auth::AuthError::Unauthorized(msg) => Error::Unauthorized(msg),
+            lattice_auth::AuthError::Config(msg) => Error::Config(msg),
+            lattice_auth::AuthError::Internal(msg) => Error::Internal(msg),
+        }
+    }
+}

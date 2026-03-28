@@ -136,7 +136,7 @@ impl AuthChain {
                     }
                     Err(e) => {
                         debug!(error = %e, "OIDC validation failed, trying next validator");
-                        last_error = Some(e);
+                        last_error = Some(e.into());
                     }
                 }
             }

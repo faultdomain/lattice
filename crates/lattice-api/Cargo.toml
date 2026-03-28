@@ -12,6 +12,7 @@ fips = ["lattice-common/fips"]
 # Internal
 lattice-common = { workspace = true }
 lattice-proto = { workspace = true }
+lattice-auth = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

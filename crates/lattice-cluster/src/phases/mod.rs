@@ -3,6 +3,7 @@
 //! Each phase of the cluster lifecycle is handled by a dedicated module,
 //! making the reconciliation logic testable and maintainable.
 
+pub mod external_dns;
 mod pending;
 mod pivoting;
 mod provisioning;

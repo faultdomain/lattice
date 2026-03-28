@@ -56,6 +56,10 @@ impl HasApiResource for Gateway {
 
 impl_api_defaults!(Gateway);
 
+/// external-dns annotation key for automatic DNS record creation
+pub const EXTERNAL_DNS_HOSTNAME_ANNOTATION: &str =
+    "external-dns.alpha.kubernetes.io/hostname";
+
 impl Gateway {
     /// Create a new Gateway
     pub fn new(metadata: ObjectMeta, spec: GatewaySpec) -> Self {
@@ -65,6 +69,17 @@ impl Gateway {
             metadata,
             spec,
         }
+    }
+
+    /// Add external-dns annotation for automatic DNS record creation.
+    pub fn with_external_dns(mut self, hosts: &[String]) -> Self {
+        if !hosts.is_empty() {
+            self.metadata.annotations.insert(
+                EXTERNAL_DNS_HOSTNAME_ANNOTATION.to_string(),
+                hosts.join(","),
+            );
+        }
+        self
     }
 }
 

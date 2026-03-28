@@ -8,8 +8,13 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{LatticeModel, ModelRoutingSpec};
+use lattice_common::crd::{LatticeModel, ModelIngressSpec, ModelRoutingSpec};
 use lattice_common::kube_utils::OwnerReference;
+use lattice_common::mesh;
+use lattice_common::network::gateway_api::{
+    AllowedRoutes, Certificate, CertificateRef, Gateway, GatewayListener, GatewaySpec,
+    GatewayTlsConfig, IssuerRef,
+};
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
 use crate::types::{
@@ -29,6 +34,10 @@ const GROUP_KEY: &str = "modelserving.volcano.sh/group-name";
 pub struct CompiledRouting {
     pub model_server: KthenaModelServer,
     pub model_routes: Vec<KthenaModelRoute>,
+    /// Gateway for external access (only when ingress is configured)
+    pub gateway: Option<Gateway>,
+    /// TLS certificate (only when ingress uses cert-manager auto mode)
+    pub certificate: Option<Certificate>,
 }
 
 /// Compile a ModelRoutingSpec into Kthena networking resources.
@@ -36,22 +45,53 @@ pub struct CompiledRouting {
 /// `serving_name` is the ModelServing resource name (model name + role suffix).
 /// The ModelServer's workload_selector uses `modelserving.volcano.sh/name` to
 /// match pods, which Kthena labels with the ModelServing name.
+///
+/// When `ingress` is provided, creates a Gateway with TLS listeners and
+/// auto-populates `parentRefs` on ModelRoutes that don't have explicit ones.
 pub fn compile_model_routing(
     model: &LatticeModel,
     routing: &ModelRoutingSpec,
     serving_name: &str,
+    ingress: Option<&ModelIngressSpec>,
 ) -> CompiledRouting {
+    let name = model.metadata.name.as_deref().unwrap_or_default();
+    let namespace = model.metadata.namespace.as_deref().unwrap_or("default");
+
     let model_server = compile_model_server(model, routing, serving_name);
+
+    let (gateway, certificate, gateway_parent_ref) = match ingress {
+        Some(ingress_spec) => {
+            let (gw, cert) = compile_ingress_gateway(name, namespace, ingress_spec);
+            let parent_ref = KthenaParentRef {
+                name: gw.metadata.name.clone(),
+                namespace: Some(namespace.to_string()),
+                kind: Some("Gateway".to_string()),
+            };
+            (Some(gw), cert, Some(parent_ref))
+        }
+        None => (None, None, None),
+    };
 
     let model_routes: Vec<KthenaModelRoute> = routing
         .routes
         .iter()
-        .map(|(route_name, route_spec)| compile_model_route(model, routing, route_name, route_spec))
+        .map(|(route_name, route_spec)| {
+            let mut route = compile_model_route(model, routing, route_name, route_spec);
+            // Auto-inject gateway parentRef if ingress is set and route has no explicit parentRefs
+            if route.spec.parent_refs.is_none() {
+                if let Some(ref pr) = gateway_parent_ref {
+                    route.spec.parent_refs = Some(vec![pr.clone()]);
+                }
+            }
+            route
+        })
         .collect();
 
     CompiledRouting {
         model_server,
         model_routes,
+        gateway,
+        certificate,
     }
 }
 
@@ -236,6 +276,96 @@ pub fn has_pd_roles(roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>
     roles.contains_key(PD_ROLE_PREFILL) && roles.contains_key(PD_ROLE_DECODE)
 }
 
+/// Compile a ModelIngressSpec into a Gateway + optional Certificate.
+///
+/// The Gateway gets HTTPS listeners for each hostname. The Certificate is
+/// created only when TLS uses cert-manager auto mode (issuerRef).
+fn compile_ingress_gateway(
+    model_name: &str,
+    namespace: &str,
+    ingress: &ModelIngressSpec,
+) -> (Gateway, Option<Certificate>) {
+    let gateway_name = mesh::ingress_gateway_name(namespace);
+    let listen_port = ingress.listen_port();
+    let secret_name = format!("{}-tls", model_name);
+
+    let listeners: Vec<GatewayListener> = ingress
+        .hosts
+        .iter()
+        .enumerate()
+        .map(|(i, host)| {
+            let listener_name = format!("{}-https-{}", model_name, i);
+            let tls_config = ingress.tls.as_ref().map(|tls| {
+                let cert_ref_name = if tls.is_auto() {
+                    secret_name.clone()
+                } else if let Some(ref sn) = tls.secret_name {
+                    sn.clone()
+                } else {
+                    secret_name.clone()
+                };
+                GatewayTlsConfig {
+                    mode: "Terminate".to_string(),
+                    certificate_refs: vec![CertificateRef {
+                        kind: None,
+                        name: cert_ref_name,
+                    }],
+                }
+            });
+
+            GatewayListener {
+                name: listener_name,
+                hostname: Some(host.clone()),
+                port: listen_port,
+                protocol: if tls_config.is_some() {
+                    "HTTPS".to_string()
+                } else {
+                    "HTTP".to_string()
+                },
+                tls: tls_config,
+                allowed_routes: Some(AllowedRoutes::same_namespace()),
+            }
+        })
+        .collect();
+
+    let metadata = lattice_common::kube_utils::ObjectMeta::new(&gateway_name, namespace);
+    let gateway = Gateway::new(
+        metadata,
+        GatewaySpec {
+            gateway_class_name: ingress.gateway_class().to_string(),
+            listeners,
+            tls: None,
+        },
+    )
+    .with_external_dns(&ingress.hosts);
+
+    let certificate = ingress
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.issuer_ref.as_ref())
+        .map(|issuer_ref| Certificate {
+            api_version: "cert-manager.io/v1".to_string(),
+            kind: "Certificate".to_string(),
+            metadata: lattice_common::kube_utils::ObjectMeta::new(
+                format!("{}-cert", model_name),
+                namespace,
+            ),
+            spec: lattice_common::network::gateway_api::CertificateSpec {
+                secret_name: secret_name.clone(),
+                dns_names: ingress.hosts.clone(),
+                issuer_ref: IssuerRef {
+                    name: issuer_ref.name.clone(),
+                    kind: issuer_ref
+                        .kind
+                        .clone()
+                        .unwrap_or_else(|| "ClusterIssuer".to_string()),
+                    group: Some("cert-manager.io".to_string()),
+                },
+            },
+        });
+
+    (gateway, certificate)
+}
+
 pub(crate) fn owner_reference(name: &str, uid: &str) -> OwnerReference {
     OwnerReference {
         api_version: "lattice.dev/v1alpha1".to_string(),
@@ -252,10 +382,11 @@ mod tests {
     use super::*;
     use lattice_common::crd::{
         HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModelSpec,
-        ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
-        ModelRoutingSpec, RateLimit, RateLimitUnit, RuntimeSpec, TargetModel, TrafficPolicy,
-        WorkloadSpec,
+        ModelIngressSpec, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule,
+        ModelRouteSpec, ModelRoutingSpec, RateLimit, RateLimitUnit, RuntimeSpec, TargetModel,
+        TrafficPolicy, WorkloadSpec,
     };
+    use lattice_common::crd::workload::ingress::{CertIssuerRef, IngressTls};
 
     fn test_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
         let spec = LatticeModelSpec {
@@ -313,7 +444,7 @@ mod tests {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
 
         assert_eq!(compiled.model_server.metadata.name, "test-model");
         assert_eq!(compiled.model_server.spec.inference_engine, "vLLM");
@@ -354,7 +485,7 @@ mod tests {
             port: None,
         });
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
 
         let pd = compiled
             .model_server
@@ -386,7 +517,7 @@ mod tests {
         ]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
         assert!(compiled
             .model_server
             .spec
@@ -404,7 +535,7 @@ mod tests {
             port: None,
         });
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
         assert!(compiled
             .model_server
             .spec
@@ -448,7 +579,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
         let route = &compiled.model_routes[0];
         assert_eq!(route.spec.rules[0].target_models.len(), 2);
         assert_eq!(
@@ -499,7 +630,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
 
         assert_eq!(compiled.model_server.spec.inference_engine, "SGLang");
         assert_eq!(compiled.model_server.spec.workload_port.port, 9000);
@@ -542,7 +673,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
         let route = &compiled.model_routes[0];
         assert_eq!(route.spec.model_name, Some("custom-model".to_string()));
         assert_eq!(
@@ -586,7 +717,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
 
         assert_eq!(
             compiled
@@ -613,7 +744,7 @@ mod tests {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
 
         let ms_oref = &compiled.model_server.metadata.owner_references[0];
         assert_eq!(ms_oref.kind, "LatticeModel");
@@ -659,7 +790,7 @@ mod tests {
             )]),
         };
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
         let refs = compiled.model_routes[0].spec.parent_refs.as_ref().unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "inference-gw");
@@ -710,7 +841,7 @@ mod tests {
             port: None,
         });
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
         assert!(
             compiled
                 .model_server
@@ -727,10 +858,134 @@ mod tests {
         let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
         let routing = basic_routing();
 
-        let compiled = compile_model_routing(&model, &routing, "test-model-test");
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
         assert_eq!(
             compiled.model_server.spec.workload_selector.match_labels[MODEL_SERVING_LABEL],
             "test-model-test"
         );
+    }
+
+    // ========================================================================
+    // Ingress Tests
+    // ========================================================================
+
+    fn basic_ingress() -> ModelIngressSpec {
+        ModelIngressSpec {
+            hosts: vec!["llama-70b.us-east.lattice.gpu".to_string()],
+            tls: Some(IngressTls {
+                secret_name: None,
+                issuer_ref: Some(CertIssuerRef {
+                    name: "letsencrypt-prod".to_string(),
+                    kind: None,
+                }),
+            }),
+            gateway_class: None,
+            listen_port: None,
+        }
+    }
+
+    #[test]
+    fn no_ingress_produces_no_gateway() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", None);
+
+        assert!(compiled.gateway.is_none());
+        assert!(compiled.certificate.is_none());
+        assert!(compiled.model_routes[0].spec.parent_refs.is_none());
+    }
+
+    #[test]
+    fn ingress_creates_gateway_with_listeners() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = basic_ingress();
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let gateway = compiled.gateway.as_ref().expect("gateway should be set");
+        assert_eq!(gateway.spec.gateway_class_name, "istio");
+        assert_eq!(gateway.spec.listeners.len(), 1);
+
+        let listener = &gateway.spec.listeners[0];
+        assert_eq!(listener.hostname, Some("llama-70b.us-east.lattice.gpu".to_string()));
+        assert_eq!(listener.port, 443);
+        assert_eq!(listener.protocol, "HTTPS");
+        assert!(listener.tls.is_some());
+    }
+
+    #[test]
+    fn ingress_creates_certificate_for_auto_tls() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = basic_ingress();
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let cert = compiled.certificate.as_ref().expect("certificate should be set");
+        assert_eq!(cert.spec.dns_names, vec!["llama-70b.us-east.lattice.gpu"]);
+        assert_eq!(cert.spec.issuer_ref.name, "letsencrypt-prod");
+        assert_eq!(cert.spec.issuer_ref.kind, "ClusterIssuer");
+        assert_eq!(cert.spec.secret_name, "test-model-tls");
+    }
+
+    #[test]
+    fn ingress_no_certificate_for_manual_tls() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = ModelIngressSpec {
+            hosts: vec!["llama.lattice.gpu".to_string()],
+            tls: Some(IngressTls {
+                secret_name: Some("my-tls-secret".to_string()),
+                issuer_ref: None,
+            }),
+            gateway_class: None,
+            listen_port: None,
+        };
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        assert!(compiled.gateway.is_some());
+        assert!(compiled.certificate.is_none());
+
+        let listener = &compiled.gateway.as_ref().unwrap().spec.listeners[0];
+        let tls = listener.tls.as_ref().unwrap();
+        assert_eq!(tls.certificate_refs[0].name, "my-tls-secret");
+    }
+
+    #[test]
+    fn ingress_auto_injects_parent_refs() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = basic_ingress();
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let refs = compiled.model_routes[0].spec.parent_refs.as_ref().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, Some("Gateway".to_string()));
+    }
+
+    #[test]
+    fn ingress_external_dns_annotation() {
+        let model = test_model(BTreeMap::from([("decode".to_string(), make_role(2))]));
+        let routing = basic_routing();
+        let ingress = basic_ingress();
+
+        let compiled =
+            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+
+        let gw = compiled.gateway.as_ref().unwrap();
+        let annotation = gw
+            .metadata
+            .annotations
+            .get("external-dns.alpha.kubernetes.io/hostname")
+            .unwrap();
+        assert_eq!(annotation, "llama-70b.us-east.lattice.gpu");
     }
 }

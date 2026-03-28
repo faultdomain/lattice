@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::observability::{MetricsSnapshot, ObservabilitySpec};
 use super::workload::cost::CostEstimate;
+use super::workload::ingress::IngressTls;
 use super::workload::scaling::AutoscalingMetric;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
 use super::workload::topology::WorkloadNetworkTopology;
@@ -502,6 +503,63 @@ pub struct SecretKeySelector {
 }
 
 // =============================================================================
+// Model Ingress
+// =============================================================================
+
+/// Ingress configuration for external model access via Gateway API.
+///
+/// When set, creates a Gateway with TLS listeners and binds the ModelRoute
+/// to it via `parentRefs`. The Kthena router handles inference-aware request
+/// routing to model pods — no separate HTTPRoute is needed.
+///
+/// Traffic flow: Internet → Gateway (TLS) → Kthena Router → ModelServer → Pods
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelIngressSpec {
+    /// Hostnames for external access (e.g., `["llama-70b.us-east.lattice.gpu"]`)
+    pub hosts: Vec<String>,
+
+    /// TLS configuration — cert-manager auto or manual secret
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<IngressTls>,
+
+    /// GatewayClass name (default: "istio")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_class: Option<String>,
+
+    /// Listen port for HTTPS (default: 443)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
+}
+
+impl ModelIngressSpec {
+    /// Validate the ingress spec
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.hosts.is_empty() {
+            return Err(crate::Error::validation("ingress hosts must not be empty"));
+        }
+        if let Some(ref tls) = self.tls {
+            if tls.secret_name.is_some() && tls.issuer_ref.is_some() {
+                return Err(crate::Error::validation(
+                    "ingress tls: specify either secretName or issuerRef, not both",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Gateway class to use (defaults to "istio")
+    pub fn gateway_class(&self) -> &str {
+        self.gateway_class.as_deref().unwrap_or("istio")
+    }
+
+    /// HTTPS listen port (defaults to 443)
+    pub fn listen_port(&self) -> u16 {
+        self.listen_port.unwrap_or(443)
+    }
+}
+
+// =============================================================================
 // CRD
 // =============================================================================
 
@@ -549,6 +607,12 @@ pub struct LatticeModelSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<ModelRoutingSpec>,
 
+    /// Ingress configuration for external access via Gateway API.
+    /// When set, creates a Gateway with TLS listeners and binds ModelRoutes
+    /// via parentRefs. Requires `routing` to also be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<ModelIngressSpec>,
+
     /// Network topology configuration for topology-aware scheduling.
     /// When set, the ModelServing includes networkTopology for Volcano co-placement.
     /// When absent but kv_connector is present, topology is auto-injected (soft mode).
@@ -581,6 +645,14 @@ impl LatticeModelSpec {
                 .validate()
                 .map_err(|e| crate::Error::validation(format!("role '{role_name}': {e}")))?;
         }
+        if let Some(ref ingress) = self.ingress {
+            ingress.validate()?;
+            if self.routing.is_none() {
+                return Err(crate::Error::validation(
+                    "ingress requires routing to be configured",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -595,6 +667,7 @@ impl Default for LatticeModelSpec {
             defaults: None,
             roles: BTreeMap::new(),
             routing: None,
+            ingress: None,
             topology: None,
             observability: None,
         }
@@ -958,5 +1031,107 @@ mod tests {
             Some("128Gi"),
             "memory from role override"
         );
+    }
+
+    // ========================================================================
+    // ModelIngressSpec Tests
+    // ========================================================================
+
+    use super::super::workload::ingress::{CertIssuerRef, IngressTls};
+
+    #[test]
+    fn ingress_validate_valid() {
+        let ingress = ModelIngressSpec {
+            hosts: vec!["model.lattice.gpu".to_string()],
+            tls: Some(IngressTls {
+                secret_name: None,
+                issuer_ref: Some(CertIssuerRef {
+                    name: "letsencrypt".to_string(),
+                    kind: None,
+                }),
+            }),
+            gateway_class: None,
+            listen_port: None,
+        };
+        assert!(ingress.validate().is_ok());
+    }
+
+    #[test]
+    fn ingress_validate_empty_hosts() {
+        let ingress = ModelIngressSpec {
+            hosts: vec![],
+            tls: None,
+            gateway_class: None,
+            listen_port: None,
+        };
+        assert!(ingress.validate().is_err());
+    }
+
+    #[test]
+    fn ingress_validate_both_tls_modes() {
+        let ingress = ModelIngressSpec {
+            hosts: vec!["model.lattice.gpu".to_string()],
+            tls: Some(IngressTls {
+                secret_name: Some("my-secret".to_string()),
+                issuer_ref: Some(CertIssuerRef {
+                    name: "letsencrypt".to_string(),
+                    kind: None,
+                }),
+            }),
+            gateway_class: None,
+            listen_port: None,
+        };
+        assert!(ingress.validate().is_err());
+    }
+
+    #[test]
+    fn ingress_defaults() {
+        let ingress = ModelIngressSpec {
+            hosts: vec!["model.lattice.gpu".to_string()],
+            tls: None,
+            gateway_class: None,
+            listen_port: None,
+        };
+        assert_eq!(ingress.gateway_class(), "istio");
+        assert_eq!(ingress.listen_port(), 443);
+    }
+
+    #[test]
+    fn spec_validate_ingress_requires_routing() {
+        let spec = LatticeModelSpec {
+            ingress: Some(ModelIngressSpec {
+                hosts: vec!["model.lattice.gpu".to_string()],
+                tls: None,
+                gateway_class: None,
+                listen_port: None,
+            }),
+            routing: None,
+            ..Default::default()
+        };
+        let err = spec.validate().unwrap_err();
+        assert!(err.to_string().contains("routing"));
+    }
+
+    #[test]
+    fn spec_validate_ingress_with_routing_ok() {
+        let spec = LatticeModelSpec {
+            ingress: Some(ModelIngressSpec {
+                hosts: vec!["model.lattice.gpu".to_string()],
+                tls: None,
+                gateway_class: None,
+                listen_port: None,
+            }),
+            routing: Some(ModelRoutingSpec {
+                inference_engine: InferenceEngine::VLlm,
+                model: "test/model".to_string(),
+                port: None,
+                protocol: None,
+                traffic_policy: None,
+                kv_connector: None,
+                routes: BTreeMap::new(),
+            }),
+            ..Default::default()
+        };
+        assert!(spec.validate().is_ok());
     }
 }

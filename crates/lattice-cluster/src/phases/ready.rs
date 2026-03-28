@@ -13,13 +13,16 @@ use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_capi::provider::{format_capi_version, pool_resource_suffix};
-use lattice_cert_issuer::builder::{self, MANAGED_BY_LABEL, MANAGED_BY_VALUE};
+use lattice_cert_issuer::builder;
 use lattice_common::crd::{
     CertIssuer, CertIssuerPhase, DNSProvider, DNSProviderPhase, LatticeCluster,
     LatticeClusterStatus, WorkerPoolStatus,
 };
 use lattice_common::events::{actions, reasons};
-use lattice_common::{capi_namespace, Error, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{
+    capi_namespace, Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE,
+    LATTICE_SYSTEM_NAMESPACE,
+};
 
 use crate::controller::{
     autoscaling_warning, build_gpu_cordon_plan, determine_gpu_action, determine_scaling_action,
@@ -373,6 +376,9 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             if let Err(e) = reconcile_dns_forwarding(client, cluster).await {
                 warn!(error = %e, "failed to reconcile DNS forwarding, will retry");
             }
+            if let Err(e) = super::external_dns::reconcile_external_dns(client, cluster).await {
+                warn!(error = %e, "failed to reconcile external-dns, will retry");
+            }
         }
     }
 
@@ -601,7 +607,7 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
         .map(|k| format!("lattice-{}", k))
         .collect();
 
-    let label_selector = format!("{}={}", MANAGED_BY_LABEL, MANAGED_BY_VALUE);
+    let label_selector = format!("{}={}", LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE);
     let list_params = ListParams::default().labels(&label_selector);
 
     match cluster_issuer_api.list(&list_params).await {
@@ -692,7 +698,7 @@ async fn reconcile_dns_forwarding(
             "name": "coredns-custom",
             "namespace": "kube-system",
             "labels": {
-                MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+                LATTICE_MANAGED_BY_LABEL: LATTICE_MANAGED_BY_VALUE,
             }
         },
         "data": {

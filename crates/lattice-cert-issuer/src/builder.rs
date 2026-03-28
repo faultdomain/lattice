@@ -9,11 +9,7 @@ use lattice_common::crd::{
     CertIssuerSpec, DNSProviderSpec, DNSProviderType, IssuerType,
 };
 
-/// Label applied to all managed ClusterIssuers for garbage collection.
-pub const MANAGED_BY_LABEL: &str = "lattice.dev/managed-by";
-
-/// Value of the managed-by label.
-pub const MANAGED_BY_VALUE: &str = "lattice-operator";
+use lattice_common::{LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE};
 
 /// Build a cert-manager ClusterIssuer JSON value from a CertIssuer spec.
 ///
@@ -104,7 +100,7 @@ pub fn build_cluster_issuer(
         "metadata": {
             "name": issuer_name,
             "labels": {
-                MANAGED_BY_LABEL: MANAGED_BY_VALUE
+                LATTICE_MANAGED_BY_LABEL: LATTICE_MANAGED_BY_VALUE
             }
         },
         "spec": cm_spec
@@ -244,8 +240,8 @@ mod tests {
         assert_eq!(val["kind"], "ClusterIssuer");
         assert_eq!(val["metadata"]["name"], expected_name);
         assert_eq!(
-            val["metadata"]["labels"][MANAGED_BY_LABEL],
-            MANAGED_BY_VALUE
+            val["metadata"]["labels"][LATTICE_MANAGED_BY_LABEL],
+            LATTICE_MANAGED_BY_VALUE
         );
     }
 

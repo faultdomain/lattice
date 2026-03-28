@@ -9,4 +9,4 @@ mod oidc;
 pub mod oidc_controller;
 
 pub use authorize::{authenticate, authenticate_and_authorize, extract_bearer_token};
-pub use oidc::{OidcConfig, OidcValidator, UserIdentity};
+pub use oidc::{from_crd as oidc_from_crd, OidcConfig, OidcValidator, UserIdentity};

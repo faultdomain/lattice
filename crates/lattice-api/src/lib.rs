@@ -35,7 +35,7 @@ pub mod routing;
 pub mod sa_auth;
 pub mod server;
 
-pub use auth::{OidcConfig, OidcValidator, UserIdentity};
+pub use auth::{oidc_from_crd, OidcConfig, OidcValidator, UserIdentity};
 pub use auth_chain::AuthChain;
 pub use auth_context::{auth_context_default, auth_context_from_request, AuthContext};
 pub use backend::{

@@ -620,7 +620,12 @@ fn assemble_serving(
     let serving_name = &compilation.model_serving.metadata.name;
 
     let routing = model.spec.routing.as_ref().map(|routing_spec| {
-        lattice_volcano::compile_model_routing(model, routing_spec, serving_name)
+        lattice_volcano::compile_model_routing(
+            model,
+            routing_spec,
+            serving_name,
+            model.spec.ingress.as_ref(),
+        )
     });
 
     let autoscaling = {

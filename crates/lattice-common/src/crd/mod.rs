@@ -70,10 +70,10 @@ pub use mesh_member::{
 pub use model_serving::{
     HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModel,
     LatticeModelSpec, LatticeModelStatus, ModelAutoscalingBehavior, ModelAutoscalingSpec,
-    ModelCondition, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
-    ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior, ModelServingPhase,
-    ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy, SecretKeySelector,
-    TargetModel, TrafficPolicy, DEFAULT_KV_SIDE_CHANNEL_PORT,
+    ModelCondition, ModelIngressSpec, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule,
+    ModelRouteSpec, ModelRoutingSpec, ModelScaleDownBehavior, ModelScaleUpBehavior,
+    ModelServingPhase, ModelSourceSpec, RateLimit, RateLimitUnit, RecoveryPolicy, RetryPolicy,
+    SecretKeySelector, TargetModel, TrafficPolicy, DEFAULT_KV_SIDE_CHANNEL_PORT,
 };
 pub use observability::{
     scrape_metrics, MetricsConfig, MetricsScraper, MetricsSnapshot, NoopMetricsScraper,

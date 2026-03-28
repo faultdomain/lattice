@@ -398,6 +398,10 @@ pub const ORIGINAL_NAME_LABEL: &str = "lattice.dev/original-name";
 pub const INHERITED_LABEL: &str = "lattice.dev/inherited";
 /// Label on LatticeClusterRoutes indicating these are peer routes from the parent
 pub const PEER_ROUTES_LABEL: &str = "lattice.dev/peer-routes";
+/// Label marking resources managed by the Lattice operator (for GC)
+pub const LATTICE_MANAGED_BY_LABEL: &str = "lattice.dev/managed-by";
+/// Value for the lattice managed-by label
+pub const LATTICE_MANAGED_BY_VALUE: &str = "lattice-operator";
 
 /// Check if a Kubernetes resource is inherited from a parent cluster.
 ///
