@@ -30,12 +30,10 @@ pub const MEMORY_RESOURCE: &str = "memory";
 pub const GPU_RESOURCE: &str = "nvidia.com/gpu";
 
 /// Cluster-autoscaler annotation for minimum node group size.
-pub const AUTOSCALER_MIN_SIZE: &str =
-    "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
+pub const AUTOSCALER_MIN_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
 
 /// Cluster-autoscaler annotation for maximum node group size.
-pub const AUTOSCALER_MAX_SIZE: &str =
-    "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
+pub const AUTOSCALER_MAX_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
 
 /// NFD label for GPU product type.
 pub const GPU_TYPE_LABEL: &str = "nvidia.com/gpu.product";
@@ -376,10 +374,7 @@ pub fn sum_container_cpu_memory(
 
 /// Sum GPU count from `type: gpu` resource entries in a workload spec.
 pub fn sum_gpu_count(
-    resources: &std::collections::BTreeMap<
-        String,
-        crate::crd::workload::resources::ResourceSpec,
-    >,
+    resources: &std::collections::BTreeMap<String, crate::crd::workload::resources::ResourceSpec>,
 ) -> u32 {
     resources
         .values()

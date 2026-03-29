@@ -969,7 +969,11 @@ mod tests {
         let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let route = &compiled.model_routes[0];
-        let parent_refs = route.spec.parent_refs.as_ref().expect("parentRefs should be set");
+        let parent_refs = route
+            .spec
+            .parent_refs
+            .as_ref()
+            .expect("parentRefs should be set");
         assert_eq!(parent_refs.len(), 1);
         assert_eq!(parent_refs[0].name, "default-ingress");
         assert_eq!(parent_refs[0].kind, Some("Gateway".to_string()));
@@ -981,11 +985,7 @@ mod tests {
         let mut routing = basic_routing();
 
         // Set explicit parentRefs on the route
-        routing
-            .routes
-            .get_mut("default")
-            .unwrap()
-            .parent_refs = Some(vec![ModelParentRef {
+        routing.routes.get_mut("default").unwrap().parent_refs = Some(vec![ModelParentRef {
             name: "custom-gateway".to_string(),
             namespace: Some("custom-ns".to_string()),
             kind: None,
@@ -993,8 +993,7 @@ mod tests {
 
         let ingress = basic_ingress();
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let route = &compiled.model_routes[0];
         let parent_refs = route.spec.parent_refs.as_ref().unwrap();
@@ -1024,7 +1023,10 @@ mod tests {
             .annotations
             .get("external-dns.alpha.kubernetes.io/hostname")
             .expect("external-dns annotation should be set");
-        assert_eq!(dns_annotation, "llama.lattice.gpu,llama.us-east.lattice.gpu");
+        assert_eq!(
+            dns_annotation,
+            "llama.lattice.gpu,llama.us-east.lattice.gpu"
+        );
     }
 
     #[test]
@@ -1048,14 +1050,22 @@ mod tests {
             listen_port: None,
         };
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let gw = compiled.gateway.as_ref().unwrap();
         assert_eq!(gw.spec.listeners.len(), 3);
-        assert_eq!(gw.spec.listeners[0].hostname, Some("a.lattice.gpu".to_string()));
-        assert_eq!(gw.spec.listeners[1].hostname, Some("b.lattice.gpu".to_string()));
-        assert_eq!(gw.spec.listeners[2].hostname, Some("c.lattice.gpu".to_string()));
+        assert_eq!(
+            gw.spec.listeners[0].hostname,
+            Some("a.lattice.gpu".to_string())
+        );
+        assert_eq!(
+            gw.spec.listeners[1].hostname,
+            Some("b.lattice.gpu".to_string())
+        );
+        assert_eq!(
+            gw.spec.listeners[2].hostname,
+            Some("c.lattice.gpu".to_string())
+        );
 
         let cert = compiled.certificate.as_ref().unwrap();
         assert_eq!(cert.spec.dns_names.len(), 3);
@@ -1072,8 +1082,7 @@ mod tests {
             listen_port: Some(8443),
         };
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let gw = compiled.gateway.as_ref().unwrap();
         assert_eq!(gw.spec.gateway_class_name, "nginx");
@@ -1092,8 +1101,7 @@ mod tests {
             listen_port: None,
         };
 
-        let compiled =
-            compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
+        let compiled = compile_model_routing(&model, &routing, "test-model-test", Some(&ingress));
 
         let listener = &compiled.gateway.as_ref().unwrap().spec.listeners[0];
         assert_eq!(listener.protocol, "HTTP");

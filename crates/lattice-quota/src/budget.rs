@@ -142,11 +142,7 @@ mod tests {
     use super::*;
     use lattice_common::crd::{LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus};
 
-    fn make_quota(
-        soft_cpu: &str,
-        used_cpu: Option<&str>,
-        max_cpu: Option<&str>,
-    ) -> LatticeQuota {
+    fn make_quota(soft_cpu: &str, used_cpu: Option<&str>, max_cpu: Option<&str>) -> LatticeQuota {
         let mut quota = LatticeQuota::new(
             "test-quota",
             LatticeQuotaSpec {

@@ -28,9 +28,9 @@ use lattice_common::crd::{
 use lattice_common::graph::ServiceGraph;
 use lattice_common::{CrdRegistry, LeaderElector, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
-use lattice_quota::QuotaStore;
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_mesh_member::remote_secret;
+use lattice_quota::QuotaStore;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
 
@@ -90,7 +90,10 @@ pub async fn leader_controller<F>(
             }
         }
 
-        tracing::info!(controller = name, "leadership acquired, starting controller");
+        tracing::info!(
+            controller = name,
+            "leadership acquired, starting controller"
+        );
         let controller = factory();
 
         tokio::select! {
@@ -170,11 +173,7 @@ impl SpawnContext {
     ///
     /// Resolves shared workload params (graph, cluster config, registry, etc.)
     /// before building the controller.
-    pub fn spawn_workload<K, F>(
-        &self,
-        lease: &'static str,
-        build: F,
-    ) -> tokio::task::JoinHandle<()>
+    pub fn spawn_workload<K, F>(&self, lease: &'static str, build: F) -> tokio::task::JoinHandle<()>
     where
         K: kube::Resource<DynamicType = ()>
             + Clone
@@ -210,7 +209,11 @@ impl SpawnContext {
                 Box::pin(async move {
                     lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
                     let params = resolve_workload_params(
-                        &client, &config, &cedar, &graph_holder, &quota_store,
+                        &client,
+                        &config,
+                        &cedar,
+                        &graph_holder,
+                        &quota_store,
                     )
                     .await;
                     build(params).await;
@@ -272,9 +275,8 @@ pub async fn ensure_graph(
     loop {
         match lattice_infra::bootstrap::read_trust_domain(client).await {
             Some(td) => {
-                let graph = Arc::new(
-                    ServiceGraph::new(&td).with_cluster_name(cluster_name.to_string()),
-                );
+                let graph =
+                    Arc::new(ServiceGraph::new(&td).with_cluster_name(cluster_name.to_string()));
                 warmup_graph(client, &graph).await;
                 let _ = graph_holder.set(graph);
                 return graph_holder.get().unwrap().clone();
@@ -782,11 +784,7 @@ async fn read_first_cluster(client: &Client) -> Option<LatticeCluster> {
 /// Compute the set of affected neighbor names when a service or mesh member changes.
 ///
 /// Returns deduplicated names of all dependencies and dependents (excluding `self_name`).
-fn affected_neighbors(
-    graph: &ServiceGraph,
-    namespace: &str,
-    self_name: &str,
-) -> Vec<String> {
+fn affected_neighbors(graph: &ServiceGraph, namespace: &str, self_name: &str) -> Vec<String> {
     let mut affected: Vec<String> = graph.get_dependencies(namespace, self_name);
     affected.extend(graph.get_dependents(namespace, self_name));
     affected.sort();
@@ -904,11 +902,7 @@ const GRAPH_AUDIT_INTERVAL: Duration = Duration::from_secs(300);
 /// An orphan is a non-Unknown node in the graph whose backing CRD no longer
 /// exists on the API server. This catches missed delete events that the
 /// event-driven controllers can't self-heal from.
-pub fn spawn_graph_auditor(
-    client: Client,
-    graph: Arc<ServiceGraph>,
-    token: CancellationToken,
-) {
+pub fn spawn_graph_auditor(client: Client, graph: Arc<ServiceGraph>, token: CancellationToken) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(GRAPH_AUDIT_INTERVAL);
         // First tick fires immediately — skip it so we don't audit right after warmup.
@@ -930,10 +924,7 @@ pub fn spawn_graph_auditor(
 
 /// Compare the graph against the API server and fix divergence in both
 /// directions: remove orphaned nodes and re-add missing ones.
-async fn audit_graph_orphans(
-    client: &Client,
-    graph: &ServiceGraph,
-) -> Result<(), kube::Error> {
+async fn audit_graph_orphans(client: &Client, graph: &ServiceGraph) -> Result<(), kube::Error> {
     let services = Api::<LatticeService>::all(client.clone())
         .list(&kube::api::ListParams::default())
         .await?;
@@ -1071,9 +1062,7 @@ fn all_service_refs(graph: &ServiceGraph) -> Vec<ObjectRef<LatticeService>> {
     refs
 }
 
-fn all_mesh_member_refs(
-    graph: &ServiceGraph,
-) -> Vec<ObjectRef<LatticeMeshMember>> {
+fn all_mesh_member_refs(graph: &ServiceGraph) -> Vec<ObjectRef<LatticeMeshMember>> {
     graph
         .all_mesh_eligible()
         .into_iter()

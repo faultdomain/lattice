@@ -14,8 +14,8 @@ use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::{
-    LatticeJob, LatticeModel, LatticeQuota, LatticeQuotaPhase, LatticeQuotaStatus,
-    LatticeService, QuotaPrincipal,
+    LatticeJob, LatticeModel, LatticeQuota, LatticeQuotaPhase, LatticeQuotaStatus, LatticeService,
+    QuotaPrincipal,
 };
 use lattice_common::resources::{
     compute_workload_demand, parse_resource_by_key, WorkloadResourceDemand,
@@ -49,7 +49,16 @@ pub async fn reconcile(
 
     if let Err(e) = quota.spec.validate() {
         warn!(quota = %name, error = %e, "LatticeQuota spec invalid");
-        update_status(client, &quota, LatticeQuotaPhase::Invalid, BTreeMap::new(), 0, Some(e.to_string()), Some(generation)).await?;
+        update_status(
+            client,
+            &quota,
+            LatticeQuotaPhase::Invalid,
+            BTreeMap::new(),
+            0,
+            Some(e.to_string()),
+            Some(generation),
+        )
+        .await?;
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
     }
 
@@ -61,16 +70,38 @@ pub async fn reconcile(
     let principal = match QuotaPrincipal::parse(&quota.spec.principal) {
         Ok(p) => p,
         Err(e) => {
-            update_status(client, &quota, LatticeQuotaPhase::Invalid, BTreeMap::new(), 0, Some(e.to_string()), Some(generation)).await?;
+            update_status(
+                client,
+                &quota,
+                LatticeQuotaPhase::Invalid,
+                BTreeMap::new(),
+                0,
+                Some(e.to_string()),
+                Some(generation),
+            )
+            .await?;
             return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
         }
     };
 
     let (usage, workload_count, ns_labels) = compute_usage(client, &principal).await;
     let exceeded = is_exceeded(&usage, &quota.spec.soft);
-    let phase = if exceeded { LatticeQuotaPhase::Exceeded } else { LatticeQuotaPhase::Active };
+    let phase = if exceeded {
+        LatticeQuotaPhase::Exceeded
+    } else {
+        LatticeQuotaPhase::Active
+    };
 
-    update_status(client, &quota, phase, crate::format_demand_map(&usage), workload_count, None, Some(generation)).await?;
+    update_status(
+        client,
+        &quota,
+        phase,
+        crate::format_demand_map(&usage),
+        workload_count,
+        None,
+        Some(generation),
+    )
+    .await?;
 
     // Send full snapshot through the watch channel
     let all_quotas = list_all_quotas(client).await;
@@ -115,18 +146,27 @@ async fn list_all_quotas(client: &kube::Client) -> Vec<LatticeQuota> {
 async fn compute_usage(
     client: &kube::Client,
     principal: &QuotaPrincipal,
-) -> (WorkloadResourceDemand, u32, BTreeMap<String, BTreeMap<String, String>>) {
+) -> (
+    WorkloadResourceDemand,
+    u32,
+    BTreeMap<String, BTreeMap<String, String>>,
+) {
     let mut total = WorkloadResourceDemand::default();
     let mut count: u32 = 0;
     let mut ns_cache: HashMap<String, BTreeMap<String, String>> = HashMap::new();
     let empty = BTreeMap::new();
 
-    if let Ok(services) = Api::<LatticeService>::all(client.clone()).list(&Default::default()).await {
+    if let Ok(services) = Api::<LatticeService>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
         for svc in &services.items {
             let ns = svc.namespace().unwrap_or_default();
             let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
             let annotations = svc.metadata.annotations.as_ref().unwrap_or(&empty);
-            if !principal.matches_workload(&ns, &svc.name_any(), ns_labels, annotations) { continue; }
+            if !principal.matches_workload(&ns, &svc.name_any(), ns_labels, annotations) {
+                continue;
+            }
             if let Ok(demand) = compute_workload_demand(&svc.spec.workload, svc.spec.replicas) {
                 total += &demand;
                 count += 1;
@@ -134,14 +174,21 @@ async fn compute_usage(
         }
     }
 
-    if let Ok(jobs) = Api::<LatticeJob>::all(client.clone()).list(&Default::default()).await {
+    if let Ok(jobs) = Api::<LatticeJob>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
         for job in &jobs.items {
             let ns = job.namespace().unwrap_or_default();
             let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
             let annotations = job.metadata.annotations.as_ref().unwrap_or(&empty);
-            if !principal.matches_workload(&ns, &job.name_any(), ns_labels, annotations) { continue; }
+            if !principal.matches_workload(&ns, &job.name_any(), ns_labels, annotations) {
+                continue;
+            }
             for task in job.spec.tasks.values() {
-                if let Ok(demand) = compute_workload_demand(&task.workload, task.replicas.unwrap_or(1)) {
+                if let Ok(demand) =
+                    compute_workload_demand(&task.workload, task.replicas.unwrap_or(1))
+                {
                     total += &demand;
                 }
             }
@@ -149,14 +196,21 @@ async fn compute_usage(
         }
     }
 
-    if let Ok(models) = Api::<LatticeModel>::all(client.clone()).list(&Default::default()).await {
+    if let Ok(models) = Api::<LatticeModel>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
         for model in &models.items {
             let ns = model.namespace().unwrap_or_default();
             let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
             let annotations = model.metadata.annotations.as_ref().unwrap_or(&empty);
-            if !principal.matches_workload(&ns, &model.name_any(), ns_labels, annotations) { continue; }
+            if !principal.matches_workload(&ns, &model.name_any(), ns_labels, annotations) {
+                continue;
+            }
             for role in model.spec.roles.values() {
-                if let Ok(demand) = compute_workload_demand(&role.entry_workload, role.replicas.unwrap_or(1)) {
+                if let Ok(demand) =
+                    compute_workload_demand(&role.entry_workload, role.replicas.unwrap_or(1))
+                {
                     total += &demand;
                 }
                 if let (Some(ref ww), Some(wr)) = (&role.worker_workload, role.worker_replicas) {
@@ -192,7 +246,9 @@ async fn cached_ns_labels<'a>(
 ) -> &'a BTreeMap<String, String> {
     if !cache.contains_key(namespace) {
         let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
-        let labels = api.get(namespace).await
+        let labels = api
+            .get(namespace)
+            .await
             .map(|ns| ns.metadata.labels.unwrap_or_default())
             .unwrap_or_default();
         cache.insert(namespace.to_string(), labels);
@@ -201,18 +257,31 @@ async fn cached_ns_labels<'a>(
 }
 
 async fn update_status(
-    client: &kube::Client, quota: &LatticeQuota, phase: LatticeQuotaPhase,
-    used: BTreeMap<String, String>, workload_count: u32,
-    message: Option<String>, observed_generation: Option<i64>,
+    client: &kube::Client,
+    quota: &LatticeQuota,
+    phase: LatticeQuotaPhase,
+    used: BTreeMap<String, String>,
+    workload_count: u32,
+    message: Option<String>,
+    observed_generation: Option<i64>,
 ) -> Result<(), ReconcileError> {
-    let status = LatticeQuotaStatus { phase, used, workload_count, message, observed_generation };
+    let status = LatticeQuotaStatus {
+        phase,
+        used,
+        workload_count,
+        message,
+        observed_generation,
+    };
     lattice_common::kube_utils::patch_resource_status::<LatticeQuota>(
         client,
         &quota.name_any(),
-        &quota.namespace().unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string()),
+        &quota
+            .namespace()
+            .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string()),
         &status,
         FIELD_MANAGER,
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -222,32 +291,60 @@ mod tests {
 
     #[test]
     fn is_exceeded_within_limits() {
-        let usage = WorkloadResourceDemand { cpu_millis: 4000, memory_bytes: 8 * 1024 * 1024 * 1024, gpu_count: 2 };
-        let soft = BTreeMap::from([("cpu".into(), "8".into()), ("memory".into(), "16Gi".into()), ("nvidia.com/gpu".into(), "4".into())]);
+        let usage = WorkloadResourceDemand {
+            cpu_millis: 4000,
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+            gpu_count: 2,
+        };
+        let soft = BTreeMap::from([
+            ("cpu".into(), "8".into()),
+            ("memory".into(), "16Gi".into()),
+            ("nvidia.com/gpu".into(), "4".into()),
+        ]);
         assert!(!is_exceeded(&usage, &soft));
     }
 
     #[test]
     fn is_exceeded_cpu_over() {
-        let usage = WorkloadResourceDemand { cpu_millis: 10000, ..Default::default() };
-        assert!(is_exceeded(&usage, &BTreeMap::from([("cpu".into(), "8".into())])));
+        let usage = WorkloadResourceDemand {
+            cpu_millis: 10000,
+            ..Default::default()
+        };
+        assert!(is_exceeded(
+            &usage,
+            &BTreeMap::from([("cpu".into(), "8".into())])
+        ));
     }
 
     #[test]
     fn is_exceeded_gpu_over() {
-        let usage = WorkloadResourceDemand { gpu_count: 5, ..Default::default() };
-        assert!(is_exceeded(&usage, &BTreeMap::from([("nvidia.com/gpu".into(), "4".into())])));
+        let usage = WorkloadResourceDemand {
+            gpu_count: 5,
+            ..Default::default()
+        };
+        assert!(is_exceeded(
+            &usage,
+            &BTreeMap::from([("nvidia.com/gpu".into(), "4".into())])
+        ));
     }
 
     #[test]
     fn is_exceeded_empty_soft() {
-        let usage = WorkloadResourceDemand { cpu_millis: 100000, memory_bytes: 100000000000, gpu_count: 100 };
+        let usage = WorkloadResourceDemand {
+            cpu_millis: 100000,
+            memory_bytes: 100000000000,
+            gpu_count: 100,
+        };
         assert!(!is_exceeded(&usage, &BTreeMap::new()));
     }
 
     #[test]
     fn format_demand_map_whole_cores() {
-        let demand = WorkloadResourceDemand { cpu_millis: 4000, memory_bytes: 8 * 1024 * 1024 * 1024, gpu_count: 2 };
+        let demand = WorkloadResourceDemand {
+            cpu_millis: 4000,
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+            gpu_count: 2,
+        };
         let map = crate::format_demand_map(&demand);
         assert_eq!(map.get("cpu").unwrap(), "4");
         assert_eq!(map.get("memory").unwrap(), "8Gi");
@@ -256,7 +353,11 @@ mod tests {
 
     #[test]
     fn format_demand_map_fractional_cpu() {
-        let demand = WorkloadResourceDemand { cpu_millis: 1500, memory_bytes: 512 * 1024 * 1024, gpu_count: 0 };
+        let demand = WorkloadResourceDemand {
+            cpu_millis: 1500,
+            memory_bytes: 512 * 1024 * 1024,
+            gpu_count: 0,
+        };
         let map = crate::format_demand_map(&demand);
         assert_eq!(map.get("cpu").unwrap(), "1500m");
         assert_eq!(map.get("memory").unwrap(), "512Mi");

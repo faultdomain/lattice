@@ -740,8 +740,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        let metadata =
-            build_manifest_metadata("my-resource", "my-namespace", &labels, &None, None);
+        let metadata = build_manifest_metadata("my-resource", "my-namespace", &labels, &None, None);
 
         assert_eq!(metadata["name"], "my-resource");
         assert_eq!(metadata["namespace"], "my-namespace");
@@ -779,13 +778,18 @@ mod tests {
     #[test]
     fn build_metadata_with_annotations() {
         let annotations: Option<std::collections::BTreeMap<String, String>> = Some(
-            [("cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size".to_string(), "0".to_string())]
-                .into_iter()
-                .collect(),
+            [(
+                "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size".to_string(),
+                "0".to_string(),
+            )]
+            .into_iter()
+            .collect(),
         );
-        let metadata =
-            build_manifest_metadata("my-md", "my-namespace", &None, &annotations, None);
+        let metadata = build_manifest_metadata("my-md", "my-namespace", &None, &annotations, None);
 
-        assert_eq!(metadata["annotations"]["cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size"], "0");
+        assert_eq!(
+            metadata["annotations"]["cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size"],
+            "0"
+        );
     }
 }

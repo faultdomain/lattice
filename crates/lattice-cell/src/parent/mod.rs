@@ -1011,11 +1011,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires a Kubernetes cluster
     async fn test_parent_servers_creation() {
         lattice_common::fips::install_crypto_provider();
-        let Some(client) = try_test_client().await else {
-            return; // Skip if no kubeconfig available
-        };
+        let client = try_test_client().await.expect("kubeconfig required");
         let config = ParentConfig::from_config(&test_lattice_config());
         let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
         let servers: ParentServers<MockManifestGenerator> =
@@ -1024,108 +1023,79 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires a Kubernetes cluster
     async fn test_parent_servers_not_running_initially() {
-        let Some(servers) = test_parent_servers().await else {
-            return; // Skip if no kubeconfig available
-        };
+        let servers = test_parent_servers().await.expect("kubeconfig required");
         assert!(!servers.is_running());
     }
 
     #[tokio::test]
+    #[ignore] // Requires a Kubernetes cluster with blocklist ConfigMap
     async fn test_ensure_running_starts_servers() {
-        // Install crypto provider before creating kube client (which uses TLS)
         lattice_common::fips::install_crypto_provider();
 
-        let Some(client) = try_test_client().await else {
-            // Skip test if no kubeconfig available
-            return;
-        };
+        let client = try_test_client().await.expect("kubeconfig required");
+        let servers = test_parent_servers().await.expect("kubeconfig required");
 
-        let Some(servers) = test_parent_servers().await else {
-            return; // Skip if no kubeconfig available
-        };
-
-        // Start servers — skip if cluster lacks required infrastructure
         let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
-        let result = servers
+        let started = servers
             .ensure_running(MockManifestGenerator, &[], client.clone(), route_tx.clone())
-            .await;
-        let started = match result {
-            Ok(v) => v,
-            Err(_) => return, // Skip: cluster lacks required infrastructure (e.g. blocklist CRD)
-        };
-        assert!(started); // Should return true (started)
+            .await
+            .expect("ensure_running should succeed");
+        assert!(started);
         assert!(servers.is_running());
 
         // Second call should return false (already running)
-        let result = servers
+        let started = servers
             .ensure_running(MockManifestGenerator, &[], client, route_tx)
-            .await;
-        assert!(result.is_ok());
-        assert!(!result.expect("ensure_running should succeed")); // Should return false (was already running)
+            .await
+            .expect("ensure_running should succeed");
+        assert!(!started);
 
-        // Cleanup
         servers.shutdown().await;
         assert!(!servers.is_running());
     }
 
     #[tokio::test]
+    #[ignore] // Requires a Kubernetes cluster with blocklist ConfigMap
     async fn test_shutdown_idempotent() {
-        let Some(servers) = test_parent_servers().await else {
-            return; // Skip if no kubeconfig available
-        };
+        let servers = test_parent_servers().await.expect("kubeconfig required");
 
         // Shutdown without starting should be safe
         servers.shutdown().await;
         assert!(!servers.is_running());
 
-        // Start and shutdown (only if we have a client and cluster has infrastructure)
-        if let Some(client) = try_test_client().await {
-            let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
-            if servers
-                .ensure_running(MockManifestGenerator, &[], client, route_tx)
-                .await
-                .is_err()
-            {
-                return; // Skip: cluster lacks required infrastructure
-            }
-            servers.shutdown().await;
-            assert!(!servers.is_running());
+        let client = try_test_client().await.expect("kubeconfig required");
+        let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
+        servers
+            .ensure_running(MockManifestGenerator, &[], client, route_tx)
+            .await
+            .expect("ensure_running should succeed");
+        servers.shutdown().await;
+        assert!(!servers.is_running());
 
-            // Double shutdown should be safe
-            servers.shutdown().await;
-            assert!(!servers.is_running());
-        }
+        // Double shutdown should be safe
+        servers.shutdown().await;
+        assert!(!servers.is_running());
     }
 
     #[tokio::test]
+    #[ignore] // Requires a Kubernetes cluster with blocklist ConfigMap
     async fn test_bootstrap_state_available_after_start() {
-        // Install crypto provider before creating kube client (which uses TLS)
         lattice_common::fips::install_crypto_provider();
 
-        let Some(servers) = test_parent_servers().await else {
-            return; // Skip if no kubeconfig available
-        };
+        let servers = test_parent_servers().await.expect("kubeconfig required");
+        let client = try_test_client().await.expect("kubeconfig required");
 
-        let Some(client) = try_test_client().await else {
-            return; // Skip if no kubeconfig available
-        };
-
-        // Before start, bootstrap state should be None
         assert!(servers.bootstrap_state().await.is_none());
 
-        // After start, bootstrap state should be available
         let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
-        if servers
+        servers
             .ensure_running(MockManifestGenerator, &[], client, route_tx)
             .await
-            .is_err()
-        {
-            return; // Skip: cluster lacks required infrastructure
-        }
+            .expect("ensure_running should succeed");
         assert!(servers.bootstrap_state().await.is_some());
 
-        // After shutdown, bootstrap state should be None again
         servers.shutdown().await;
         assert!(servers.bootstrap_state().await.is_none());
     }

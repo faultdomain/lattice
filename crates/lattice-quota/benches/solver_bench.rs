@@ -57,15 +57,15 @@ fn aws_like_pools(count: usize) -> BTreeMap<String, WorkerPoolSpec> {
 
     // CPU instance families: general, compute-optimized, memory-optimized
     let families: Vec<(&str, u32)> = vec![
-        ("m5", 2),   // 1:4 ratio (cores:gib)
-        ("m6i", 2),  // 1:4
-        ("m7i", 2),  // 1:4
-        ("c5", 4),   // 1:2 ratio
-        ("c6i", 4),  // 1:2
-        ("c7i", 4),  // 1:2
-        ("r5", 1),   // 1:8 ratio
-        ("r6i", 1),  // 1:8
-        ("r7i", 1),  // 1:8
+        ("m5", 2),  // 1:4 ratio (cores:gib)
+        ("m6i", 2), // 1:4
+        ("m7i", 2), // 1:4
+        ("c5", 4),  // 1:2 ratio
+        ("c6i", 4), // 1:2
+        ("c7i", 4), // 1:2
+        ("r5", 1),  // 1:8 ratio
+        ("r6i", 1), // 1:8
+        ("r7i", 1), // 1:8
     ];
 
     let sizes: Vec<(u32, &str)> = vec![
@@ -87,10 +87,7 @@ fn aws_like_pools(count: usize) -> BTreeMap<String, WorkerPoolSpec> {
                 break;
             }
             let mem_gib = cores * (4 / mem_ratio).max(1) * mem_ratio;
-            pools.insert(
-                format!("{family}.{size}"),
-                make_cpu_pool(*cores, mem_gib),
-            );
+            pools.insert(format!("{family}.{size}"), make_cpu_pool(*cores, mem_gib));
         }
     }
 

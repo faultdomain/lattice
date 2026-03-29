@@ -906,8 +906,15 @@ async fn compile_and_apply(
     inputs_hash: &str,
     eso_content_hash: &str,
 ) -> Result<Action, Error> {
-    let annotations = service.metadata.annotations.as_ref().cloned().unwrap_or_default();
-    let quota_budget = ctx.quota_store.resolve_budget(namespace, name, &annotations);
+    let annotations = service
+        .metadata
+        .annotations
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+    let quota_budget = ctx
+        .quota_store
+        .resolve_budget(namespace, name, &annotations);
 
     let compiler = ServiceCompiler::new(
         &ctx.graph,

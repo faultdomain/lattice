@@ -326,8 +326,15 @@ pub async fn reconcile(
         .map(|s| s.phase.clone())
         .unwrap_or(ModelServingPhase::Pending);
 
-    let annotations = model.metadata.annotations.as_ref().cloned().unwrap_or_default();
-    let quota_budget = ctx.quota_store.resolve_budget(namespace, &name, &annotations);
+    let annotations = model
+        .metadata
+        .annotations
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+    let quota_budget = ctx
+        .quota_store
+        .resolve_budget(namespace, &name, &annotations);
 
     match phase {
         ModelServingPhase::Pending => {

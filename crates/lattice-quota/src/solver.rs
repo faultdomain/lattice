@@ -16,7 +16,9 @@
 
 use std::collections::BTreeMap;
 
-use good_lp::{constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable};
+use good_lp::{
+    constraint, variable, Expression, ProblemVariables, Solution, SolverModel, Variable,
+};
 use tracing::warn;
 
 use lattice_common::crd::{LatticeQuota, WorkerPoolSpec};
@@ -229,12 +231,7 @@ impl AggregateDemand {
     }
 }
 
-fn build_constraints(
-    cpu: i64,
-    memory: i64,
-    gpu: u32,
-    cost: f64,
-) -> Vec<Box<dyn SolverConstraint>> {
+fn build_constraints(cpu: i64, memory: i64, gpu: u32, cost: f64) -> Vec<Box<dyn SolverConstraint>> {
     let mut constraints: Vec<Box<dyn SolverConstraint>> = Vec::new();
     if cpu > 0 {
         constraints.push(Box::new(CpuConstraint(cpu)));
@@ -331,10 +328,7 @@ fn solve_lp(
     }
 
     let mut vars = ProblemVariables::new();
-    let node_vars: Vec<Variable> = pools
-        .iter()
-        .map(|_| vars.add(variable().min(0)))
-        .collect();
+    let node_vars: Vec<Variable> = pools.iter().map(|_| vars.add(variable().min(0))).collect();
 
     let cost_expr: Expression = node_vars
         .iter()
@@ -342,7 +336,9 @@ fn solve_lp(
         .map(|(var, (_, _, shape))| shape.hourly_cost * *var)
         .sum();
 
-    let mut model = vars.minimise(&cost_expr).using(good_lp::solvers::microlp::microlp);
+    let mut model = vars
+        .minimise(&cost_expr)
+        .using(good_lp::solvers::microlp::microlp);
 
     for c in constraints {
         let expr: Expression = node_vars
@@ -370,7 +366,12 @@ fn solve_lp(
     }
 }
 
-fn clamp_plan(pool_id: &str, spec: &WorkerPoolSpec, quota_min: u32, quota_max: u32) -> PoolCapacityPlan {
+fn clamp_plan(
+    pool_id: &str,
+    spec: &WorkerPoolSpec,
+    quota_min: u32,
+    quota_max: u32,
+) -> PoolCapacityPlan {
     let min_nodes = match spec.min {
         Some(pool_min) => pool_min.max(quota_min),
         None => quota_min,
@@ -549,7 +550,10 @@ mod tests {
         let large = plans.iter().find(|p| p.pool_id == "large").unwrap();
         // Either 4 small or 1 large satisfies 16 cores — solver picks cheapest
         let total_cpu = small.max_nodes as i64 * 4000 + large.max_nodes as i64 * 64000;
-        assert!(total_cpu >= 16_000, "provisioned {total_cpu}m < demanded 16000m");
+        assert!(
+            total_cpu >= 16_000,
+            "provisioned {total_cpu}m < demanded 16000m"
+        );
     }
 
     #[test]
@@ -586,11 +590,17 @@ mod tests {
     #[test]
     fn solve_pool_without_shape_skipped() {
         let mut pools = BTreeMap::new();
-        pools.insert("unknown".to_string(), WorkerPoolSpec {
-            instance_type: Some(InstanceType::named("m5.xlarge")),
+        pools.insert(
+            "unknown".to_string(),
+            WorkerPoolSpec {
+                instance_type: Some(InstanceType::named("m5.xlarge")),
+                ..Default::default()
+            },
+        );
+        let demand = AggregateDemand {
+            soft_cpu_millis: 100_000,
             ..Default::default()
-        });
-        let demand = AggregateDemand { soft_cpu_millis: 100_000, ..Default::default() };
+        };
         let plans = solve(&pools, &demand, &test_rates());
         assert!(plans.is_empty());
     }
@@ -612,9 +622,15 @@ mod tests {
     #[test]
     fn solve_prefers_cheaper_gpu() {
         let mut pools = BTreeMap::new();
-        pools.insert("h100".to_string(), gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM"));
+        pools.insert(
+            "h100".to_string(),
+            gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM"),
+        );
         pools.insert("l4".to_string(), gpu_pool(4, 48, 256, "NVIDIA-L4"));
-        let demand = AggregateDemand { soft_gpu_count: 4, ..Default::default() };
+        let demand = AggregateDemand {
+            soft_gpu_count: 4,
+            ..Default::default()
+        };
         let plans = solve(&pools, &demand, &test_rates());
         let l4 = plans.iter().find(|p| p.pool_id == "l4").unwrap();
         let h100 = plans.iter().find(|p| p.pool_id == "h100").unwrap();
@@ -642,20 +658,35 @@ mod tests {
 
     #[test]
     fn aggregate_quotas_basic() {
-        let q1 = LatticeQuota::new("team-a", LatticeQuotaSpec {
-            principal: "Lattice::Group::\"team-a\"".to_string(),
-            soft: BTreeMap::from([("cpu".into(), "64".into()), ("nvidia.com/gpu".into(), "8".into())]),
-            hard: Some(BTreeMap::from([("cpu".into(), "32".into()), ("nvidia.com/gpu".into(), "4".into())])),
-            max_per_workload: None,
-            enabled: true,
-        });
-        let q2 = LatticeQuota::new("team-b", LatticeQuotaSpec {
-            principal: "Lattice::Group::\"team-b\"".to_string(),
-            soft: BTreeMap::from([("cpu".into(), "32".into()), ("nvidia.com/gpu".into(), "8".into())]),
-            hard: None,
-            max_per_workload: None,
-            enabled: true,
-        });
+        let q1 = LatticeQuota::new(
+            "team-a",
+            LatticeQuotaSpec {
+                principal: "Lattice::Group::\"team-a\"".to_string(),
+                soft: BTreeMap::from([
+                    ("cpu".into(), "64".into()),
+                    ("nvidia.com/gpu".into(), "8".into()),
+                ]),
+                hard: Some(BTreeMap::from([
+                    ("cpu".into(), "32".into()),
+                    ("nvidia.com/gpu".into(), "4".into()),
+                ])),
+                max_per_workload: None,
+                enabled: true,
+            },
+        );
+        let q2 = LatticeQuota::new(
+            "team-b",
+            LatticeQuotaSpec {
+                principal: "Lattice::Group::\"team-b\"".to_string(),
+                soft: BTreeMap::from([
+                    ("cpu".into(), "32".into()),
+                    ("nvidia.com/gpu".into(), "8".into()),
+                ]),
+                hard: None,
+                max_per_workload: None,
+                enabled: true,
+            },
+        );
         let agg = aggregate_quotas(&[q1, q2]);
         assert_eq!(agg.soft_cpu_millis, 96_000);
         assert_eq!(agg.soft_gpu_count, 16);
@@ -665,26 +696,32 @@ mod tests {
 
     #[test]
     fn aggregate_skips_disabled() {
-        let mut q = LatticeQuota::new("disabled", LatticeQuotaSpec {
-            principal: "Lattice::Group::\"x\"".to_string(),
-            soft: BTreeMap::from([("cpu".into(), "100".into())]),
-            hard: None,
-            max_per_workload: None,
-            enabled: false,
-        });
+        let mut q = LatticeQuota::new(
+            "disabled",
+            LatticeQuotaSpec {
+                principal: "Lattice::Group::\"x\"".to_string(),
+                soft: BTreeMap::from([("cpu".into(), "100".into())]),
+                hard: None,
+                max_per_workload: None,
+                enabled: false,
+            },
+        );
         q.spec.enabled = false;
         assert_eq!(aggregate_quotas(&[q]).soft_cpu_millis, 0);
     }
 
     #[test]
     fn aggregate_quotas_with_cost() {
-        let q = LatticeQuota::new("team-a", LatticeQuotaSpec {
-            principal: "Lattice::Group::\"team-a\"".to_string(),
-            soft: BTreeMap::from([("cpu".into(), "64".into()), ("cost".into(), "100".into())]),
-            hard: Some(BTreeMap::from([("cost".into(), "50".into())])),
-            max_per_workload: None,
-            enabled: true,
-        });
+        let q = LatticeQuota::new(
+            "team-a",
+            LatticeQuotaSpec {
+                principal: "Lattice::Group::\"team-a\"".to_string(),
+                soft: BTreeMap::from([("cpu".into(), "64".into()), ("cost".into(), "100".into())]),
+                hard: Some(BTreeMap::from([("cost".into(), "50".into())])),
+                max_per_workload: None,
+                enabled: true,
+            },
+        );
         let agg = aggregate_quotas(&[q]);
         assert!((agg.soft_cost_budget - 100.0).abs() < f64::EPSILON);
         assert!((agg.hard_cost_budget - 50.0).abs() < f64::EPSILON);
@@ -700,10 +737,17 @@ mod tests {
     #[test]
     fn node_shape_from_capacity_hint() {
         let spec = WorkerPoolSpec {
-            capacity: Some(NodeCapacityHint { cpu: "96".into(), memory: "768Gi".into() }),
+            capacity: Some(NodeCapacityHint {
+                cpu: "96".into(),
+                memory: "768Gi".into(),
+            }),
             instance_type: Some(InstanceType {
                 name: Some("p5.48xlarge".into()),
-                gpu: Some(GpuCapacity { count: 8, model: "NVIDIA-H100-SXM".into(), memory_gib: None }),
+                gpu: Some(GpuCapacity {
+                    count: 8,
+                    model: "NVIDIA-H100-SXM".into(),
+                    memory_gib: None,
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -718,7 +762,12 @@ mod tests {
     #[test]
     fn constraint_trait_cpu() {
         let c = CpuConstraint(32_000);
-        let shape = NodeShape { cpu_millis: 16_000, memory_bytes: 0, gpu_count: 0, hourly_cost: 1.0 };
+        let shape = NodeShape {
+            cpu_millis: 16_000,
+            memory_bytes: 0,
+            gpu_count: 0,
+            hourly_cost: 1.0,
+        };
         assert_eq!(c.coefficient(&shape), 16_000.0);
         assert_eq!(c.demand(), 32_000.0);
         assert!(!c.is_upper_bound());
@@ -727,7 +776,12 @@ mod tests {
     #[test]
     fn constraint_trait_cost_budget() {
         let c = CostBudgetConstraint(100.0);
-        let shape = NodeShape { cpu_millis: 0, memory_bytes: 0, gpu_count: 0, hourly_cost: 25.0 };
+        let shape = NodeShape {
+            cpu_millis: 0,
+            memory_bytes: 0,
+            gpu_count: 0,
+            hourly_cost: 25.0,
+        };
         assert_eq!(c.coefficient(&shape), 25.0);
         assert_eq!(c.demand(), 100.0);
         assert!(c.is_upper_bound());

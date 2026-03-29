@@ -221,11 +221,9 @@ impl<'a> WorkloadCompiler<'a> {
 
         // Quota enforcement — check resource limits before authorization
         if let Some(ref budget) = self.quota_budget {
-            let demand = lattice_common::resources::compute_workload_demand(
-                self.workload,
-                self.replicas,
-            )
-            .map_err(|e| CompilationError::quota_exceeded(e.to_string()))?;
+            let demand =
+                lattice_common::resources::compute_workload_demand(self.workload, self.replicas)
+                    .map_err(|e| CompilationError::quota_exceeded(e.to_string()))?;
             budget
                 .check(&demand)
                 .map_err(CompilationError::quota_exceeded)?;

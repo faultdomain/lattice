@@ -69,7 +69,6 @@ pub fn estimate_model_cost(
     Ok(build_estimate(total_cpu, total_mem, total_gpu))
 }
 
-
 /// Compute CPU, memory, and GPU hourly cost for a single workload × replica count.
 fn workload_cost(
     workload: &WorkloadSpec,

@@ -194,14 +194,17 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let config = config.clone();
                 let capi_installer = capi_installer.clone();
                 Box::pin(async move {
-                    ensure_cluster_crds(&client).await.expect("CRD install failed");
-                    ensure_service_crds(&client).await.expect("CRD install failed");
+                    ensure_cluster_crds(&client)
+                        .await
+                        .expect("CRD install failed");
+                    ensure_service_crds(&client)
+                        .await
+                        .expect("CRD install failed");
                     spawn_admission_webhook_configuration(client.clone());
                     ensure_capi_infrastructure(&client, Some(&*capi_installer), &config)
                         .await
                         .expect("CAPI infrastructure failed");
-                    let handle =
-                        spawn_general_infrastructure(client.clone(), true, config.clone());
+                    let handle = spawn_general_infrastructure(client.clone(), true, config.clone());
                     spawn_webhook_infrastructure(client);
                     // Wait for general infra then hold the lease forever
                     if let Err(e) = handle.await {
@@ -292,9 +295,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     ctx.spawn_workload::<LatticeService, _>("service", |p| {
         controller_runner::build_service_controller(p)
     });
-    ctx.spawn_workload::<LatticeJob, _>("job", |p| {
-        controller_runner::build_job_controller(p)
-    });
+    ctx.spawn_workload::<LatticeJob, _>("job", |p| controller_runner::build_job_controller(p));
     ctx.spawn_workload::<LatticeModel, _>("model", |p| {
         controller_runner::build_model_controller(p)
     });
@@ -317,9 +318,12 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         .cluster_name_required()
                         .expect("cluster name required")
                         .to_string();
-                    let graph =
-                        controller_runner::ensure_graph(&ctx.client, &ctx.graph_holder, &cluster_name)
-                            .await;
+                    let graph = controller_runner::ensure_graph(
+                        &ctx.client,
+                        &ctx.graph_holder,
+                        &cluster_name,
+                    )
+                    .await;
                     let registry = Arc::new(CrdRegistry::new(ctx.client.clone()).await);
                     let auditor_token = CancellationToken::new();
                     controller_runner::spawn_graph_auditor(
@@ -328,7 +332,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         auditor_token.clone(),
                     );
                     controller_runner::build_mesh_member_controller(
-                        ctx.client.clone(), graph, cluster_name, ctx.cedar.clone(), registry,
+                        ctx.client.clone(),
+                        graph,
+                        cluster_name,
+                        ctx.cedar.clone(),
+                        registry,
                     )
                     .await;
                     auditor_token.cancel();
@@ -352,11 +360,10 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let cedar = cedar.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<CedarPolicy>(&client).await;
-                    let ctx =
-                        Arc::new(lattice_api::cedar::validation::CedarValidationContext {
-                            client: client.clone(),
-                            cedar,
-                        });
+                    let ctx = Arc::new(lattice_api::cedar::validation::CedarValidationContext {
+                        client: client.clone(),
+                        cedar,
+                    });
                     controller_runner::simple_controller(
                         Api::<CedarPolicy>::all(client),
                         lattice_api::cedar::validation::reconcile,
@@ -385,9 +392,9 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let quota_sender = quota_sender.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeQuota>(&client).await;
-                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
-                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
-                    ));
+                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(
+                        Arc::new(lattice_cost::ConfigMapCostProvider::new(client.clone())),
+                    );
                     let ctx = Arc::new(lattice_quota::QuotaContext {
                         client: client.clone(),
                         cluster_name: config.cluster_name.clone(),
@@ -410,12 +417,36 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     ctx.spawn_provider("dns", lattice_dns_provider::reconcile, "DNSProvider");
     ctx.spawn_provider("cert", lattice_cert_issuer::reconcile, "CertIssuer");
     ctx.spawn_provider("cloud", lattice_cloud_provider::reconcile, "InfraProvider");
-    ctx.spawn_provider("secret", lattice_secret_provider::controller::reconcile, "SecretProvider");
-    ctx.spawn_provider("oidc", lattice_api::auth::oidc_controller::reconcile, "OIDCProvider");
-    ctx.spawn_provider("backup-store", lattice_backup::backup_store_controller::reconcile, "BackupStore");
-    ctx.spawn_provider("cluster-backup", lattice_backup::cluster_backup_controller::reconcile, "ClusterBackup");
-    ctx.spawn_provider("restore", lattice_backup::restore_controller::reconcile, "Restore");
-    ctx.spawn_provider::<LatticeService, _, _>("service-backup", lattice_backup::service_backup_controller::reconcile, "ServiceBackup");
+    ctx.spawn_provider(
+        "secret",
+        lattice_secret_provider::controller::reconcile,
+        "SecretProvider",
+    );
+    ctx.spawn_provider(
+        "oidc",
+        lattice_api::auth::oidc_controller::reconcile,
+        "OIDCProvider",
+    );
+    ctx.spawn_provider(
+        "backup-store",
+        lattice_backup::backup_store_controller::reconcile,
+        "BackupStore",
+    );
+    ctx.spawn_provider(
+        "cluster-backup",
+        lattice_backup::cluster_backup_controller::reconcile,
+        "ClusterBackup",
+    );
+    ctx.spawn_provider(
+        "restore",
+        lattice_backup::restore_controller::reconcile,
+        "Restore",
+    );
+    ctx.spawn_provider::<LatticeService, _, _>(
+        "service-backup",
+        lattice_backup::service_backup_controller::reconcile,
+        "ServiceBackup",
+    );
 
     // ── Wait for shutdown signal ──
 
@@ -690,13 +721,11 @@ async fn cell_activation_watcher(
                 Ok(Some(host)) => break host,
                 Ok(None) => {
                     tracing::debug!("Waiting for cell LoadBalancer address...");
-                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL)
-                        .await;
+                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL).await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to discover cell host, retrying");
-                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL)
-                        .await;
+                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL).await;
                 }
             }
         };

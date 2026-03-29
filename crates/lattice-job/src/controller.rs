@@ -524,7 +524,12 @@ async fn submit_job(
     volcano_api: &ApiResource,
     cost: &Option<CostEstimate>,
 ) -> Result<(), JobError> {
-    let annotations = job.metadata.annotations.as_ref().cloned().unwrap_or_default();
+    let annotations = job
+        .metadata
+        .annotations
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
     let quota_budget = ctx.quota_store.resolve_budget(
         namespace,
         job.metadata.name.as_deref().unwrap_or_default(),

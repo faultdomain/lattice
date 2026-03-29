@@ -80,16 +80,16 @@ pub use observability::{
     scrape_metrics, MetricsConfig, MetricsScraper, MetricsSnapshot, NoopMetricsScraper,
     ObservabilitySpec,
 };
-pub use quota::{
-    LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,
-    QuotaPrincipalError, QUOTA_GROUP_LABEL, QUOTA_OWNER_ANNOTATION,
-};
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
 pub use providers::{
     AdditionalNetwork, AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig,
     ProxmoxConfig,
+};
+pub use quota::{
+    LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,
+    QuotaPrincipalError, QUOTA_GROUP_LABEL, QUOTA_OWNER_ANNOTATION,
 };
 pub use restore::{LatticeRestore, LatticeRestoreSpec, LatticeRestoreStatus, RestorePhase};
 pub use secrets_provider::{

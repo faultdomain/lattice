@@ -26,8 +26,7 @@ pub async fn reconcile_capacity(
     rates: &CostRates,
 ) -> Result<(), String> {
     // List all quotas in lattice-system
-    let quota_api: Api<LatticeQuota> =
-        Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let quota_api: Api<LatticeQuota> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let quotas = quota_api
         .list(&Default::default())
         .await

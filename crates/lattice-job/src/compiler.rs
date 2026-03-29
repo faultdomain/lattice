@@ -700,9 +700,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         let vcjob = match &compiled.workload {
             VolcanoWorkload::Job(v) => v,
@@ -724,9 +731,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         let vcjob = match &compiled.workload {
             VolcanoWorkload::Job(v) => v,
@@ -742,7 +756,15 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
-        let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None).await;
+        let result = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(JobError::NoTasks)));
     }
 
@@ -759,7 +781,15 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
-        let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None).await;
+        let result = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(JobError::MissingNamespace)));
     }
 
@@ -780,9 +810,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         let cron = match &compiled.workload {
             VolcanoWorkload::CronJob(c) => c,
@@ -996,9 +1033,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             !compiled.mesh_members.is_empty(),
@@ -1035,9 +1079,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             compiled.mesh_members.len() >= 2,
@@ -1086,9 +1137,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         let vcjob = match &compiled.workload {
             VolcanoWorkload::Job(v) => v,
@@ -1136,9 +1194,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         let vcjob = match &compiled.workload {
             VolcanoWorkload::Job(v) => v,
@@ -1165,9 +1230,16 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
-            .await
-            .unwrap();
+        let compiled = compile_job(
+            &job,
+            &graph,
+            "test-cluster",
+            ProviderType::Docker,
+            &cedar,
+            None,
+        )
+        .await
+        .unwrap();
 
         let vcjob = match &compiled.workload {
             VolcanoWorkload::Job(v) => v,

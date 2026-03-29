@@ -378,11 +378,16 @@ mod tests {
         let p = QuotaPrincipal::User {
             email: "alice@example.com".to_string(),
         };
-        let anns =
-            BTreeMap::from([("lattice.dev/owner".to_string(), "alice@example.com".to_string())]);
+        let anns = BTreeMap::from([(
+            "lattice.dev/owner".to_string(),
+            "alice@example.com".to_string(),
+        )]);
         assert!(p.matches_workload("ns", "svc", &BTreeMap::new(), &anns));
 
-        let wrong = BTreeMap::from([("lattice.dev/owner".to_string(), "bob@example.com".to_string())]);
+        let wrong = BTreeMap::from([(
+            "lattice.dev/owner".to_string(),
+            "bob@example.com".to_string(),
+        )]);
         assert!(!p.matches_workload("ns", "svc", &BTreeMap::new(), &wrong));
     }
 

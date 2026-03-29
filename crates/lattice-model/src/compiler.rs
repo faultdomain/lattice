@@ -248,9 +248,9 @@ async fn compile_workload(
     .with_graph(ctx.graph)
     .with_image_pull_secrets(&runtime.image_pull_secrets);
 
-        if let Some(budget) = ctx.quota_budget {
-            compiler = compiler.with_quota_budget(budget.clone(), 1);
-        }
+    if let Some(budget) = ctx.quota_budget {
+        compiler = compiler.with_quota_budget(budget.clone(), 1);
+    }
 
     if ctx.has_topology {
         compiler = compiler.with_topology();
