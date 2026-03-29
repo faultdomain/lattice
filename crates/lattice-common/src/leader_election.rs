@@ -90,11 +90,6 @@ impl LeaderElector {
     /// The guard maintains leadership through periodic renewal.
     /// When the guard is dropped or leadership is lost, the lost channel signals.
     pub async fn acquire(self: Arc<Self>) -> Result<LeaderGuard, LeaderElectionError> {
-        // Remove any stale leader label from a previous run (e.g., after crash)
-        if let Err(e) = self.remove_leader_label().await {
-            debug!(identity = %self.identity, error = %e, "No stale leader label to remove");
-        }
-
         info!(
             identity = %self.identity,
             lease = %self.lease_name,
@@ -381,17 +376,14 @@ impl LeaderElector {
         }
     }
 
-    /// Remove leader label, clear state, and signal leadership loss
+    /// Clear state and signal leadership loss
     async fn signal_leadership_lost(&self, lost_tx: oneshot::Sender<()>) {
-        if let Err(e) = self.remove_leader_label().await {
-            warn!(identity = %self.identity, error = %e, "Failed to remove leader label");
-        }
         self.is_leader.store(false, Ordering::SeqCst);
         let _ = lost_tx.send(());
     }
 
     /// Remove leader label from this pod
-    async fn remove_leader_label(&self) -> Result<(), LeaderElectionError> {
+    pub async fn remove_leader_label(&self) -> Result<(), LeaderElectionError> {
         let api: Api<Pod> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         // Use JSON patch to remove the label

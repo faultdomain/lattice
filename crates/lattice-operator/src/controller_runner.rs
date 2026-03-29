@@ -74,7 +74,7 @@ pub async fn leader_controller<F>(
 
         let mut guard = tokio::select! {
             _ = cancel.cancelled() => return,
-            result = elector.acquire() => match result {
+            result = elector.clone().acquire() => match result {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::error!(controller = name, error = %e, "lease acquisition failed");
@@ -98,12 +98,17 @@ pub async fn leader_controller<F>(
 
         tokio::select! {
             _ = cancel.cancelled() => {
+                if claim_traffic {
+                    let _ = elector.remove_leader_label().await;
+                }
                 let _ = guard.release_leadership().await;
                 return;
             }
             _ = guard.lost() => {
+                if claim_traffic {
+                    let _ = elector.remove_leader_label().await;
+                }
                 tracing::warn!(controller = name, "leadership lost, will re-acquire");
-                // LeaderElector already removed the leader label in signal_leadership_lost
             }
             _ = controller => {
                 tracing::error!(controller = name, "controller exited unexpectedly, restarting");
