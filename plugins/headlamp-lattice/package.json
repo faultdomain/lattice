@@ -23,5 +23,8 @@
       "plugin:jsx-a11y/recommended"
     ]
   },
-  "prettier": "@kinvolk/eslint-config/prettier-config"
+  "prettier": "@kinvolk/eslint-config/prettier-config",
+  "overrides": {
+    "brace-expansion": ">=2.0.3"
+  }
 }
