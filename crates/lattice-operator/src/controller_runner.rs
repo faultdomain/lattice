@@ -462,11 +462,18 @@ fn common_provider_controllers(
     client: &Client,
     ctx: &Arc<ControllerContext>,
     cedar_ctx: Arc<cedar_validation_ctrl::CedarValidationContext>,
+    cost_provider: Option<Arc<dyn CostProvider>>,
 ) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
     tracing::info!("- CedarPolicy controller");
     tracing::info!("- DNSProvider controller");
     tracing::info!("- CertIssuer controller");
     tracing::info!("- LatticeQuota controller");
+
+    let quota_ctx = Arc::new(lattice_quota::QuotaContext {
+        client: client.clone(),
+        cluster_name: ctx.config.cluster_name.clone(),
+        cost_provider,
+    });
 
     vec![
         simple_controller(
@@ -490,7 +497,7 @@ fn common_provider_controllers(
         simple_controller(
             Api::<LatticeQuota>::all(client.clone()),
             lattice_quota::reconcile,
-            ctx.clone(),
+            quota_ctx,
             "LatticeQuota",
         ),
     ]
@@ -515,7 +522,7 @@ pub fn build_cluster_provider_controllers(
     tracing::info!("- SecretProvider controller");
     tracing::info!("- OIDCProvider controller");
 
-    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx);
+    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx, None);
     controllers.extend([
         simple_controller(
             Api::<InfraProvider>::all(client.clone()),
@@ -559,7 +566,7 @@ pub fn build_service_provider_controllers(
     tracing::info!("- LatticeRestore controller");
     tracing::info!("- ServiceBackupSchedule controller");
 
-    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx);
+    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx, None);
     controllers.extend([
         simple_controller(
             Api::<BackupStore>::all(client.clone()),
@@ -603,8 +610,8 @@ pub fn build_all_provider_controllers(
         cedar,
     });
 
-    // Common controllers (CedarPolicy, DNSProvider, CertIssuer)
-    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx);
+    // Common controllers (CedarPolicy, DNSProvider, CertIssuer, LatticeQuota)
+    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx, None);
 
     // Cluster-only
     tracing::info!("- InfraProvider controller");

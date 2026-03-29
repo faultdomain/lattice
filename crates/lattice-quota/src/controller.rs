@@ -19,12 +19,21 @@ use lattice_common::crd::{
 use lattice_common::resources::{
     compute_workload_demand, parse_resource_by_key, WorkloadResourceDemand,
 };
-use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
-};
+use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS};
+use lattice_cost::CostProvider;
 
 const FIELD_MANAGER: &str = "lattice-quota-controller";
 const REQUEUE_SECS: u64 = 30;
+
+/// Context for the quota controller.
+pub struct QuotaContext {
+    /// Kubernetes client
+    pub client: kube::Client,
+    /// Self-cluster name (for capacity reconciliation)
+    pub cluster_name: Option<String>,
+    /// Cost rate provider (for the ILP solver)
+    pub cost_provider: Option<std::sync::Arc<dyn CostProvider>>,
+}
 
 /// Reconcile a LatticeQuota
 ///
@@ -32,7 +41,7 @@ const REQUEUE_SECS: u64 = 30;
 /// and updates status with usage and phase (Active vs Exceeded).
 pub async fn reconcile(
     quota: Arc<LatticeQuota>,
-    ctx: Arc<ControllerContext>,
+    ctx: Arc<QuotaContext>,
 ) -> Result<Action, ReconcileError> {
     let name = quota.name_any();
     let client = &ctx.client;
@@ -103,6 +112,28 @@ pub async fn reconcile(
         workloads = workload_count,
         "Reconciled LatticeQuota"
     );
+
+    // Reconcile cluster capacity if we have a cluster name
+    if let Some(ref cluster_name) = ctx.cluster_name {
+        let rates = match &ctx.cost_provider {
+            Some(provider) => match provider.load_rates().await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "Cost rates unavailable, using uniform costs");
+                    lattice_cost::CostRates::uniform()
+                }
+            },
+            None => {
+                debug!("No cost provider configured, using uniform costs");
+                lattice_cost::CostRates::uniform()
+            }
+        };
+
+        if let Err(e) = crate::capacity::reconcile_capacity(client, cluster_name, &rates).await
+        {
+            warn!(error = %e, "Capacity reconciliation failed, will retry");
+        }
+    }
 
     Ok(Action::requeue(Duration::from_secs(REQUEUE_SECS)))
 }

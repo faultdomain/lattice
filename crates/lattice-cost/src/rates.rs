@@ -19,6 +19,21 @@ pub struct CostRates {
     pub gpu: BTreeMap<String, f64>,
 }
 
+impl CostRates {
+    /// Create uniform rates where every resource type costs $1/unit/hour.
+    ///
+    /// Used as a fallback when no cost rates are configured. The solver will
+    /// still minimize total node count (since all nodes cost the same per
+    /// resource unit), but won't prefer cheaper instance types.
+    pub fn uniform() -> Self {
+        Self {
+            cpu: 1.0,
+            memory: 1.0,
+            gpu: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

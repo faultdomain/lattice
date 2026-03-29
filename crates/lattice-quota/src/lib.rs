@@ -13,11 +13,12 @@
 
 #![deny(missing_docs)]
 
+mod capacity;
 mod controller;
 mod enforcement;
 pub mod solver;
 
-pub use controller::reconcile;
+pub use controller::{reconcile, QuotaContext};
 pub use enforcement::{enforce_quotas, QuotaError};
 
 use std::collections::BTreeMap;

@@ -506,9 +506,7 @@ pub fn format_capi_version(
     }
 }
 
-/// Autoscaler annotation keys
-const AUTOSCALER_MIN_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size";
-const AUTOSCALER_MAX_SIZE: &str = "cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size";
+use lattice_common::resources::{AUTOSCALER_MAX_SIZE, AUTOSCALER_MIN_SIZE};
 
 /// Generate a MachineDeployment manifest for a worker pool
 ///
