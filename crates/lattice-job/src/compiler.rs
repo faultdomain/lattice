@@ -700,7 +700,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 
@@ -724,7 +724,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 
@@ -742,7 +742,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
-        let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
+        let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None).await;
         assert!(matches!(result, Err(JobError::NoTasks)));
     }
 
@@ -759,7 +759,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
-        let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar).await;
+        let result = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None).await;
         assert!(matches!(result, Err(JobError::MissingNamespace)));
     }
 
@@ -780,7 +780,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 
@@ -996,7 +996,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 
@@ -1035,7 +1035,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 
@@ -1086,7 +1086,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 
@@ -1136,7 +1136,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 
@@ -1165,7 +1165,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar)
+        let compiled = compile_job(&job, &graph, "test-cluster", ProviderType::Docker, &cedar, None)
             .await
             .unwrap();
 

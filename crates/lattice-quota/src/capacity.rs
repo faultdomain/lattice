@@ -123,8 +123,6 @@ async fn apply_plans(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn md_name_format() {
         let name = format!("{}-pool-{}", "my-cluster", "gpu");

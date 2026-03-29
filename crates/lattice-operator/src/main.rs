@@ -278,109 +278,57 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    // Helper: resolve WorkloadControllerParams for service/job/model controllers.
-    // All three need the same shared state — graph, cluster config, registry, etc.
-    async fn resolve_workload_params(
-        client: &kube::Client,
-        config: &SharedConfig,
-        cedar: &Arc<PolicyEngine>,
-        graph_holder: &OnceLock<Arc<ServiceGraph>>,
-        quota_store: &lattice_quota::QuotaStore,
-    ) -> controller_runner::WorkloadControllerParams {
-        let cluster = controller_runner::resolve_cluster_config(client, config)
-            .await
-            .expect("cluster config required");
-        let graph = controller_runner::ensure_graph(
-            client,
-            graph_holder,
-            &cluster.cluster_name,
-        )
-        .await;
-        let registry = Arc::new(CrdRegistry::new(client.clone()).await);
-        let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
-            lattice_cost::ConfigMapCostProvider::new(client.clone()),
-        ));
-        let metrics_scraper = Arc::new(
-            metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"),
-        );
-        controller_runner::WorkloadControllerParams {
-            client: client.clone(),
-            cluster,
-            cedar: cedar.clone(),
-            graph,
-            registry,
-            metrics_scraper,
-            cost_provider,
-            quota_store: quota_store.clone(),
-        }
-    }
+    let ctx = controller_runner::SpawnContext {
+        client: client.clone(),
+        pod_name: pod_name.clone(),
+        cancel: cancel.clone(),
+        config: config.clone(),
+        cedar: cedar.clone(),
+        graph_holder: graph_holder.clone(),
+        quota_store,
+    };
 
-    // LatticeService controller
-    let _h_service = tokio::spawn(controller_runner::leader_controller(
-        client.clone(),
-        pod_name.clone(),
-        "service",
-        cancel.clone(),
-        false,
-        {
-            let client = client.clone();
-            let config = config.clone();
-            let cedar = cedar.clone();
-            let graph_holder = graph_holder.clone();
-            let quota_store = quota_store.clone();
-            move || {
-                let client = client.clone();
-                let config = config.clone();
-                let cedar = cedar.clone();
-                let graph_holder = graph_holder.clone();
-                let quota_store = quota_store.clone();
-                Box::pin(async move {
-                    wait_for_api_ready_for::<LatticeService>(&client).await;
-                    let params = resolve_workload_params(
-                        &client, &config, &cedar, &graph_holder, &quota_store,
-                    )
-                    .await;
-                    controller_runner::build_service_controller(params).await;
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>
-            }
-        },
-    ));
+    // Workload controllers (Service, Job, Model)
+    ctx.spawn_workload::<LatticeService, _>("service", |p| {
+        controller_runner::build_service_controller(p)
+    });
+    ctx.spawn_workload::<LatticeJob, _>("job", |p| {
+        controller_runner::build_job_controller(p)
+    });
+    ctx.spawn_workload::<LatticeModel, _>("model", |p| {
+        controller_runner::build_model_controller(p)
+    });
 
-    // LatticeMeshMember controller
-    let _h_mesh_member = tokio::spawn(controller_runner::leader_controller(
+    // LatticeMeshMember controller (needs graph but not full workload params)
+    tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
         "mesh-member",
         cancel.clone(),
         false,
         {
-            let client = client.clone();
-            let config = config.clone();
-            let cedar = cedar.clone();
-            let graph_holder = graph_holder.clone();
+            let ctx = ctx.clone();
             move || {
-                let client = client.clone();
-                let config = config.clone();
-                let cedar = cedar.clone();
-                let graph_holder = graph_holder.clone();
+                let ctx = ctx.clone();
                 Box::pin(async move {
-                    wait_for_api_ready_for::<LatticeMeshMember>(&client).await;
-                    let cluster_name = config
+                    wait_for_api_ready_for::<LatticeMeshMember>(&ctx.client).await;
+                    let cluster_name = ctx
+                        .config
                         .cluster_name_required()
                         .expect("cluster name required")
                         .to_string();
                     let graph =
-                        controller_runner::ensure_graph(&client, &graph_holder, &cluster_name)
+                        controller_runner::ensure_graph(&ctx.client, &ctx.graph_holder, &cluster_name)
                             .await;
-                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+                    let registry = Arc::new(CrdRegistry::new(ctx.client.clone()).await);
                     let auditor_token = CancellationToken::new();
                     controller_runner::spawn_graph_auditor(
-                        client.clone(),
+                        ctx.client.clone(),
                         graph.clone(),
                         auditor_token.clone(),
                     );
                     controller_runner::build_mesh_member_controller(
-                        client, graph, cluster_name, cedar, registry,
+                        ctx.client.clone(), graph, cluster_name, ctx.cedar.clone(), registry,
                     )
                     .await;
                     auditor_token.cancel();
@@ -389,121 +337,8 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    // LatticeJob controller
-    let _h_job = tokio::spawn(controller_runner::leader_controller(
-        client.clone(),
-        pod_name.clone(),
-        "job",
-        cancel.clone(),
-        false,
-        {
-            let client = client.clone();
-            let config = config.clone();
-            let cedar = cedar.clone();
-            let graph_holder = graph_holder.clone();
-            let quota_store = quota_store.clone();
-            move || {
-                let client = client.clone();
-                let config = config.clone();
-                let cedar = cedar.clone();
-                let graph_holder = graph_holder.clone();
-                let quota_store = quota_store.clone();
-                Box::pin(async move {
-                    wait_for_api_ready_for::<LatticeJob>(&client).await;
-                    let params = resolve_workload_params(
-                        &client, &config, &cedar, &graph_holder, &quota_store,
-                    )
-                    .await;
-                    controller_runner::build_job_controller(params).await;
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>
-            }
-        },
-    ));
-
-    // LatticeModel controller
-    let _h_model = tokio::spawn(controller_runner::leader_controller(
-        client.clone(),
-        pod_name.clone(),
-        "model",
-        cancel.clone(),
-        false,
-        {
-            let client = client.clone();
-            let config = config.clone();
-            let cedar = cedar.clone();
-            let graph_holder = graph_holder.clone();
-            let quota_store = quota_store.clone();
-            move || {
-                let client = client.clone();
-                let config = config.clone();
-                let cedar = cedar.clone();
-                let graph_holder = graph_holder.clone();
-                let quota_store = quota_store.clone();
-                Box::pin(async move {
-                    wait_for_api_ready_for::<LatticeModel>(&client).await;
-                    let params = resolve_workload_params(
-                        &client, &config, &cedar, &graph_holder, &quota_store,
-                    )
-                    .await;
-                    controller_runner::build_model_controller(params).await;
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>
-            }
-        },
-    ));
-
-    // ── Provider controllers ──
-    //
-    // Each gets its own lease. Most use ControllerContext; Cedar and Quota
-    // have their own context types.
-
-    fn spawn_provider<K, ReconcileFut, Err>(
-        client: kube::Client,
-        pod_name: String,
-        lease: &'static str,
-        cancel: CancellationToken,
-        config: SharedConfig,
-        reconcile_fn: fn(Arc<K>, Arc<lattice_common::ControllerContext>) -> ReconcileFut,
-        label: &'static str,
-    ) -> tokio::task::JoinHandle<()>
-    where
-        K: kube::Resource<DynamicType = ()>
-            + Clone
-            + std::fmt::Debug
-            + serde::de::DeserializeOwned
-            + Send
-            + Sync
-            + 'static,
-        ReconcileFut: Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
-        Err: std::error::Error + lattice_common::Retryable + Send + 'static,
-    {
-        tokio::spawn(controller_runner::leader_controller(
-            client.clone(),
-            pod_name,
-            lease,
-            cancel,
-            false,
-            move || {
-                let client = client.clone();
-                let config = config.clone();
-                Box::pin(async move {
-                    wait_for_api_ready_for::<K>(&client).await;
-                    let ctx = Arc::new(lattice_common::ControllerContext::new(
-                        client.clone(),
-                        config,
-                    ));
-                    controller_runner::simple_controller(
-                        Api::<K>::all(client),
-                        reconcile_fn,
-                        ctx,
-                        label,
-                    )
-                    .await;
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>
-            },
-        ))
-    }
-
-    let _h_cedar = tokio::spawn(controller_runner::leader_controller(
+    // CedarPolicy (uses CedarValidationContext)
+    tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
         "cedar",
@@ -534,16 +369,8 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    let _h_dns = spawn_provider(
-        client.clone(), pod_name.clone(), "dns", cancel.clone(), config.clone(),
-        lattice_dns_provider::reconcile, "DNSProvider",
-    );
-    let _h_cert = spawn_provider(
-        client.clone(), pod_name.clone(), "cert", cancel.clone(), config.clone(),
-        lattice_cert_issuer::reconcile, "CertIssuer",
-    );
-
-    let _h_quota = tokio::spawn(controller_runner::leader_controller(
+    // LatticeQuota (uses QuotaContext with sender channel)
+    tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
         "quota",
@@ -552,7 +379,6 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         {
             let client = client.clone();
             let config = config.clone();
-            let quota_sender = quota_sender.clone();
             move || {
                 let client = client.clone();
                 let config = config.clone();
@@ -566,7 +392,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         client: client.clone(),
                         cluster_name: config.cluster_name.clone(),
                         cost_provider,
-                        sender: quota_sender.clone(),
+                        sender: quota_sender,
                     });
                     controller_runner::simple_controller(
                         Api::<LatticeQuota>::all(client),
@@ -580,34 +406,16 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    let _h_cloud = spawn_provider(
-        client.clone(), pod_name.clone(), "cloud", cancel.clone(), config.clone(),
-        lattice_cloud_provider::reconcile, "InfraProvider",
-    );
-    let _h_secret = spawn_provider(
-        client.clone(), pod_name.clone(), "secret", cancel.clone(), config.clone(),
-        lattice_secret_provider::controller::reconcile, "SecretProvider",
-    );
-    let _h_oidc = spawn_provider(
-        client.clone(), pod_name.clone(), "oidc", cancel.clone(), config.clone(),
-        lattice_api::auth::oidc_controller::reconcile, "OIDCProvider",
-    );
-    let _h_backup_store = spawn_provider(
-        client.clone(), pod_name.clone(), "backup-store", cancel.clone(), config.clone(),
-        lattice_backup::backup_store_controller::reconcile, "BackupStore",
-    );
-    let _h_cluster_backup = spawn_provider(
-        client.clone(), pod_name.clone(), "cluster-backup", cancel.clone(), config.clone(),
-        lattice_backup::cluster_backup_controller::reconcile, "ClusterBackup",
-    );
-    let _h_restore = spawn_provider(
-        client.clone(), pod_name.clone(), "restore", cancel.clone(), config.clone(),
-        lattice_backup::restore_controller::reconcile, "Restore",
-    );
-    let _h_service_backup = spawn_provider::<LatticeService, _, _>(
-        client.clone(), pod_name.clone(), "service-backup", cancel.clone(), config.clone(),
-        lattice_backup::service_backup_controller::reconcile, "ServiceBackup",
-    );
+    // Simple provider controllers (all use ControllerContext)
+    ctx.spawn_provider("dns", lattice_dns_provider::reconcile, "DNSProvider");
+    ctx.spawn_provider("cert", lattice_cert_issuer::reconcile, "CertIssuer");
+    ctx.spawn_provider("cloud", lattice_cloud_provider::reconcile, "InfraProvider");
+    ctx.spawn_provider("secret", lattice_secret_provider::controller::reconcile, "SecretProvider");
+    ctx.spawn_provider("oidc", lattice_api::auth::oidc_controller::reconcile, "OIDCProvider");
+    ctx.spawn_provider("backup-store", lattice_backup::backup_store_controller::reconcile, "BackupStore");
+    ctx.spawn_provider("cluster-backup", lattice_backup::cluster_backup_controller::reconcile, "ClusterBackup");
+    ctx.spawn_provider("restore", lattice_backup::restore_controller::reconcile, "Restore");
+    ctx.spawn_provider::<LatticeService, _, _>("service-backup", lattice_backup::service_backup_controller::reconcile, "ServiceBackup");
 
     // ── Wait for shutdown signal ──
 

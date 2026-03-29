@@ -1014,6 +1014,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1042,6 +1043,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1063,6 +1065,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await;
         assert!(matches!(result, Err(ModelError::NoRoles)));
@@ -1089,6 +1092,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingNamespace)));
@@ -1118,6 +1122,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1153,6 +1158,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1208,6 +1214,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1261,6 +1268,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1308,6 +1316,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1347,6 +1356,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1427,6 +1437,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1490,6 +1501,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1606,6 +1618,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .expect("worker should compile with entry runtime's imagePullSecrets");
@@ -1638,6 +1651,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1704,6 +1718,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingName)));
@@ -1736,6 +1751,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingInferencePort)));
@@ -1773,6 +1789,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1855,6 +1872,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1895,6 +1913,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -1955,6 +1974,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();
@@ -2175,6 +2195,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             "test",
+            None,
         )
         .await
         .unwrap();

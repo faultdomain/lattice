@@ -109,6 +109,148 @@ pub async fn leader_controller<F>(
     }
 }
 
+/// Shared context for spawning leader-elected controllers.
+///
+/// Avoids passing `client`, `pod_name`, `cancel`, `config` repeatedly.
+#[derive(Clone)]
+pub struct SpawnContext {
+    pub client: Client,
+    pub pod_name: String,
+    pub cancel: CancellationToken,
+    pub config: lattice_common::SharedConfig,
+    pub cedar: Arc<PolicyEngine>,
+    pub graph_holder: Arc<OnceLock<Arc<ServiceGraph>>>,
+    pub quota_store: QuotaStore,
+}
+
+impl SpawnContext {
+    /// Spawn a simple provider controller with its own lease and CRD readiness wait.
+    pub fn spawn_provider<K, ReconcileFut, Err>(
+        &self,
+        lease: &'static str,
+        reconcile_fn: fn(Arc<K>, Arc<lattice_common::ControllerContext>) -> ReconcileFut,
+        label: &'static str,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        K: kube::Resource<DynamicType = ()>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+        ReconcileFut:
+            Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
+        Err: std::error::Error + lattice_common::Retryable + Send + 'static,
+    {
+        let client = self.client.clone();
+        let config = self.config.clone();
+        tokio::spawn(leader_controller(
+            self.client.clone(),
+            self.pod_name.clone(),
+            lease,
+            self.cancel.clone(),
+            false,
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                Box::pin(async move {
+                    lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
+                    let ctx = Arc::new(lattice_common::ControllerContext::new(
+                        client.clone(),
+                        config,
+                    ));
+                    simple_controller(Api::<K>::all(client), reconcile_fn, ctx, label).await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            },
+        ))
+    }
+
+    /// Spawn a workload controller (Service, Job, or Model) with its own lease.
+    ///
+    /// Resolves shared workload params (graph, cluster config, registry, etc.)
+    /// before building the controller.
+    pub fn spawn_workload<K, F>(
+        &self,
+        lease: &'static str,
+        build: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        K: kube::Resource<DynamicType = ()>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+        F: Fn(WorkloadControllerParams) -> Pin<Box<dyn Future<Output = ()> + Send>>
+            + Send
+            + Sync
+            + Clone
+            + 'static,
+    {
+        let client = self.client.clone();
+        let config = self.config.clone();
+        let cedar = self.cedar.clone();
+        let graph_holder = self.graph_holder.clone();
+        let quota_store = self.quota_store.clone();
+        tokio::spawn(leader_controller(
+            self.client.clone(),
+            self.pod_name.clone(),
+            lease,
+            self.cancel.clone(),
+            false,
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let cedar = cedar.clone();
+                let graph_holder = graph_holder.clone();
+                let quota_store = quota_store.clone();
+                let build = build.clone();
+                Box::pin(async move {
+                    lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
+                    let params = resolve_workload_params(
+                        &client, &config, &cedar, &graph_holder, &quota_store,
+                    )
+                    .await;
+                    build(params).await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            },
+        ))
+    }
+}
+
+/// Resolve WorkloadControllerParams from shared state.
+async fn resolve_workload_params(
+    client: &Client,
+    config: &lattice_common::SharedConfig,
+    cedar: &Arc<PolicyEngine>,
+    graph_holder: &OnceLock<Arc<ServiceGraph>>,
+    quota_store: &QuotaStore,
+) -> WorkloadControllerParams {
+    let cluster = resolve_cluster_config(client, config)
+        .await
+        .expect("cluster config required");
+    let graph = ensure_graph(client, graph_holder, &cluster.cluster_name).await;
+    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+        lattice_cost::ConfigMapCostProvider::new(client.clone()),
+    ));
+    let metrics_scraper = Arc::new(
+        crate::metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"),
+    );
+    WorkloadControllerParams {
+        client: client.clone(),
+        cluster,
+        cedar: cedar.clone(),
+        graph,
+        registry,
+        metrics_scraper,
+        cost_provider,
+        quota_store: quota_store.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared state helpers
 // ---------------------------------------------------------------------------

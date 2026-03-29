@@ -3170,6 +3170,7 @@ dependencies = [
 name = "lattice-quota"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "good_lp",
  "k8s-openapi",
  "kube",
