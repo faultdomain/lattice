@@ -74,7 +74,7 @@ pub async fn leader_controller<F>(
 
         let mut guard = tokio::select! {
             _ = cancel.cancelled() => return,
-            result = elector.clone().acquire() => match result {
+            result = elector.acquire() => match result {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::error!(controller = name, error = %e, "lease acquisition failed");
@@ -90,27 +90,27 @@ pub async fn leader_controller<F>(
             }
         }
 
-        tracing::info!(
-            controller = name,
-            "leadership acquired, starting controller"
-        );
+        tracing::info!(controller = name, "leadership acquired, starting controller");
         let controller = factory();
 
         tokio::select! {
             _ = cancel.cancelled() => {
                 if claim_traffic {
-                    let _ = elector.remove_leader_label().await;
+                    let _ = guard.release_traffic().await;
                 }
                 let _ = guard.release_leadership().await;
                 return;
             }
             _ = guard.lost() => {
                 if claim_traffic {
-                    let _ = elector.remove_leader_label().await;
+                    let _ = guard.release_traffic().await;
                 }
                 tracing::warn!(controller = name, "leadership lost, will re-acquire");
             }
             _ = controller => {
+                if claim_traffic {
+                    let _ = guard.release_traffic().await;
+                }
                 tracing::error!(controller = name, "controller exited unexpectedly, restarting");
             }
         }
@@ -284,7 +284,8 @@ pub async fn ensure_graph(
                     Arc::new(ServiceGraph::new(&td).with_cluster_name(cluster_name.to_string()));
                 warmup_graph(client, &graph).await;
                 let _ = graph_holder.set(graph);
-                return graph_holder.get().unwrap().clone();
+                // Safe: we just set it above, or another caller set it first
+                return graph_holder.get().expect("graph was just set").clone();
             }
             None => {
                 tracing::info!("Trust domain not available yet, retrying in 5s...");

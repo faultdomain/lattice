@@ -253,7 +253,7 @@ async fn cached_ns_labels<'a>(
             .unwrap_or_default();
         cache.insert(namespace.to_string(), labels);
     }
-    cache.get(namespace).unwrap()
+    cache.get(namespace).expect("namespace was just inserted")
 }
 
 async fn update_status(

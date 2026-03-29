@@ -1,8 +1,8 @@
 //! Leader election using Kubernetes Leases
 //!
 //! Provides leader election for HA deployments using the Kubernetes
-//! coordination.k8s.io/v1 Lease API. Only the leader runs controllers
-//! and accepts traffic.
+//! coordination.k8s.io/v1 Lease API. Each controller gets its own lease,
+//! allowing controllers to distribute across pods independently.
 //!
 //! # Atomicity
 //!
@@ -12,12 +12,10 @@
 //!
 //! # Traffic Routing
 //!
-//! The leader adds a `lattice.dev/leader=true` label to its pod. The Service
-//! selector includes this label, so only the leader receives traffic. Kubernetes
-//! readiness probes ensure the old leader is removed from Endpoints before the
-//! lease expires (30s lease > 15s readiness removal time).
+//! Traffic labels are managed by the caller (via `claim_traffic` / `release_traffic`
+//! on `LeaderGuard`), not by the elector itself. Only the cell infrastructure
+//! controller uses traffic labels — other controllers don't need them.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,10 +33,10 @@ use tracing::{debug, info, warn};
 
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
-/// Label key added to leader pod for Service selector
+/// Label key added to the cell leader pod for Service selector
 pub const LEADER_LABEL_KEY: &str = "lattice.dev/leader";
 
-/// Label value for leader pod
+/// Label value for the cell leader pod
 pub const LEADER_LABEL_VALUE: &str = "true";
 
 // Timing constants
@@ -57,8 +55,9 @@ pub enum LeaderElectionError {
 
 /// Leader elector using Kubernetes Leases
 ///
-/// Manages leader election for HA deployments. Only one pod holds the
-/// lease at a time. The leader adds a label to route traffic to itself.
+/// Manages leader election for HA deployments. Only one pod holds a given
+/// lease at a time. Traffic routing (pod labels) is handled separately by
+/// the caller via `LeaderGuard::claim_traffic` / `release_traffic`.
 pub struct LeaderElector {
     client: Client,
     lease_name: String,
@@ -67,7 +66,6 @@ pub struct LeaderElector {
     lease_duration: Duration,
     renew_interval: Duration,
     retry_interval: Duration,
-    is_leader: Arc<AtomicBool>,
 }
 
 impl LeaderElector {
@@ -81,7 +79,6 @@ impl LeaderElector {
             lease_duration: LEASE_DURATION,
             renew_interval: RENEW_INTERVAL,
             retry_interval: RETRY_INTERVAL,
-            is_leader: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -99,8 +96,7 @@ impl LeaderElector {
         loop {
             match self.try_acquire_or_renew().await {
                 Ok(true) => {
-                    info!(identity = %self.identity, "Leadership acquired");
-                    self.is_leader.store(true, Ordering::SeqCst);
+                    info!(identity = %self.identity, lease = %self.lease_name, "Leadership acquired");
                     return Ok(self.create_guard());
                 }
                 Ok(false) => {
@@ -111,7 +107,6 @@ impl LeaderElector {
                     );
                 }
                 Err(e) => {
-                    // Log but continue - transient errors shouldn't stop us
                     warn!(
                         identity = %self.identity,
                         error = %e,
@@ -149,7 +144,6 @@ impl LeaderElector {
         let api: Api<Lease> = Api::namespaced(self.client.clone(), &self.namespace);
         let now = jiff::Timestamp::now();
 
-        // Try to get existing lease
         let existing = match api.get(&self.lease_name).await {
             Ok(lease) => Some(lease),
             Err(kube::Error::Api(e)) if e.code == 404 => None,
@@ -157,21 +151,16 @@ impl LeaderElector {
         };
 
         match existing {
-            None => {
-                // No lease exists - create it (first leader)
-                self.create_lease(&api, now).await
-            }
+            None => self.create_lease(&api, now).await,
             Some(lease) => {
                 let spec = lease.spec.as_ref();
                 let holder = spec.and_then(|s| s.holder_identity.as_ref());
                 let resource_version = lease.metadata.resource_version.clone();
 
-                // Do we already hold it?
                 if holder == Some(&self.identity) {
                     return self.renew_lease(&api, &lease, now).await;
                 }
 
-                // Check if expired
                 let renew_time = spec.and_then(|s| s.renew_time.as_ref());
                 let duration_secs = spec.and_then(|s| s.lease_duration_seconds);
                 let is_expired = match (renew_time, duration_secs) {
@@ -186,7 +175,6 @@ impl LeaderElector {
                     self.take_over_lease(&api, resource_version, now, transitions)
                         .await
                 } else {
-                    // Lease held by someone else and not expired
                     Ok(false)
                 }
             }
@@ -221,7 +209,6 @@ impl LeaderElector {
                 Ok(true)
             }
             Err(kube::Error::Api(e)) if e.code == 409 => {
-                // Someone else created it first - not an error, just retry
                 debug!(identity = %self.identity, "Lease creation conflict, will retry");
                 Ok(false)
             }
@@ -245,7 +232,6 @@ impl LeaderElector {
             })))
         })?;
 
-        // Build updated lease with same resourceVersion for atomic update
         let mut updated = existing.clone();
         if let Some(ref mut spec) = updated.spec {
             spec.renew_time = Some(MicroTime(now));
@@ -261,7 +247,6 @@ impl LeaderElector {
                 Ok(true)
             }
             Err(kube::Error::Api(e)) if e.code == 409 => {
-                // Conflict - lease was modified, we lost leadership
                 warn!(identity = %self.identity, "Lease renewal conflict - lost leadership");
                 Ok(false)
             }
@@ -316,7 +301,6 @@ impl LeaderElector {
                 Ok(true)
             }
             Err(kube::Error::Api(e)) if e.code == 409 => {
-                // Conflict - someone else got it first
                 debug!(identity = %self.identity, "Lease takeover conflict, will retry");
                 Ok(false)
             }
@@ -331,9 +315,6 @@ impl LeaderElector {
     /// or exhausting the lease grace period triggers leadership loss.
     async fn renewal_loop(&self, lost_tx: oneshot::Sender<()>) {
         let mut consecutive_failures: u32 = 0;
-        // How many consecutive renewal failures we tolerate before giving up.
-        // With a 30s lease and 10s renew interval, we get 2 retries before
-        // another pod could plausibly take over the expired lease.
         let max_failures = (self.lease_duration.as_secs() / self.renew_interval.as_secs())
             .saturating_sub(1)
             .max(1) as u32;
@@ -346,9 +327,8 @@ impl LeaderElector {
                     consecutive_failures = 0;
                 }
                 Ok(false) => {
-                    // 409 Conflict — someone else holds the lease now
                     warn!(identity = %self.identity, "Leadership lost (lease conflict)");
-                    self.signal_leadership_lost(lost_tx).await;
+                    let _ = lost_tx.send(());
                     return;
                 }
                 Err(e) => {
@@ -361,7 +341,7 @@ impl LeaderElector {
                             "Leadership lost (renewal failed {} times, lease may have expired)",
                             consecutive_failures,
                         );
-                        self.signal_leadership_lost(lost_tx).await;
+                        let _ = lost_tx.send(());
                         return;
                     }
                     warn!(
@@ -376,36 +356,6 @@ impl LeaderElector {
         }
     }
 
-    /// Clear state and signal leadership loss
-    async fn signal_leadership_lost(&self, lost_tx: oneshot::Sender<()>) {
-        self.is_leader.store(false, Ordering::SeqCst);
-        let _ = lost_tx.send(());
-    }
-
-    /// Remove leader label from this pod
-    pub async fn remove_leader_label(&self) -> Result<(), LeaderElectionError> {
-        let api: Api<Pod> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-        // Use JSON patch to remove the label
-        let patch = json!({
-            "metadata": {
-                "labels": {
-                    LEADER_LABEL_KEY: null
-                }
-            }
-        });
-
-        api.patch(
-            &self.identity,
-            &PatchParams::apply(FIELD_MANAGER),
-            &Patch::Merge(&patch),
-        )
-        .await?;
-
-        info!(identity = %self.identity, "Leader label removed");
-        Ok(())
-    }
-
     /// Release the lease by clearing the holder identity
     ///
     /// This allows another pod to immediately acquire leadership instead of
@@ -413,7 +363,6 @@ impl LeaderElector {
     async fn release_lease(&self) -> Result<(), LeaderElectionError> {
         let api: Api<Lease> = Api::namespaced(self.client.clone(), &self.namespace);
 
-        // Get current lease to check we still hold it
         let lease = match api.get(&self.lease_name).await {
             Ok(l) => l,
             Err(kube::Error::Api(e)) if e.code == 404 => {
@@ -423,14 +372,12 @@ impl LeaderElector {
             Err(e) => return Err(e.into()),
         };
 
-        // Only release if we're the holder
         let holder = lease.spec.as_ref().and_then(|s| s.holder_identity.as_ref());
         if holder != Some(&self.identity) {
             debug!(identity = %self.identity, "Not the lease holder, nothing to release");
             return Ok(());
         }
 
-        // Clear the holder and set renew_time to past so it's immediately acquirable
         let past = jiff::Timestamp::now() - jiff::Span::new().seconds(60);
         let patch = json!({
             "spec": {
@@ -470,11 +417,9 @@ impl LeaderGuard {
         }
     }
 
-    /// Add leader label to this pod so Service routes traffic to it
+    /// Add leader label to this pod so the cell Service routes traffic to it.
     ///
-    /// The Service selector includes `lattice.dev/leader=true`, so only the
-    /// leader pod receives traffic. Kubernetes readiness probes handle removal
-    /// of unresponsive pods from Endpoints.
+    /// Only the cell infrastructure controller should call this.
     pub async fn claim_traffic(&self, pod_name: &str) -> Result<(), LeaderElectionError> {
         let api: Api<Pod> = Api::namespaced(self.elector.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
@@ -497,6 +442,33 @@ impl LeaderGuard {
         Ok(())
     }
 
+    /// Remove leader label from this pod so traffic stops routing here.
+    ///
+    /// Symmetric with `claim_traffic`. Only the cell infrastructure controller
+    /// should call this (on leadership loss or shutdown).
+    pub async fn release_traffic(&self) -> Result<(), LeaderElectionError> {
+        let api: Api<Pod> =
+            Api::namespaced(self.elector.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+        let patch = json!({
+            "metadata": {
+                "labels": {
+                    LEADER_LABEL_KEY: null
+                }
+            }
+        });
+
+        api.patch(
+            &self.elector.identity,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        info!(identity = %self.elector.identity, "Leader label removed, traffic released");
+        Ok(())
+    }
+
     /// Release leadership by clearing the lease holder
     ///
     /// Call this during graceful shutdown to allow the standby to immediately
@@ -508,7 +480,6 @@ impl LeaderGuard {
 
 impl Drop for LeaderGuard {
     fn drop(&mut self) {
-        self.elector.is_leader.store(false, Ordering::SeqCst);
         self.renewal_task.abort();
         info!(identity = %self.elector.identity, "Leadership released");
     }

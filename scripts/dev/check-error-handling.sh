@@ -43,11 +43,11 @@ in_test_fn && /}/ {
     }
     if (/\.unwrap\(\)/) {
         unwrap_prod++
-        if (verbose) print FILENAME ":" FNR ": [unwrap] " $0
+        unwrap_locations[unwrap_prod] = FILENAME ":" FNR ": " $0
     }
     if (/panic!\(/) {
         panic_prod++
-        if (verbose) print FILENAME ":" FNR ": [panic] " $0
+        panic_locations[panic_prod] = FILENAME ":" FNR ": " $0
     }
 }
 
@@ -71,6 +71,15 @@ END {
 
     total_violations = unwrap_prod + panic_prod
     if (total_violations > 0) {
+        if (unwrap_prod > 0) {
+            print ".unwrap() violations:"
+            for (i = 1; i <= unwrap_prod; i++) print "  " unwrap_locations[i]
+        }
+        if (panic_prod > 0) {
+            print "panic!() violations:"
+            for (i = 1; i <= panic_prod; i++) print "  " panic_locations[i]
+        }
+        print ""
         print "FAILED: " total_violations " violation(s) found in production code"
         print "(.expect() is allowed as it documents invariants)"
         exit 1

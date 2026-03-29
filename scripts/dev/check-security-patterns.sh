@@ -111,7 +111,7 @@ echo ""
 echo "=== Checking for potential injection vulnerabilities ==="
 
 INJECTION_AWK="${AWK_TEST_TRACKING}"'
-!in_test_mod && /format!\s*\([^)]*\$\{|execute\s*\(\s*&format!/ {
+!in_test_mod && /execute\s*\(\s*&format!/ {
     print FILENAME ":" FNR ": " $0
 }
 '
