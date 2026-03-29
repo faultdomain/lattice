@@ -5,7 +5,7 @@
 //! - **local-path-provisioner**: PVC support for providers without a CSI driver
 //! - **Autoscaler**: CAPI cluster-autoscaler for scaling-enabled pools
 
-mod autoscaler;
+pub mod autoscaler;
 mod aws;
 mod local_path_provisioner;
 

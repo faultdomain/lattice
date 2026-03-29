@@ -27,7 +27,7 @@
 //! 4. Cell validates and consumes CSR token, signs CSR, returns certificate
 //! 5. Agent uses cert for mTLS connection to gRPC server
 
-mod addons;
+pub mod addons;
 mod bundle;
 mod errors;
 mod generator;

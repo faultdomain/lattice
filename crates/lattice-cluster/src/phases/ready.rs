@@ -379,6 +379,9 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             if let Err(e) = super::external_dns::reconcile_external_dns(client, cluster).await {
                 warn!(error = %e, "failed to reconcile external-dns, will retry");
             }
+            if let Err(e) = reconcile_cluster_autoscaler(client, cluster).await {
+                warn!(error = %e, "failed to reconcile cluster-autoscaler, will retry");
+            }
         }
     }
 
@@ -922,6 +925,32 @@ async fn create_missing_pool_resources(
         )
         .await;
 
+    Ok(())
+}
+
+/// Ensure cluster-autoscaler is deployed on self-managing clusters.
+///
+/// Always deployed — the autoscaler is harmless when no MachineDeployments
+/// have min/max annotations. This avoids the bootstrap-only gap where pools
+/// added post-bootstrap would never get an autoscaler.
+async fn reconcile_cluster_autoscaler(
+    client: &Client,
+    cluster: &LatticeCluster,
+) -> Result<(), Error> {
+    let cluster_name = cluster.name_any();
+    let capi_ns = capi_namespace(&cluster_name);
+    let manifest =
+        lattice_cell::bootstrap::addons::autoscaler::generate_autoscaler_manifests(&capi_ns);
+
+    let docs: Vec<&str> = manifest.split("---\n").filter(|s| !s.is_empty()).collect();
+    let options = lattice_common::ApplyOptions {
+        skip_missing_crds: false,
+    };
+    lattice_common::apply_manifests(client, &docs, &options)
+        .await
+        .map_err(|e| Error::internal(format!("failed to apply cluster-autoscaler: {e}")))?;
+
+    debug!(cluster = %cluster_name, "Ensured cluster-autoscaler deployment");
     Ok(())
 }
 
