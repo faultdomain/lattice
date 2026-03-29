@@ -438,8 +438,7 @@ impl Installer {
             .filter(|m: &&String| m.starts_with("{"))
             .map(|s| {
                 if kube_utils::is_deployment_json(s) {
-                    let with_env = add_bootstrap_env(s, &provider_str, provider_ref);
-                    add_container_args(&with_env, &["controller", "--mode", "cluster"])
+                    add_bootstrap_env(s, &provider_str, provider_ref)
                 } else {
                     s.to_string()
                 }
@@ -1513,28 +1512,6 @@ fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) 
             ("LATTICE_PROVIDER_REF", provider_ref),
         ],
     )
-}
-
-/// Set container args on a deployment JSON (e.g., ["controller", "--mode", "cluster"]).
-fn add_container_args(deployment_json: &str, args: &[&str]) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) else {
-        return deployment_json.to_string();
-    };
-
-    let Some(containers) = value
-        .pointer_mut("/spec/template/spec/containers")
-        .and_then(|c| c.as_array_mut())
-    else {
-        return deployment_json.to_string();
-    };
-
-    for container in containers {
-        if let Some(obj) = container.as_object_mut() {
-            obj.insert("args".to_string(), serde_json::json!(args));
-        }
-    }
-
-    serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
 }
 
 /// Add environment variables to a deployment JSON.

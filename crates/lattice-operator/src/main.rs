@@ -278,6 +278,43 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
+    // Helper: resolve WorkloadControllerParams for service/job/model controllers.
+    // All three need the same shared state — graph, cluster config, registry, etc.
+    async fn resolve_workload_params(
+        client: &kube::Client,
+        config: &SharedConfig,
+        cedar: &Arc<PolicyEngine>,
+        graph_holder: &OnceLock<Arc<ServiceGraph>>,
+        quota_store: &lattice_quota::QuotaStore,
+    ) -> controller_runner::WorkloadControllerParams {
+        let cluster = controller_runner::resolve_cluster_config(client, config)
+            .await
+            .expect("cluster config required");
+        let graph = controller_runner::ensure_graph(
+            client,
+            graph_holder,
+            &cluster.cluster_name,
+        )
+        .await;
+        let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+        let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+            lattice_cost::ConfigMapCostProvider::new(client.clone()),
+        ));
+        let metrics_scraper = Arc::new(
+            metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"),
+        );
+        controller_runner::WorkloadControllerParams {
+            client: client.clone(),
+            cluster,
+            cedar: cedar.clone(),
+            graph,
+            registry,
+            metrics_scraper,
+            cost_provider,
+            quota_store: quota_store.clone(),
+        }
+    }
+
     // LatticeService controller
     let _h_service = tokio::spawn(controller_runner::leader_controller(
         client.clone(),
@@ -299,32 +336,12 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let quota_store = quota_store.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeService>(&client).await;
-                    let cluster = controller_runner::resolve_cluster_config(&client, &config)
-                        .await
-                        .expect("cluster config required");
-                    let cluster_name = cluster.cluster_name.clone();
-                    let graph =
-                        controller_runner::ensure_graph(&client, &graph_holder, &cluster_name)
-                            .await;
-                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
-                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
-                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
-                    ));
-                    let metrics_scraper =
-                        Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"));
-                    controller_runner::build_service_controller(
-                        client,
-                        graph,
-                        cluster,
-                        cedar,
-                        registry,
-                        metrics_scraper,
-                        cost_provider,
-                        quota_store.clone(),
+                    let params = resolve_workload_params(
+                        &client, &config, &cedar, &graph_holder, &quota_store,
                     )
-                    .await
                     .await;
-                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    controller_runner::build_service_controller(params).await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
     ));
@@ -356,7 +373,6 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         controller_runner::ensure_graph(&client, &graph_holder, &cluster_name)
                             .await;
                     let registry = Arc::new(CrdRegistry::new(client.clone()).await);
-                    // Spawn graph auditor alongside mesh-member controller
                     let auditor_token = CancellationToken::new();
                     controller_runner::spawn_graph_auditor(
                         client.clone(),
@@ -364,15 +380,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         auditor_token.clone(),
                     );
                     controller_runner::build_mesh_member_controller(
-                        client,
-                        graph,
-                        cluster_name,
-                        cedar,
-                        registry,
+                        client, graph, cluster_name, cedar, registry,
                     )
                     .await;
                     auditor_token.cancel();
-                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
     ));
@@ -398,27 +410,12 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let quota_store = quota_store.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeJob>(&client).await;
-                    let cluster = controller_runner::resolve_cluster_config(&client, &config)
-                        .await
-                        .expect("cluster config required");
-                    let graph = controller_runner::ensure_graph(
-                        &client,
-                        &graph_holder,
-                        &cluster.cluster_name,
+                    let params = resolve_workload_params(
+                        &client, &config, &cedar, &graph_holder, &quota_store,
                     )
                     .await;
-                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
-                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
-                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
-                    ));
-                    let metrics_scraper =
-                        Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"));
-                    controller_runner::build_job_controller(
-                        client, cluster, cedar, graph, registry, metrics_scraper, cost_provider, quota_store.clone(),
-                    )
-                    .await
-                    .await;
-                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    controller_runner::build_job_controller(params).await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
     ));
@@ -444,27 +441,12 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let quota_store = quota_store.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeModel>(&client).await;
-                    let cluster = controller_runner::resolve_cluster_config(&client, &config)
-                        .await
-                        .expect("cluster config required");
-                    let graph = controller_runner::ensure_graph(
-                        &client,
-                        &graph_holder,
-                        &cluster.cluster_name,
+                    let params = resolve_workload_params(
+                        &client, &config, &cedar, &graph_holder, &quota_store,
                     )
                     .await;
-                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
-                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
-                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
-                    ));
-                    let metrics_scraper =
-                        Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"));
-                    controller_runner::build_model_controller(
-                        client, cluster, cedar, graph, registry, metrics_scraper, cost_provider, quota_store.clone(),
-                    )
-                    .await
-                    .await;
-                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    controller_runner::build_model_controller(params).await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
     ));

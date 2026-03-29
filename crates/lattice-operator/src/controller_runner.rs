@@ -28,6 +28,7 @@ use lattice_common::crd::{
 use lattice_common::graph::ServiceGraph;
 use lattice_common::{CrdRegistry, LeaderElector, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
+use lattice_quota::QuotaStore;
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_mesh_member::remote_secret;
 use lattice_service::compiler::VMServiceScrapePhase;
@@ -160,6 +161,21 @@ pub async fn resolve_cluster_config(
     })
 }
 
+/// Shared parameters for workload controllers (Service, Job, Model).
+///
+/// These controllers all need the same set of dependencies. Bundling them
+/// avoids 8-argument function signatures and duplicated setup in factories.
+pub struct WorkloadControllerParams {
+    pub client: Client,
+    pub cluster: ClusterConfig,
+    pub cedar: Arc<PolicyEngine>,
+    pub graph: Arc<ServiceGraph>,
+    pub registry: Arc<CrdRegistry>,
+    pub metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
+    pub cost_provider: Option<Arc<dyn CostProvider>>,
+    pub quota_store: QuotaStore,
+}
+
 // ---------------------------------------------------------------------------
 // Controller builder: simple_controller
 // ---------------------------------------------------------------------------
@@ -234,16 +250,19 @@ pub fn build_cluster_controller(
 /// Build the LatticeService controller future.
 ///
 /// Requires a warmed ServiceGraph (call `ensure_graph` first).
-pub async fn build_service_controller(
-    client: Client,
-    graph: Arc<ServiceGraph>,
-    cluster: ClusterConfig,
-    cedar: Arc<PolicyEngine>,
-    registry: Arc<CrdRegistry>,
-    metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
-    cost_provider: Option<Arc<dyn CostProvider>>,
-    quota_store: lattice_quota::QuotaStore,
+pub fn build_service_controller(
+    params: WorkloadControllerParams,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    let WorkloadControllerParams {
+        client,
+        cluster,
+        cedar,
+        graph,
+        registry,
+        metrics_scraper,
+        cost_provider,
+        quota_store,
+    } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
     let svc_kube_client = Arc::new(lattice_service::controller::ServiceKubeClientImpl::new(
@@ -467,16 +486,19 @@ pub fn spawn_remote_secret_controller(client: Client) -> tokio::task::JoinHandle
 }
 
 /// Build the LatticeJob controller future.
-pub async fn build_job_controller(
-    client: Client,
-    cluster: ClusterConfig,
-    cedar: Arc<PolicyEngine>,
-    graph: Arc<ServiceGraph>,
-    registry: Arc<CrdRegistry>,
-    metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
-    cost_provider: Option<Arc<dyn CostProvider>>,
-    quota_store: lattice_quota::QuotaStore,
+pub fn build_job_controller(
+    params: WorkloadControllerParams,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    let WorkloadControllerParams {
+        client,
+        cluster,
+        cedar,
+        graph,
+        registry,
+        metrics_scraper,
+        cost_provider,
+        quota_store,
+    } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
     let kube_client = Arc::new(lattice_job::controller::JobKubeClientImpl::new(
@@ -522,16 +544,19 @@ pub async fn build_job_controller(
 }
 
 /// Build the LatticeModel controller future.
-pub async fn build_model_controller(
-    client: Client,
-    cluster: ClusterConfig,
-    cedar: Arc<PolicyEngine>,
-    graph: Arc<ServiceGraph>,
-    registry: Arc<CrdRegistry>,
-    metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
-    cost_provider: Option<Arc<dyn CostProvider>>,
-    quota_store: lattice_quota::QuotaStore,
+pub fn build_model_controller(
+    params: WorkloadControllerParams,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    let WorkloadControllerParams {
+        client,
+        cluster,
+        cedar,
+        graph,
+        registry,
+        metrics_scraper,
+        cost_provider,
+        quota_store,
+    } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
     let kube_client = Arc::new(lattice_model::controller::ModelKubeClientImpl::new(
