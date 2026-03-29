@@ -56,6 +56,10 @@ pub struct WorkloadCompiler<'a> {
     owner_references: Vec<OwnerReference>,
     has_topology: bool,
     eso_content_hash: String,
+    quotas: &'a [lattice_common::crd::LatticeQuota],
+    replicas: u32,
+    namespace_labels: std::collections::BTreeMap<String, String>,
+    workload_annotations: std::collections::BTreeMap<String, String>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -91,6 +95,10 @@ impl<'a> WorkloadCompiler<'a> {
             owner_references: Vec::new(),
             has_topology: false,
             eso_content_hash: String::new(),
+            quotas: &[],
+            replicas: 1,
+            namespace_labels: std::collections::BTreeMap::new(),
+            workload_annotations: std::collections::BTreeMap::new(),
         }
     }
 
@@ -152,6 +160,21 @@ impl<'a> WorkloadCompiler<'a> {
         self
     }
 
+    /// Set quota list and workload identity for quota enforcement.
+    pub fn with_quotas(
+        mut self,
+        quotas: &'a [lattice_common::crd::LatticeQuota],
+        replicas: u32,
+        namespace_labels: std::collections::BTreeMap<String, String>,
+        workload_annotations: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.quotas = quotas;
+        self.replicas = replicas;
+        self.namespace_labels = namespace_labels;
+        self.workload_annotations = workload_annotations;
+        self
+    }
+
     /// Compile files for a container/sidecar and collect outputs into the accumulator vecs.
     #[allow(clippy::too_many_arguments)]
     fn collect_compiled_files(
@@ -207,6 +230,20 @@ impl<'a> WorkloadCompiler<'a> {
             self.workload,
             self.image_pull_secrets,
         )?;
+
+        // Quota enforcement — check resource limits before authorization
+        if !self.quotas.is_empty() {
+            lattice_quota::enforcement::enforce_quotas(
+                self.quotas,
+                self.name,
+                self.namespace,
+                &self.namespace_labels,
+                &self.workload_annotations,
+                self.workload,
+                self.replicas,
+            )
+            .map_err(|e| CompilationError::quota_exceeded(e.to_string()))?;
+        }
 
         // Authorization — Cedar is always enforced
         crate::authorization::secrets::authorize_secrets(

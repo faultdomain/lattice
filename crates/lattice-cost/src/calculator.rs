@@ -5,7 +5,7 @@
 use lattice_common::crd::{
     CostBreakdown, CostEstimate, LatticeJobSpec, LatticeModelSpec, LatticeServiceSpec, WorkloadSpec,
 };
-use lattice_common::resources::{parse_cpu_millis_str, parse_memory_bytes_str};
+use lattice_common::resources::sum_container_cpu_memory;
 
 use crate::error::CostError;
 use crate::rates::CostRates;
@@ -69,27 +69,6 @@ pub fn estimate_model_cost(
     Ok(build_estimate(total_cpu, total_mem, total_gpu))
 }
 
-/// Sum CPU millis and memory bytes across all containers in a WorkloadSpec.
-/// Uses requests (not limits) — requests represent the guaranteed allocation.
-fn sum_container_resources(workload: &WorkloadSpec) -> Result<(i64, i64), CostError> {
-    let mut cpu_millis = 0i64;
-    let mut mem_bytes = 0i64;
-
-    for container in workload.containers.values() {
-        if let Some(ref resources) = container.resources {
-            if let Some(ref requests) = resources.requests {
-                if let Some(ref cpu) = requests.cpu {
-                    cpu_millis += parse_cpu_millis_str(cpu)?;
-                }
-                if let Some(ref mem) = requests.memory {
-                    mem_bytes += parse_memory_bytes_str(mem)?;
-                }
-            }
-        }
-    }
-
-    Ok((cpu_millis, mem_bytes))
-}
 
 /// Compute CPU, memory, and GPU hourly cost for a single workload × replica count.
 fn workload_cost(
@@ -97,7 +76,7 @@ fn workload_cost(
     rates: &CostRates,
     replicas: f64,
 ) -> Result<(f64, f64, f64), CostError> {
-    let (cpu_millis, mem_bytes) = sum_container_resources(workload)?;
+    let (cpu_millis, mem_bytes) = sum_container_cpu_memory(&workload.containers)?;
     let gpu_hourly = sum_gpu_cost(workload, rates)?;
 
     let cpu = (cpu_millis as f64 / 1000.0) * rates.cpu * replicas;

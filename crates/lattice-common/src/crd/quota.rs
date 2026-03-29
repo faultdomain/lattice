@@ -38,7 +38,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::resources::{parse_cpu_millis_str, parse_memory_bytes_str, GPU_RESOURCE};
+use crate::resources::parse_resource_by_key;
 
 /// LatticeQuota defines resource limits for a Cedar principal.
 ///
@@ -105,7 +105,11 @@ impl LatticeQuotaSpec {
             // Hard limits must not exceed soft limits
             for (key, hard_val) in hard {
                 if let Some(soft_val) = self.soft.get(key) {
-                    if parse_resource_value(key, hard_val)? > parse_resource_value(key, soft_val)? {
+                    let hard_parsed = parse_resource_by_key(key, hard_val)
+                        .map_err(|_| crate::Error::validation(format!("hard.{key}: invalid")))?;
+                    let soft_parsed = parse_resource_by_key(key, soft_val)
+                        .map_err(|_| crate::Error::validation(format!("soft.{key}: invalid")))?;
+                    if hard_parsed > soft_parsed {
                         return Err(crate::Error::validation(format!(
                             "hard.{key} ({hard_val}) exceeds soft.{key} ({soft_val})"
                         )));
@@ -122,43 +126,11 @@ impl LatticeQuotaSpec {
     }
 }
 
-/// Parse a resource value to a comparable i64 based on the resource key.
-fn parse_resource_value(key: &str, value: &str) -> Result<i64, crate::Error> {
-    if key == "cpu" {
-        parse_cpu_millis_str(value)
-            .map_err(|_| crate::Error::validation(format!("{key}: invalid quantity '{value}'")))
-    } else if key == "memory" {
-        parse_memory_bytes_str(value)
-            .map_err(|_| crate::Error::validation(format!("{key}: invalid quantity '{value}'")))
-    } else {
-        value
-            .parse::<i64>()
-            .map_err(|_| crate::Error::validation(format!("{key}: invalid quantity '{value}'")))
-    }
-}
-
 fn validate_resource_map(map: &BTreeMap<String, String>, field: &str) -> Result<(), crate::Error> {
     for (key, value) in map {
-        if key == "cpu" {
-            parse_cpu_millis_str(value).map_err(|_| {
-                crate::Error::validation(format!("{field}.cpu: invalid quantity '{value}'"))
-            })?;
-        } else if key == "memory" {
-            parse_memory_bytes_str(value).map_err(|_| {
-                crate::Error::validation(format!("{field}.memory: invalid quantity '{value}'"))
-            })?;
-        } else if key == GPU_RESOURCE {
-            value.parse::<u32>().map_err(|_| {
-                crate::Error::validation(format!(
-                    "{field}.{GPU_RESOURCE}: invalid integer '{value}'"
-                ))
-            })?;
-        } else {
-            // Extensible: unknown resource keys are parsed as integers
-            value.parse::<i64>().map_err(|_| {
-                crate::Error::validation(format!("{field}.{key}: invalid quantity '{value}'"))
-            })?;
-        }
+        parse_resource_by_key(key, value).map_err(|_| {
+            crate::Error::validation(format!("{field}.{key}: invalid quantity '{value}'"))
+        })?;
     }
     Ok(())
 }

@@ -5,12 +5,56 @@
 
 use std::collections::BTreeMap;
 
+use lattice_common::crd::workload::spec::WorkloadSpec;
 use lattice_common::crd::{LatticeQuota, QuotaPrincipal};
 use lattice_common::resources::{
-    compute_workload_demand, parse_cpu_millis_str, parse_memory_bytes_str, GPU_RESOURCE,
-    WorkloadResourceDemand,
+    compute_workload_demand, parse_resource_by_key, WorkloadResourceDemand,
 };
-use lattice_common::crd::workload::spec::WorkloadSpec;
+
+/// Quota enforcement error.
+#[derive(Debug, thiserror::Error)]
+pub enum QuotaError {
+    /// Failed to parse resource quantities from the workload spec.
+    #[error("failed to compute resource demand: {0}")]
+    ComputeDemand(#[from] lattice_common::resources::QuantityParseError),
+
+    /// Workload exceeds per-workload cap on a quota.
+    #[error("quota '{quota}': {resource} ({actual}) exceeds maxPerWorkload ({limit})")]
+    PerWorkloadExceeded {
+        /// Quota name
+        quota: String,
+        /// Resource key (cpu, memory, nvidia.com/gpu)
+        resource: String,
+        /// Actual value
+        actual: String,
+        /// Limit value
+        limit: String,
+    },
+
+    /// Adding this workload would exceed the quota's soft limit.
+    #[error("quota '{quota}': {resource} would exceed soft limit ({used} used + {requested} requested > {limit} limit)")]
+    SoftLimitExceeded {
+        /// Quota name
+        quota: String,
+        /// Resource key
+        resource: String,
+        /// Current usage
+        used: String,
+        /// Requested amount
+        requested: String,
+        /// Soft limit
+        limit: String,
+    },
+
+    /// Quota has an invalid principal (should not happen if controller validated).
+    #[error("quota '{quota}' has invalid principal: {reason}")]
+    InvalidPrincipal {
+        /// Quota name
+        quota: String,
+        /// Parse error
+        reason: String,
+    },
+}
 
 /// Enforce quota limits for a workload about to be compiled.
 ///
@@ -18,9 +62,6 @@ use lattice_common::crd::workload::spec::WorkloadSpec;
 /// For each matching quota:
 /// - Rejects if any single resource exceeds `maxPerWorkload`
 /// - Rejects if `status.used + demand` would exceed `soft` limits
-///
-/// Returns `Ok(())` if all quotas pass, or `Err(details)` with a
-/// human-readable rejection message.
 pub fn enforce_quotas(
     quotas: &[LatticeQuota],
     name: &str,
@@ -29,32 +70,31 @@ pub fn enforce_quotas(
     workload_annotations: &BTreeMap<String, String>,
     workload: &WorkloadSpec,
     replicas: u32,
-) -> Result<(), String> {
-    let demand = compute_workload_demand(workload, replicas)
-        .map_err(|e| format!("failed to compute resource demand: {e}"))?;
+) -> Result<(), QuotaError> {
+    let demand = compute_workload_demand(workload, replicas)?;
 
     for quota in quotas {
         if !quota.spec.enabled {
             continue;
         }
 
-        let principal = match QuotaPrincipal::parse(&quota.spec.principal) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        let quota_name = quota.metadata.name.as_deref().unwrap_or("unknown");
+
+        let principal = QuotaPrincipal::parse(&quota.spec.principal).map_err(|e| {
+            QuotaError::InvalidPrincipal {
+                quota: quota_name.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
 
         if !principal.matches_workload(namespace, name, namespace_labels, workload_annotations) {
             continue;
         }
 
-        let quota_name = quota.metadata.name.as_deref().unwrap_or("unknown");
-
-        // Check per-workload caps
         if let Some(ref max) = quota.spec.max_per_workload {
             check_per_workload_limit(&demand, max, quota_name)?;
         }
 
-        // Check total: used + demand <= soft
         let used = quota
             .status
             .as_ref()
@@ -72,35 +112,22 @@ fn check_per_workload_limit(
     demand: &WorkloadResourceDemand,
     max: &BTreeMap<String, String>,
     quota_name: &str,
-) -> Result<(), String> {
-    if let Some(cpu_max) = max.get("cpu") {
-        if let Ok(limit) = parse_cpu_millis_str(cpu_max) {
-            if demand.cpu_millis > limit {
-                return Err(format!(
-                    "quota '{}': workload cpu ({}m) exceeds maxPerWorkload ({})",
-                    quota_name, demand.cpu_millis, cpu_max,
-                ));
-            }
-        }
-    }
-    if let Some(mem_max) = max.get("memory") {
-        if let Ok(limit) = parse_memory_bytes_str(mem_max) {
-            if demand.memory_bytes > limit {
-                return Err(format!(
-                    "quota '{}': workload memory exceeds maxPerWorkload ({})",
-                    quota_name, mem_max,
-                ));
-            }
-        }
-    }
-    if let Some(gpu_max) = max.get(GPU_RESOURCE) {
-        if let Ok(limit) = gpu_max.parse::<u32>() {
-            if demand.gpu_count > limit {
-                return Err(format!(
-                    "quota '{}': workload gpu ({}) exceeds maxPerWorkload ({})",
-                    quota_name, demand.gpu_count, gpu_max,
-                ));
-            }
+) -> Result<(), QuotaError> {
+    let demand_map = demand_to_raw(demand);
+
+    for (key, limit_str) in max {
+        let limit = match parse_resource_by_key(key, limit_str) {
+            Ok(v) => v,
+            Err(_) => continue, // Invalid limits caught by CRD validation
+        };
+        let actual = demand_map.get(key.as_str()).copied().unwrap_or(0);
+        if actual > limit {
+            return Err(QuotaError::PerWorkloadExceeded {
+                quota: quota_name.to_string(),
+                resource: key.clone(),
+                actual: crate::format_resource_value(key, actual),
+                limit: limit_str.clone(),
+            });
         }
     }
     Ok(())
@@ -111,53 +138,40 @@ fn check_soft_limit(
     used: &BTreeMap<String, String>,
     soft: &BTreeMap<String, String>,
     quota_name: &str,
-) -> Result<(), String> {
-    if let Some(cpu_soft) = soft.get("cpu") {
-        if let Ok(limit) = parse_cpu_millis_str(cpu_soft) {
-            let current = used
-                .get("cpu")
-                .and_then(|v| parse_cpu_millis_str(v).ok())
-                .unwrap_or(0);
-            if current + demand.cpu_millis > limit {
-                return Err(format!(
-                    "quota '{}': cpu would exceed soft limit ({} used + {}m requested > {} limit)",
-                    quota_name,
-                    used.get("cpu").unwrap_or(&"0".to_string()),
-                    demand.cpu_millis,
-                    cpu_soft,
-                ));
-            }
-        }
-    }
-    if let Some(mem_soft) = soft.get("memory") {
-        if let Ok(limit) = parse_memory_bytes_str(mem_soft) {
-            let current = used
-                .get("memory")
-                .and_then(|v| parse_memory_bytes_str(v).ok())
-                .unwrap_or(0);
-            if current + demand.memory_bytes > limit {
-                return Err(format!(
-                    "quota '{}': memory would exceed soft limit",
-                    quota_name,
-                ));
-            }
-        }
-    }
-    if let Some(gpu_soft) = soft.get(GPU_RESOURCE) {
-        if let Ok(limit) = gpu_soft.parse::<u32>() {
-            let current = used
-                .get(GPU_RESOURCE)
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0);
-            if current + demand.gpu_count > limit {
-                return Err(format!(
-                    "quota '{}': gpu would exceed soft limit ({} used + {} requested > {} limit)",
-                    quota_name, current, demand.gpu_count, gpu_soft,
-                ));
-            }
+) -> Result<(), QuotaError> {
+    let demand_map = demand_to_raw(demand);
+
+    for (key, limit_str) in soft {
+        let limit = match parse_resource_by_key(key, limit_str) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let current = used
+            .get(key)
+            .and_then(|v| parse_resource_by_key(key, v).ok())
+            .unwrap_or(0);
+        let requested = demand_map.get(key.as_str()).copied().unwrap_or(0);
+
+        if current + requested > limit {
+            return Err(QuotaError::SoftLimitExceeded {
+                quota: quota_name.to_string(),
+                resource: key.clone(),
+                used: crate::format_resource_value(key, current),
+                requested: crate::format_resource_value(key, requested),
+                limit: limit_str.clone(),
+            });
         }
     }
     Ok(())
+}
+
+/// Map demand fields to raw i64 values keyed by resource name.
+fn demand_to_raw(demand: &WorkloadResourceDemand) -> BTreeMap<&'static str, i64> {
+    let mut map = BTreeMap::new();
+    map.insert("cpu", demand.cpu_millis);
+    map.insert("memory", demand.memory_bytes);
+    map.insert("nvidia.com/gpu", demand.gpu_count as i64);
+    map
 }
 
 #[cfg(test)]
@@ -165,7 +179,7 @@ mod tests {
     use super::*;
     use lattice_common::crd::workload::container::ContainerSpec;
     use lattice_common::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
-    use lattice_common::crd::{LatticeQuotaSpec, LatticeQuotaStatus, LatticeQuotaPhase};
+    use lattice_common::crd::{LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus};
 
     fn make_workload(cpu: &str, memory: &str) -> WorkloadSpec {
         let mut containers = BTreeMap::new();
@@ -220,17 +234,20 @@ mod tests {
         quota
     }
 
+    fn team_labels() -> BTreeMap<String, String> {
+        BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())])
+    }
+
     #[test]
     fn enforce_within_limits() {
         let workload = make_workload("1", "1Gi");
         let quota = make_quota("10", Some("4"));
-        let ns_labels = BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())]);
 
         let result = enforce_quotas(
             &[quota],
             "my-svc",
             "ns",
-            &ns_labels,
+            &team_labels(),
             &BTreeMap::new(),
             &workload,
             1,
@@ -242,32 +259,31 @@ mod tests {
     fn enforce_exceeds_soft() {
         let workload = make_workload("8", "1Gi");
         let quota = make_quota("10", Some("4"));
-        let ns_labels = BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())]);
 
         let result = enforce_quotas(
             &[quota],
             "my-svc",
             "ns",
-            &ns_labels,
+            &team_labels(),
             &BTreeMap::new(),
             &workload,
             1,
         );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("exceed soft limit"));
+        assert!(matches!(result, Err(QuotaError::SoftLimitExceeded { .. })));
     }
 
     #[test]
     fn enforce_no_matching_quota() {
         let workload = make_workload("100", "1Gi");
         let quota = make_quota("1", None);
-        let ns_labels = BTreeMap::from([("lattice.dev/group".to_string(), "other".to_string())]);
+        let wrong_labels =
+            BTreeMap::from([("lattice.dev/group".to_string(), "other".to_string())]);
 
         let result = enforce_quotas(
             &[quota],
             "my-svc",
             "ns",
-            &ns_labels,
+            &wrong_labels,
             &BTreeMap::new(),
             &workload,
             1,
@@ -280,13 +296,12 @@ mod tests {
         let workload = make_workload("100", "1Gi");
         let mut quota = make_quota("1", None);
         quota.spec.enabled = false;
-        let ns_labels = BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())]);
 
         let result = enforce_quotas(
             &[quota],
             "my-svc",
             "ns",
-            &ns_labels,
+            &team_labels(),
             &BTreeMap::new(),
             &workload,
             1,
@@ -300,37 +315,73 @@ mod tests {
         let mut quota = make_quota("100", None);
         quota.spec.max_per_workload =
             Some(BTreeMap::from([("cpu".to_string(), "8".to_string())]));
-        let ns_labels = BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())]);
 
         let result = enforce_quotas(
             &[quota],
             "my-svc",
             "ns",
-            &ns_labels,
+            &team_labels(),
             &BTreeMap::new(),
             &workload,
             1,
         );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("maxPerWorkload"));
+        assert!(matches!(
+            result,
+            Err(QuotaError::PerWorkloadExceeded { .. })
+        ));
     }
 
     #[test]
     fn enforce_replicas_multiply() {
         let workload = make_workload("2", "1Gi");
         let quota = make_quota("10", Some("4"));
-        let ns_labels = BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())]);
 
         // 2 CPU * 4 replicas = 8 CPU, 4 used + 8 = 12 > 10 soft limit
         let result = enforce_quotas(
             &[quota],
             "my-svc",
             "ns",
-            &ns_labels,
+            &team_labels(),
             &BTreeMap::new(),
             &workload,
             4,
         );
-        assert!(result.is_err());
+        assert!(matches!(result, Err(QuotaError::SoftLimitExceeded { .. })));
+    }
+
+    #[test]
+    fn enforce_invalid_principal_is_error() {
+        let workload = make_workload("1", "1Gi");
+        let mut quota = make_quota("100", None);
+        quota.spec.principal = "bad-principal".to_string();
+
+        let result = enforce_quotas(
+            &[quota],
+            "my-svc",
+            "ns",
+            &team_labels(),
+            &BTreeMap::new(),
+            &workload,
+            1,
+        );
+        assert!(matches!(result, Err(QuotaError::InvalidPrincipal { .. })));
+    }
+
+    #[test]
+    fn format_resource_value_cpu() {
+        assert_eq!(crate::format_resource_value("cpu", 4000), "4");
+        assert_eq!(crate::format_resource_value("cpu", 1500), "1500m");
+    }
+
+    #[test]
+    fn format_resource_value_memory() {
+        assert_eq!(
+            crate::format_resource_value("memory", 8 * 1024 * 1024 * 1024),
+            "8Gi"
+        );
+        assert_eq!(
+            crate::format_resource_value("memory", 512 * 1024 * 1024),
+            "512Mi"
+        );
     }
 }

@@ -331,6 +331,50 @@ fn sum_container_requests(
 }
 
 // ---------------------------------------------------------------------------
+// Shared container resource summing
+// ---------------------------------------------------------------------------
+
+/// Sum CPU (millicores) and memory (bytes) from container requests.
+///
+/// Uses `requests` (not `limits`) — requests represent guaranteed allocation.
+/// Shared by the quota system and the cost calculator.
+pub fn sum_container_cpu_memory(
+    containers: &std::collections::BTreeMap<String, crate::crd::workload::container::ContainerSpec>,
+) -> Result<(i64, i64), QuantityParseError> {
+    let mut cpu_millis: i64 = 0;
+    let mut memory_bytes: i64 = 0;
+
+    for container in containers.values() {
+        if let Some(ref resources) = container.resources {
+            if let Some(ref requests) = resources.requests {
+                if let Some(ref cpu) = requests.cpu {
+                    cpu_millis += parse_cpu_millis_str(cpu)?;
+                }
+                if let Some(ref mem) = requests.memory {
+                    memory_bytes += parse_memory_bytes_str(mem)?;
+                }
+            }
+        }
+    }
+
+    Ok((cpu_millis, memory_bytes))
+}
+
+/// Sum GPU count from `type: gpu` resource entries in a workload spec.
+pub fn sum_gpu_count(
+    resources: &std::collections::BTreeMap<
+        String,
+        crate::crd::workload::resources::ResourceSpec,
+    >,
+) -> u32 {
+    resources
+        .values()
+        .filter_map(|r| r.params.as_gpu())
+        .map(|g| g.count)
+        .sum()
+}
+
+// ---------------------------------------------------------------------------
 // Workload resource demand (for quota enforcement)
 // ---------------------------------------------------------------------------
 
@@ -353,35 +397,35 @@ pub fn compute_workload_demand(
     workload: &crate::crd::workload::spec::WorkloadSpec,
     replicas: u32,
 ) -> Result<WorkloadResourceDemand, QuantityParseError> {
-    let mut cpu_millis: i64 = 0;
-    let mut memory_bytes: i64 = 0;
-
-    for container in workload.containers.values() {
-        if let Some(ref resources) = container.resources {
-            if let Some(ref requests) = resources.requests {
-                if let Some(ref cpu) = requests.cpu {
-                    cpu_millis += parse_cpu_millis_str(cpu)?;
-                }
-                if let Some(ref mem) = requests.memory {
-                    memory_bytes += parse_memory_bytes_str(mem)?;
-                }
-            }
-        }
-    }
-
-    let mut gpu_count: u32 = 0;
-    for resource in workload.resources.values() {
-        if let Some(gpu) = resource.params.as_gpu() {
-            gpu_count += gpu.count;
-        }
-    }
-
+    let (cpu_millis, memory_bytes) = sum_container_cpu_memory(&workload.containers)?;
+    let gpu_count = sum_gpu_count(&workload.resources);
     let r = replicas as i64;
+
     Ok(WorkloadResourceDemand {
         cpu_millis: cpu_millis * r,
         memory_bytes: memory_bytes * r,
-        gpu_count: gpu_count * replicas,
+        gpu_count: gpu_count * (replicas as u32),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Resource quantity dispatch (for quota maps)
+// ---------------------------------------------------------------------------
+
+/// Parse a resource quantity from a quota map by key name.
+///
+/// Dispatches to the appropriate parser based on the resource key:
+/// - `cpu` → millicores (i64)
+/// - `memory` → bytes (i64)
+/// - everything else → plain integer (i64)
+pub fn parse_resource_by_key(key: &str, value: &str) -> Result<i64, QuantityParseError> {
+    match key {
+        "cpu" => parse_cpu_millis_str(value),
+        "memory" => parse_memory_bytes_str(value),
+        _ => value
+            .parse::<i64>()
+            .map_err(|_| QuantityParseError(format!("{key}: {value}"))),
+    }
 }
 
 #[cfg(test)]

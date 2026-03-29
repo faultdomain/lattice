@@ -28,8 +28,8 @@ use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
     BackupStore, CedarPolicy, CertIssuer, ClusterConfig, DNSProvider, InfraProvider,
     LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember,
-    LatticeModel, LatticeRestore, LatticeService, MonitoringConfig, OIDCProvider, ProviderType,
-    SecretProvider,
+    LatticeModel, LatticeQuota, LatticeRestore, LatticeService, MonitoringConfig, OIDCProvider,
+    ProviderType, SecretProvider,
 };
 use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
@@ -466,6 +466,7 @@ fn common_provider_controllers(
     tracing::info!("- CedarPolicy controller");
     tracing::info!("- DNSProvider controller");
     tracing::info!("- CertIssuer controller");
+    tracing::info!("- LatticeQuota controller");
 
     vec![
         simple_controller(
@@ -485,6 +486,12 @@ fn common_provider_controllers(
             lattice_cert_issuer::reconcile,
             ctx.clone(),
             "CertIssuer",
+        ),
+        simple_controller(
+            Api::<LatticeQuota>::all(client.clone()),
+            lattice_quota::reconcile,
+            ctx.clone(),
+            "LatticeQuota",
         ),
     ]
 }

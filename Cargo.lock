@@ -3104,6 +3104,7 @@ dependencies = [
  "lattice-mesh-member",
  "lattice-model",
  "lattice-proto",
+ "lattice-quota",
  "lattice-secret-provider",
  "lattice-service",
  "lattice-webhook",
@@ -3161,6 +3162,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -3266,6 +3268,7 @@ dependencies = [
  "aws-lc-rs",
  "lattice-cedar",
  "lattice-common",
+ "lattice-quota",
  "lattice-secret-provider",
  "serde",
  "serde_json",

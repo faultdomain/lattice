@@ -68,6 +68,12 @@ pub enum CompilationError {
         details: String,
     },
 
+    /// Workload would exceed a LatticeQuota soft limit
+    QuotaExceeded {
+        /// Quota violation details
+        details: String,
+    },
+
     /// Template rendering error
     Template {
         /// The underlying template error
@@ -124,6 +130,9 @@ impl fmt::Display for CompilationError {
             }
             Self::ExternalEndpointAccessDenied { details } => {
                 write!(f, "external endpoint access denied: {}", details)
+            }
+            Self::QuotaExceeded { details } => {
+                write!(f, "quota exceeded: {}", details)
             }
             Self::Template { source } => {
                 write!(f, "template error: {}", source)
@@ -218,6 +227,13 @@ impl CompilationError {
         }
     }
 
+    /// Create a quota exceeded error
+    pub fn quota_exceeded(details: impl Into<String>) -> Self {
+        Self::QuotaExceeded {
+            details: details.into(),
+        }
+    }
+
     /// Create a file compilation error
     pub fn file_compilation(message: impl Into<String>) -> Self {
         Self::FileCompilation {
@@ -241,6 +257,7 @@ impl CompilationError {
                 | Self::SecurityOverrideDenied { .. }
                 | Self::VolumeAccessDenied { .. }
                 | Self::ExternalEndpointAccessDenied { .. }
+                | Self::QuotaExceeded { .. }
         )
     }
 }
