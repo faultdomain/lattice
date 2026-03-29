@@ -60,7 +60,7 @@ impl PolicyEngine {
     /// Reads the `RwLock<PolicySet>` once for the batch, then evaluates each
     /// path synchronously against the same snapshot.
     pub async fn authorize_secrets(&self, request: &SecretAuthzRequest) -> SecretAuthzResult {
-        let policy_set = self.read_policy_set().await;
+        let policy_set = self.read_policy_set();
         let action_uid = match build_entity_uid("Action", "AccessSecret") {
             Ok(uid) => uid,
             Err(e) => {

@@ -68,7 +68,7 @@ impl PolicyEngine {
     /// Reads the `RwLock<PolicySet>` once for the batch, then evaluates each
     /// volume synchronously against the same snapshot.
     pub async fn authorize_volumes(&self, request: &VolumeAuthzRequest) -> VolumeAuthzResult {
-        let policy_set = self.read_policy_set().await;
+        let policy_set = self.read_policy_set();
 
         let action_uid = match build_entity_uid("Action", "AccessVolume") {
             Ok(uid) => uid,

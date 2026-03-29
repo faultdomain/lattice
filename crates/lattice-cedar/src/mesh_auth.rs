@@ -95,7 +95,7 @@ impl PolicyEngine {
             reason: Some(reason),
         };
 
-        let policy_set = self.read_policy_set().await;
+        let policy_set = self.read_policy_set();
         let action_uid = match build_entity_uid("Action", ACTION_NAME) {
             Ok(uid) => uid,
             Err(e) => return deny(DenialReason::InternalError(format!("action uid: {}", e))),

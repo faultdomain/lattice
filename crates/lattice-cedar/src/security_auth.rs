@@ -72,7 +72,7 @@ impl PolicyEngine {
         &self,
         request: &SecurityAuthzRequest,
     ) -> SecurityAuthzResult {
-        let policy_set = self.read_policy_set().await;
+        let policy_set = self.read_policy_set();
         let action_uid = match build_entity_uid("Action", "OverrideSecurity") {
             Ok(uid) => uid,
             Err(e) => {

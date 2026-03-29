@@ -23,7 +23,7 @@ use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request, Response,
 };
 use kube::{Api, Client};
-use tokio::sync::RwLock;
+use tokio::sync::watch;
 use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
@@ -143,8 +143,10 @@ impl ClusterAttributes {
 pub struct PolicyEngine {
     /// Cedar authorizer
     authorizer: Authorizer,
-    /// Parsed policy set (updated when CRDs change)
-    policy_set: Arc<RwLock<PolicySet>>,
+    /// Watch channel sender — owned by the engine, sends on reload
+    policy_tx: watch::Sender<Arc<PolicySet>>,
+    /// Watch channel receiver — cloned for reads (no locks)
+    policy_rx: watch::Receiver<Arc<PolicySet>>,
     /// Monotonic counter bumped after every successful `reload()`.
     /// Used by the service controller to detect when cedar policies
     /// have actually been loaded (as opposed to just watched).
@@ -154,9 +156,11 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     /// Create a new policy engine with no policies (default-deny)
     pub fn new() -> Self {
+        let (tx, rx) = watch::channel(Arc::new(PolicySet::new()));
         Self {
             authorizer: Authorizer::new(),
-            policy_set: Arc::new(RwLock::new(PolicySet::new())),
+            policy_tx: tx,
+            policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
         }
     }
@@ -167,9 +171,11 @@ impl PolicyEngine {
     /// Inherited policies (from parent clusters) are loaded first, then local policies.
     pub async fn from_crds(client: &Client) -> Result<Self> {
         let policy_set = Self::load_policies_from_crds(client).await?;
+        let (tx, rx) = watch::channel(Arc::new(policy_set));
         Ok(Self {
             authorizer: Authorizer::new(),
-            policy_set: Arc::new(RwLock::new(policy_set)),
+            policy_tx: tx,
+            policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
         })
     }
@@ -182,9 +188,11 @@ impl PolicyEngine {
                 .map_err(|e: cedar_policy::ParseErrors| {
                     Error::Config(format!("Invalid Cedar policy: {}", e))
                 })?;
+        let (tx, rx) = watch::channel(Arc::new(policy_set));
         Ok(Self {
             authorizer: Authorizer::new(),
-            policy_set: Arc::new(RwLock::new(policy_set)),
+            policy_tx: tx,
+            policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
         })
     }
@@ -204,7 +212,7 @@ impl PolicyEngine {
         attrs: &ClusterAttributes,
         context: Option<Context>,
     ) -> Result<()> {
-        let policy_set = self.policy_set.read().await;
+        let policy_set = self.policy_rx.borrow().clone();
         self.evaluate_cluster(
             username,
             groups,
@@ -222,7 +230,7 @@ impl PolicyEngine {
         groups: &[String],
         cluster_attrs: &HashMap<String, ClusterAttributes>,
     ) -> Vec<String> {
-        let policy_set = self.policy_set.read().await;
+        let policy_set = self.policy_rx.borrow().clone();
         cluster_attrs
             .iter()
             .filter(|(cluster, attrs)| {
@@ -241,8 +249,9 @@ impl PolicyEngine {
     }
 
     /// Check if any policies are loaded
-    pub async fn has_policies(&self) -> bool {
-        self.policy_set.read().await.policies().next().is_some()
+    /// Check if any policies are loaded
+    pub fn has_policies(&self) -> bool {
+        self.policy_rx.borrow().policies().next().is_some()
     }
 
     /// Reload policies from CRDs.
@@ -251,9 +260,7 @@ impl PolicyEngine {
     /// in-memory state has actually changed (vs. just being watched).
     pub async fn reload(&self, client: &Client) -> Result<()> {
         let new_policy_set = Self::load_policies_from_crds(client).await?;
-        let mut policy_set = self.policy_set.write().await;
-        *policy_set = new_policy_set;
-        drop(policy_set); // release write lock before bumping epoch
+        let _ = self.policy_tx.send(Arc::new(new_policy_set));
         self.reload_epoch.fetch_add(1, Ordering::Release);
         info!("Reloaded Cedar policies");
         Ok(())
@@ -280,7 +287,7 @@ impl PolicyEngine {
         context: Context,
         entities: Entities,
     ) -> Result<()> {
-        let policy_set = self.policy_set.read().await;
+        let policy_set = self.policy_rx.borrow().clone();
         let response =
             self.evaluate_raw(principal, action, resource, context, &entities, &policy_set)?;
         let action_str = action.to_string();
@@ -334,9 +341,9 @@ impl PolicyEngine {
             .is_authorized(&request, policy_set, entities))
     }
 
-    /// Get a read lock on the policy set
-    pub(crate) async fn read_policy_set(&self) -> tokio::sync::RwLockReadGuard<'_, PolicySet> {
-        self.policy_set.read().await
+    /// Get a snapshot of the current policy set (lock-free via watch channel).
+    pub(crate) fn read_policy_set(&self) -> Arc<PolicySet> {
+        self.policy_rx.borrow().clone()
     }
 
     /// Evaluate a service authorization request and record metrics.
@@ -690,10 +697,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_has_policies() {
-        assert!(!PolicyEngine::new().has_policies().await);
+        assert!(!PolicyEngine::new().has_policies());
 
         let engine = PolicyEngine::with_policies("permit(principal, action, resource);").unwrap();
-        assert!(engine.has_policies().await);
+        assert!(engine.has_policies());
     }
 
     // ========================================================================
