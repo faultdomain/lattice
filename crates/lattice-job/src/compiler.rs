@@ -69,6 +69,7 @@ pub async fn compile_job(
     cluster_name: &str,
     provider_type: ProviderType,
     cedar: &PolicyEngine,
+    quota_budget: Option<&lattice_quota::QuotaBudget>,
 ) -> Result<CompiledJob, JobError> {
     let name = job.metadata.name.as_deref().unwrap_or_default();
     let namespace = job
@@ -142,6 +143,10 @@ pub async fn compile_job(
         .with_graph(graph)
         .with_image_pull_secrets(&task_spec.runtime.image_pull_secrets)
         .with_owner_references(owner_refs.clone());
+
+        if let Some(budget) = quota_budget {
+            compiler = compiler.with_quota_budget(budget.clone(), task_spec.replicas.unwrap_or(1));
+        }
 
         if job.spec.topology.is_some() {
             compiler = compiler.with_topology();

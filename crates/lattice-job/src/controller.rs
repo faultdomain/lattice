@@ -230,6 +230,8 @@ pub struct JobContext {
     pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
+    /// Shared quota store for enforcement
+    pub quota_store: lattice_quota::QuotaStore,
 }
 
 impl JobContext {
@@ -252,6 +254,7 @@ impl JobContext {
             events,
             metrics_scraper,
             cost_provider: None,
+            quota_store: lattice_quota::QuotaStore::empty(),
         }
     }
 
@@ -273,6 +276,7 @@ impl JobContext {
             events: Arc::new(lattice_common::NoopEventPublisher),
             metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
+            quota_store: lattice_quota::QuotaStore::empty(),
         }
     }
 }
@@ -520,12 +524,20 @@ async fn submit_job(
     volcano_api: &ApiResource,
     cost: &Option<CostEstimate>,
 ) -> Result<(), JobError> {
+    let annotations = job.metadata.annotations.as_ref().cloned().unwrap_or_default();
+    let quota_budget = ctx.quota_store.resolve_budget(
+        namespace,
+        job.metadata.name.as_deref().unwrap_or_default(),
+        &annotations,
+    );
+
     let compiled = match compile_job(
         job,
         &ctx.graph,
         &ctx.cluster_name,
         ctx.provider_type,
         &ctx.cedar,
+        Some(&quota_budget),
     )
     .await
     {

@@ -35,9 +35,6 @@ use tracing::{debug, info, warn};
 
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
-/// Lease name for the Lattice operator leader election
-pub const LEADER_LEASE_NAME: &str = "lattice-operator-leader";
-
 /// Label key added to leader pod for Service selector
 pub const LEADER_LABEL_KEY: &str = "lattice.dev/leader";
 

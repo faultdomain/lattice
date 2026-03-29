@@ -113,6 +113,7 @@ pub async fn compile_model(
     provider_type: ProviderType,
     cedar: &PolicyEngine,
     role_suffix: &str,
+    quota_budget: Option<&lattice_quota::QuotaBudget>,
 ) -> Result<CompiledModel, ModelError> {
     let name = model
         .metadata
@@ -134,6 +135,7 @@ pub async fn compile_model(
         cluster_name,
         graph,
         has_topology: model.spec.topology.is_some(),
+        quota_budget,
     };
 
     let mut compiled = compile_roles(name, &roles, &ctx).await?;
@@ -212,6 +214,7 @@ struct CompilationCtx<'a> {
     cluster_name: &'a str,
     graph: &'a ServiceGraph,
     has_topology: bool,
+    quota_budget: Option<&'a lattice_quota::QuotaBudget>,
 }
 
 /// Compile a single workload (entry or worker) through the WorkloadCompiler pipeline.
@@ -244,6 +247,10 @@ async fn compile_workload(
     .with_cluster_name(ctx.cluster_name)
     .with_graph(ctx.graph)
     .with_image_pull_secrets(&runtime.image_pull_secrets);
+
+        if let Some(budget) = ctx.quota_budget {
+            compiler = compiler.with_quota_budget(budget.clone(), 1);
+        }
 
     if ctx.has_topology {
         compiler = compiler.with_topology();

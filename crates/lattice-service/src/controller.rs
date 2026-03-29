@@ -665,6 +665,8 @@ pub struct ServiceContext {
     pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
+    /// Shared quota store for enforcement
+    pub quota_store: lattice_quota::QuotaStore,
 }
 
 impl ServiceContext {
@@ -688,6 +690,7 @@ impl ServiceContext {
             extension_phases: Vec::new(),
             metrics_scraper,
             cost_provider: None,
+            quota_store: lattice_quota::QuotaStore::empty(),
         }
     }
 
@@ -708,6 +711,7 @@ impl ServiceContext {
             extension_phases: Vec::new(),
             metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
+            quota_store: lattice_quota::QuotaStore::empty(),
         }
     }
 }
@@ -902,6 +906,9 @@ async fn compile_and_apply(
     inputs_hash: &str,
     eso_content_hash: &str,
 ) -> Result<Action, Error> {
+    let annotations = service.metadata.annotations.as_ref().cloned().unwrap_or_default();
+    let quota_budget = ctx.quota_store.resolve_budget(namespace, name, &annotations);
+
     let compiler = ServiceCompiler::new(
         &ctx.graph,
         &ctx.cluster_name,
@@ -910,7 +917,8 @@ async fn compile_and_apply(
         ctx.monitoring.clone(),
     )
     .with_phases(&ctx.extension_phases)
-    .with_eso_content_hash(eso_content_hash.to_string());
+    .with_eso_content_hash(eso_content_hash.to_string())
+    .with_quota_budget(quota_budget);
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {

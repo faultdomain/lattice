@@ -56,9 +56,8 @@ pub struct WorkloadCompiler<'a> {
     owner_references: Vec<OwnerReference>,
     has_topology: bool,
     eso_content_hash: String,
-    quotas: &'a [lattice_common::crd::LatticeQuota],
+    quota_budget: Option<lattice_quota::QuotaBudget>,
     replicas: u32,
-    namespace_labels: BTreeMap<String, String>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -94,9 +93,8 @@ impl<'a> WorkloadCompiler<'a> {
             owner_references: Vec::new(),
             has_topology: false,
             eso_content_hash: String::new(),
-            quotas: &[],
+            quota_budget: None,
             replicas: 1,
-            namespace_labels: BTreeMap::new(),
         }
     }
 
@@ -158,20 +156,10 @@ impl<'a> WorkloadCompiler<'a> {
         self
     }
 
-    /// Set quota list for enforcement during compilation.
-    pub fn with_quotas(
-        mut self,
-        quotas: &'a [lattice_common::crd::LatticeQuota],
-        replicas: u32,
-    ) -> Self {
-        self.quotas = quotas;
+    /// Set quota budget and replica count for enforcement during compilation.
+    pub fn with_quota_budget(mut self, budget: lattice_quota::QuotaBudget, replicas: u32) -> Self {
+        self.quota_budget = Some(budget);
         self.replicas = replicas;
-        self
-    }
-
-    /// Set namespace labels for quota principal matching.
-    pub fn with_namespace_labels(mut self, labels: BTreeMap<String, String>) -> Self {
-        self.namespace_labels = labels;
         self
     }
 
@@ -232,17 +220,15 @@ impl<'a> WorkloadCompiler<'a> {
         )?;
 
         // Quota enforcement — check resource limits before authorization
-        if !self.quotas.is_empty() {
-            lattice_quota::enforce_quotas(
-                self.quotas,
-                self.name,
-                self.namespace,
-                &self.namespace_labels,
-                &self.annotations,
+        if let Some(ref budget) = self.quota_budget {
+            let demand = lattice_common::resources::compute_workload_demand(
                 self.workload,
                 self.replicas,
             )
             .map_err(|e| CompilationError::quota_exceeded(e.to_string()))?;
+            budget
+                .check(&demand)
+                .map_err(CompilationError::quota_exceeded)?;
         }
 
         // Authorization — Cedar is always enforced

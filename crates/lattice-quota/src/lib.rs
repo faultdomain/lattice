@@ -13,19 +13,52 @@
 
 #![deny(missing_docs)]
 
+mod budget;
 mod capacity;
 mod controller;
-mod enforcement;
 pub mod solver;
+mod store;
 
+pub use budget::QuotaBudget;
 pub use controller::{reconcile, QuotaContext};
-pub use enforcement::{enforce_quotas, QuotaError};
+pub use store::{channel as quota_channel, QuotaSender, QuotaSnapshot, QuotaStore};
 
 use std::collections::BTreeMap;
+
+use kube::api::Api;
+use lattice_common::crd::LatticeQuota;
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_common::resources::{
     WorkloadResourceDemand, CPU_RESOURCE, GPU_RESOURCE, MEMORY_RESOURCE,
 };
+
+/// Fetch all enabled quotas from `lattice-system` namespace.
+///
+/// Returns an empty vec on failure (quota enforcement is best-effort —
+/// if the API is unreachable, compilation proceeds without quota checks).
+pub async fn fetch_quotas(client: &kube::Client) -> Vec<LatticeQuota> {
+    let api: Api<LatticeQuota> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    match api.list(&Default::default()).await {
+        Ok(list) => list.items.into_iter().filter(|q| q.spec.enabled).collect(),
+        Err(e) => {
+            tracing::debug!(error = %e, "Failed to list quotas, skipping enforcement");
+            Vec::new()
+        }
+    }
+}
+
+/// Fetch labels for a namespace. Returns empty map on failure.
+pub async fn fetch_namespace_labels(
+    client: &kube::Client,
+    namespace: &str,
+) -> BTreeMap<String, String> {
+    let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
+    match api.get(namespace).await {
+        Ok(ns) => ns.metadata.labels.unwrap_or_default(),
+        Err(_) => BTreeMap::new(),
+    }
+}
 
 /// Format a raw resource value for human-readable display.
 pub fn format_resource_value(key: &str, value: i64) -> String {

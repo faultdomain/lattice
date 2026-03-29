@@ -231,6 +231,8 @@ pub struct ModelContext {
     pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
+    /// Shared quota store for enforcement
+    pub quota_store: lattice_quota::QuotaStore,
 }
 
 impl ModelContext {
@@ -253,6 +255,7 @@ impl ModelContext {
             events,
             metrics_scraper,
             cost_provider: None,
+            quota_store: lattice_quota::QuotaStore::empty(),
         }
     }
 
@@ -274,6 +277,7 @@ impl ModelContext {
             events: Arc::new(lattice_common::NoopEventPublisher),
             metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
+            quota_store: lattice_quota::QuotaStore::empty(),
         }
     }
 }
@@ -322,6 +326,9 @@ pub async fn reconcile(
         .map(|s| s.phase.clone())
         .unwrap_or(ModelServingPhase::Pending);
 
+    let annotations = model.metadata.annotations.as_ref().cloned().unwrap_or_default();
+    let quota_budget = ctx.quota_store.resolve_budget(namespace, &name, &annotations);
+
     match phase {
         ModelServingPhase::Pending => {
             let compiled = compile_model(
@@ -331,6 +338,7 @@ pub async fn reconcile(
                 ctx.provider_type,
                 &ctx.cedar,
                 &suffix,
+                Some(&quota_budget),
             )
             .await;
 
@@ -499,6 +507,7 @@ pub async fn reconcile(
                     ctx.provider_type,
                     &ctx.cedar,
                     &suffix,
+                    Some(&quota_budget),
                 )
                 .await
                 {

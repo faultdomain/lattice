@@ -1,41 +1,35 @@
-//! Controller runner - builds controller futures for each vertical slice
+//! Controller runner - leader-elected controllers
 //!
-//! Each `build_*` function returns a Vec of boxed futures that can be composed
-//! by the caller. This keeps controller construction pure and testable.
+//! Each controller runs behind its own Kubernetes Lease via `leader_controller`.
+//! The wrapper handles election, re-acquisition on leadership loss, and clean shutdown.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use futures::StreamExt;
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher::{self, Config as WatcherConfig};
 use kube::runtime::{predicates, reflector, Controller, WatchStreamExt};
 use kube::{Api, Client};
+use tokio_util::sync::CancellationToken;
 
-use lattice_api::auth::oidc_controller as oidc_provider_ctrl;
-use lattice_api::cedar::validation as cedar_validation_ctrl;
-use lattice_backup::backup_store_controller as backup_store_ctrl;
-use lattice_backup::cluster_backup_controller as cluster_backup_ctrl;
-use lattice_backup::restore_controller as restore_ctrl;
-use lattice_backup::service_backup_controller as service_backup_ctrl;
 use lattice_capi::installer::CapiInstaller;
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
-use lattice_cloud_provider as cloud_provider_ctrl;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
 use lattice_common::crd::{
-    BackupStore, CedarPolicy, CertIssuer, ClusterConfig, DNSProvider, InfraProvider,
-    LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember,
-    LatticeModel, LatticeQuota, LatticeRestore, LatticeService, MonitoringConfig, OIDCProvider,
-    ProviderType, SecretProvider,
+    CedarPolicy, ClusterConfig, LatticeCluster, LatticeClusterRoutes, LatticeJob,
+    LatticeMeshMember, LatticeModel, LatticeService, MonitoringConfig, ProviderType,
 };
-use lattice_common::{ControllerContext, CrdRegistry, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::graph::ServiceGraph;
+use lattice_common::{CrdRegistry, LeaderElector, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_mesh_member::remote_secret;
-use lattice_secret_provider::controller as secrets_provider_ctrl;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
 
@@ -44,12 +38,138 @@ use lattice_service::controller::{reconcile as service_reconcile, ServiceContext
 /// preventing "body read timed out" errors on idle watches.
 const WATCH_TIMEOUT_SECS: u32 = 25;
 
+// ---------------------------------------------------------------------------
+// Leader election wrapper
+// ---------------------------------------------------------------------------
+
+/// Run a controller behind its own Kubernetes Lease.
+///
+/// Acquires a per-controller lease (`lattice-ctrl-{name}`), calls `factory` to
+/// build a fresh controller, and runs it. On leadership loss the controller
+/// future is dropped (tearing down watches) and the lease is re-acquired.
+///
+/// If `claim_traffic` is true, the pod is labelled on acquisition so the
+/// Kubernetes Service routes gRPC/auth-proxy traffic to this pod. The label
+/// is removed on graceful shutdown.
+pub async fn leader_controller<F>(
+    client: Client,
+    pod_name: String,
+    name: &'static str,
+    cancel: CancellationToken,
+    claim_traffic: bool,
+    factory: F,
+) where
+    F: Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
+{
+    let lease_name = format!("lattice-ctrl-{}", name);
+
+    loop {
+        let elector = Arc::new(LeaderElector::new(
+            client.clone(),
+            &lease_name,
+            LATTICE_SYSTEM_NAMESPACE,
+            &pod_name,
+        ));
+
+        let mut guard = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = elector.acquire() => match result {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!(controller = name, error = %e, "lease acquisition failed");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            },
+        };
+
+        if claim_traffic {
+            if let Err(e) = guard.claim_traffic(&pod_name).await {
+                tracing::error!(controller = name, error = %e, "failed to claim traffic");
+            }
+        }
+
+        tracing::info!(controller = name, "leadership acquired, starting controller");
+        let controller = factory();
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = guard.release_leadership().await;
+                return;
+            }
+            _ = guard.lost() => {
+                tracing::warn!(controller = name, "leadership lost, will re-acquire");
+                // LeaderElector already removed the leader label in signal_leadership_lost
+            }
+            _ = controller => {
+                tracing::error!(controller = name, "controller exited unexpectedly, restarting");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared state helpers
+// ---------------------------------------------------------------------------
+
+/// Ensure the ServiceGraph exists, creating and warming it if needed.
+///
+/// Uses `OnceLock` so the first caller creates the graph and subsequent
+/// callers on the same pod reuse it. Retries trust domain discovery until
+/// the root CA is available.
+pub async fn ensure_graph(
+    client: &Client,
+    graph_holder: &OnceLock<Arc<ServiceGraph>>,
+    cluster_name: &str,
+) -> Arc<ServiceGraph> {
+    if let Some(g) = graph_holder.get() {
+        return g.clone();
+    }
+
+    loop {
+        match lattice_infra::bootstrap::read_trust_domain(client).await {
+            Some(td) => {
+                let graph = Arc::new(
+                    ServiceGraph::new(&td).with_cluster_name(cluster_name.to_string()),
+                );
+                warmup_graph(client, &graph).await;
+                let _ = graph_holder.set(graph);
+                return graph_holder.get().unwrap().clone();
+            }
+            None => {
+                tracing::info!("Trust domain not available yet, retrying in 5s...");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Resolve ClusterConfig from the LatticeCluster CRD (with fallback).
+pub async fn resolve_cluster_config(
+    client: &Client,
+    config: &lattice_common::SharedConfig,
+) -> anyhow::Result<ClusterConfig> {
+    let cluster_name = config
+        .cluster_name_required()
+        .map_err(|e| anyhow::anyhow!(e))?
+        .to_string();
+    Ok(ClusterConfig {
+        cluster_name,
+        provider_type: resolve_provider_type_from_cluster(client).await,
+        monitoring: resolve_monitoring_from_cluster(client).await,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Controller builder: simple_controller
+// ---------------------------------------------------------------------------
+
 /// Build a standard controller future: create a `Controller`, wire shutdown,
 /// run with `default_error_policy`, and log every reconciliation result.
 ///
 /// This encapsulates the repeated pattern used by provider/backup controllers
 /// that need no extra watches or custom error policies.
-fn simple_controller<K, Ctx, ReconcileFut, Err>(
+pub fn simple_controller<K, Ctx, ReconcileFut, Err>(
     api: Api<K>,
     reconcile_fn: impl FnMut(Arc<K>, Arc<Ctx>) -> ReconcileFut + Send + 'static,
     ctx: Arc<Ctx>,
@@ -75,14 +195,18 @@ where
     )
 }
 
-/// Build cluster controller futures
-pub fn build_cluster_controllers(
+// ---------------------------------------------------------------------------
+// Individual controller builders
+// ---------------------------------------------------------------------------
+
+/// Build the LatticeCluster controller future.
+pub fn build_cluster_controller(
     client: Client,
     self_cluster_name: Option<String>,
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     capi_installer: Arc<dyn CapiInstaller>,
     config: lattice_common::SharedConfig,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     let mut ctx_builder = Context::builder(client.clone(), config).capi_installer(capi_installer);
     if let Some(servers) = parent_servers {
         ctx_builder = ctx_builder.parent_servers(servers);
@@ -96,7 +220,7 @@ pub fn build_cluster_controllers(
 
     tracing::info!("- LatticeCluster controller");
 
-    vec![Box::pin(
+    Box::pin(
         Controller::new(
             clusters,
             WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
@@ -104,25 +228,23 @@ pub fn build_cluster_controllers(
         .shutdown_on_signal()
         .run(reconcile, error_policy, ctx)
         .for_each(log_reconcile_result("Cluster")),
-    )]
+    )
 }
 
-/// Build service controller futures (LatticeService, LatticeMeshMember)
+/// Build the LatticeService controller future.
 ///
-/// Returns the controller futures and the shared ServiceGraph (for use by job controllers).
-pub async fn build_service_controllers(
+/// Requires a warmed ServiceGraph (call `ensure_graph` first).
+pub async fn build_service_controller(
     client: Client,
+    graph: Arc<ServiceGraph>,
     cluster: ClusterConfig,
     cedar: Arc<PolicyEngine>,
     registry: Arc<CrdRegistry>,
     metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
-) -> anyhow::Result<(
-    Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    Arc<lattice_common::graph::ServiceGraph>,
-)> {
+    quota_store: lattice_quota::QuotaStore,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
-    let cedar_for_mm = cedar.clone();
 
     let svc_kube_client = Arc::new(lattice_service::controller::ServiceKubeClientImpl::new(
         client.clone(),
@@ -132,47 +254,31 @@ pub async fn build_service_controllers(
         client.clone(),
         "lattice-service-controller",
     ));
-    // Compute trust domain from the root CA for SPIFFE principal generation.
-    // The operator MUST NOT start service controllers without a valid trust domain —
-    // doing so would generate incorrect SPIFFE principals and Istio policies.
-    let trust_domain = lattice_infra::bootstrap::read_trust_domain(&client)
-        .await
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "root CA secret not available — cannot compute trust domain for SPIFFE principals"
-            )
-        })?;
 
     let mut service_ctx = ServiceContext::new(
         svc_kube_client,
-        Arc::new(
-            lattice_common::graph::ServiceGraph::new(&trust_domain)
-                .with_cluster_name(cluster.cluster_name.clone()),
-        ),
+        graph.clone(),
         cluster,
-        cedar.clone(),
+        cedar,
         svc_events,
         metrics_scraper,
     );
-    service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry.clone()))];
-    service_ctx.cost_provider = cost_provider.clone();
-
-    // Warm the service graph before controllers start so existing services
-    // aren't demoted to Compiling on restart due to missing dependency info.
-    warmup_graph(&client, &service_ctx.graph).await;
+    service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry))];
+    service_ctx.cost_provider = cost_provider;
+    service_ctx.quota_store = quota_store;
 
     let service_ctx = Arc::new(service_ctx);
 
     let services: Api<LatticeService> = Api::all(client.clone());
     let services_for_watch = services.clone();
-    let graph_for_dep_watch = service_ctx.graph.clone();
-    let graph_for_cedar_watch = service_ctx.graph.clone();
-    let graph_for_mm_watch = service_ctx.graph.clone();
+    let graph_for_dep_watch = graph.clone();
+    let graph_for_cedar_watch = graph.clone();
+    let graph_for_mm_watch = graph.clone();
+    let graph_for_route_watch = graph;
     let cedar_policies: Api<CedarPolicy> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let mesh_members_for_svc: Api<LatticeMeshMember> = Api::all(client.clone());
     let cluster_routes_for_svc: Api<LatticeClusterRoutes> = Api::all(client.clone());
-    let graph_for_route_watch = service_ctx.graph.clone();
 
     let (reader, writer) = reflector::store();
     let svc_stream = reflector(writer, watcher::watcher(services, watcher_config()))
@@ -195,10 +301,6 @@ pub async fn build_service_controllers(
                 .collect()
         })
         .watches(cedar_policies, watcher_config(), move |_policy| {
-            // The cedar validation controller reloads the PolicyEngine (which bumps
-            // its own reload_epoch) and then patches the CedarPolicy status. That
-            // status patch triggers another watch event, ensuring services
-            // re-reconcile after reload is complete.
             let refs = all_service_refs(&graph_for_cedar_watch);
             tracing::info!(
                 service_count = refs.len(),
@@ -229,22 +331,38 @@ pub async fn build_service_controllers(
         .run(
             service_reconcile,
             lattice_common::default_error_policy,
-            service_ctx.clone(),
+            service_ctx,
         )
         .for_each(log_reconcile_result("Service"));
 
-    // ── MeshMember controller ──
+    tracing::info!("- LatticeService controller");
+
+    Box::pin(svc_ctrl)
+}
+
+/// Build the LatticeMeshMember controller future.
+///
+/// Requires a warmed ServiceGraph (call `ensure_graph` first).
+pub fn build_mesh_member_controller(
+    client: Client,
+    graph: Arc<ServiceGraph>,
+    cluster_name: String,
+    cedar: Arc<PolicyEngine>,
+    registry: Arc<CrdRegistry>,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
+
     let mm_ctx = Arc::new(mesh_member_ctrl::MeshMemberContext {
         client: client.clone(),
-        graph: service_ctx.graph.clone(),
-        cluster_name: service_ctx.cluster_name.clone(),
+        graph: graph.clone(),
+        cluster_name,
         registry,
-        cedar: Some(cedar_for_mm),
+        cedar: Some(cedar),
     });
 
     let mesh_members: Api<LatticeMeshMember> = Api::all(client.clone());
     let mesh_members_for_mm_watch: Api<LatticeMeshMember> = Api::all(client.clone());
-    let graph_for_mm_dep_watch = service_ctx.graph.clone();
+    let graph_for_mm_dep_watch = graph.clone();
 
     let mm_ctrl = Controller::new(mesh_members, watcher_config())
         .watches(mesh_members_for_mm_watch, watcher_config(), move |member| {
@@ -291,10 +409,10 @@ pub async fn build_service_controllers(
             refs
         })
         .watches(
-            Api::<LatticeClusterRoutes>::all(client.clone()),
+            Api::<LatticeClusterRoutes>::all(client),
             watcher_config(),
             {
-                let graph = service_ctx.graph.clone();
+                let graph = graph.clone();
                 move |routes| {
                     // Sync remote services to graph BEFORE triggering re-reconcile.
                     // Without this, MeshMember reconcile runs with stale graph state
@@ -313,12 +431,9 @@ pub async fn build_service_controllers(
         )
         .for_each(log_reconcile_result("MeshMember"));
 
-    tracing::info!("- LatticeService controller");
     tracing::info!("- LatticeMeshMember controller");
 
-    let graph = service_ctx.graph.clone();
-
-    Ok((vec![Box::pin(svc_ctrl), Box::pin(mm_ctrl)], graph))
+    Box::pin(mm_ctrl)
 }
 
 /// Spawn the remote secret controller for Istio multi-cluster discovery.
@@ -351,16 +466,17 @@ pub fn spawn_remote_secret_controller(client: Client) -> tokio::task::JoinHandle
     })
 }
 
-/// Build job controller futures (LatticeJob)
-pub async fn build_job_controllers(
+/// Build the LatticeJob controller future.
+pub async fn build_job_controller(
     client: Client,
     cluster: ClusterConfig,
     cedar: Arc<PolicyEngine>,
-    graph: Arc<lattice_common::graph::ServiceGraph>,
+    graph: Arc<ServiceGraph>,
     registry: Arc<CrdRegistry>,
     metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    quota_store: lattice_quota::QuotaStore,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
     let kube_client = Arc::new(lattice_job::controller::JobKubeClientImpl::new(
@@ -381,6 +497,7 @@ pub async fn build_job_controllers(
         metrics_scraper,
     );
     job_ctx.cost_provider = cost_provider;
+    job_ctx.quota_store = quota_store;
     let ctx = Arc::new(job_ctx);
 
     let jobs: Api<LatticeJob> = Api::all(client);
@@ -401,19 +518,20 @@ pub async fn build_job_controllers(
 
     tracing::info!("- LatticeJob controller");
 
-    vec![Box::pin(job_ctrl)]
+    Box::pin(job_ctrl)
 }
 
-/// Build model controller futures (LatticeModel)
-pub async fn build_model_controllers(
+/// Build the LatticeModel controller future.
+pub async fn build_model_controller(
     client: Client,
     cluster: ClusterConfig,
     cedar: Arc<PolicyEngine>,
-    graph: Arc<lattice_common::graph::ServiceGraph>,
+    graph: Arc<ServiceGraph>,
     registry: Arc<CrdRegistry>,
     metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     cost_provider: Option<Arc<dyn CostProvider>>,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
+    quota_store: lattice_quota::QuotaStore,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
     let kube_client = Arc::new(lattice_model::controller::ModelKubeClientImpl::new(
@@ -434,6 +552,7 @@ pub async fn build_model_controllers(
         metrics_scraper,
     );
     model_ctx.cost_provider = cost_provider;
+    model_ctx.quota_store = quota_store;
     let ctx = Arc::new(model_ctx);
 
     let models: Api<LatticeModel> = Api::all(client);
@@ -454,224 +573,12 @@ pub async fn build_model_controllers(
 
     tracing::info!("- LatticeModel controller");
 
-    vec![Box::pin(model_ctrl)]
+    Box::pin(model_ctrl)
 }
 
-/// Controllers that run in all modes (CedarPolicy, DNSProvider, CertIssuer)
-fn common_provider_controllers(
-    client: &Client,
-    ctx: &Arc<ControllerContext>,
-    cedar_ctx: Arc<cedar_validation_ctrl::CedarValidationContext>,
-    cost_provider: Option<Arc<dyn CostProvider>>,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    tracing::info!("- CedarPolicy controller");
-    tracing::info!("- DNSProvider controller");
-    tracing::info!("- CertIssuer controller");
-    tracing::info!("- LatticeQuota controller");
-
-    let quota_ctx = Arc::new(lattice_quota::QuotaContext {
-        client: client.clone(),
-        cluster_name: ctx.config.cluster_name.clone(),
-        cost_provider,
-    });
-
-    vec![
-        simple_controller(
-            Api::<CedarPolicy>::all(client.clone()),
-            cedar_validation_ctrl::reconcile,
-            cedar_ctx,
-            "CedarPolicy",
-        ),
-        simple_controller(
-            Api::<DNSProvider>::all(client.clone()),
-            lattice_dns_provider::reconcile,
-            ctx.clone(),
-            "DNSProvider",
-        ),
-        simple_controller(
-            Api::<CertIssuer>::all(client.clone()),
-            lattice_cert_issuer::reconcile,
-            ctx.clone(),
-            "CertIssuer",
-        ),
-        simple_controller(
-            Api::<LatticeQuota>::all(client.clone()),
-            lattice_quota::reconcile,
-            quota_ctx,
-            "LatticeQuota",
-        ),
-    ]
-}
-
-/// Build cluster-slice provider controllers.
-///
-/// Cluster-only: InfraProvider, SecretProvider, OIDCProvider.
-/// Common (all modes): CedarPolicy, DNSProvider, CertIssuer.
-pub fn build_cluster_provider_controllers(
-    client: Client,
-    cedar: Arc<PolicyEngine>,
-    config: lattice_common::SharedConfig,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
-    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
-        client: client.clone(),
-        cedar,
-    });
-
-    tracing::info!("- InfraProvider controller");
-    tracing::info!("- SecretProvider controller");
-    tracing::info!("- OIDCProvider controller");
-
-    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx, None);
-    controllers.extend([
-        simple_controller(
-            Api::<InfraProvider>::all(client.clone()),
-            cloud_provider_ctrl::reconcile,
-            ctx.clone(),
-            "InfraProvider",
-        ),
-        simple_controller(
-            Api::<SecretProvider>::all(client.clone()),
-            secrets_provider_ctrl::reconcile,
-            ctx.clone(),
-            "SecretProvider",
-        ),
-        simple_controller(
-            Api::<OIDCProvider>::all(client),
-            oidc_provider_ctrl::reconcile,
-            ctx,
-            "OIDCProvider",
-        ),
-    ]);
-    controllers
-}
-
-/// Build service-slice provider controllers.
-///
-/// Service-only: BackupStore, ClusterBackup, Restore, ServiceBackup.
-/// Common (all modes): CedarPolicy, DNSProvider, CertIssuer.
-pub fn build_service_provider_controllers(
-    client: Client,
-    cedar: Arc<PolicyEngine>,
-    config: lattice_common::SharedConfig,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
-    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
-        client: client.clone(),
-        cedar,
-    });
-
-    tracing::info!("- BackupStore controller");
-    tracing::info!("- LatticeClusterBackup controller");
-    tracing::info!("- LatticeRestore controller");
-    tracing::info!("- ServiceBackupSchedule controller");
-
-    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx, None);
-    controllers.extend([
-        simple_controller(
-            Api::<BackupStore>::all(client.clone()),
-            backup_store_ctrl::reconcile,
-            ctx.clone(),
-            "BackupStore",
-        ),
-        simple_controller(
-            Api::<LatticeClusterBackup>::all(client.clone()),
-            cluster_backup_ctrl::reconcile,
-            ctx.clone(),
-            "ClusterBackup",
-        ),
-        simple_controller(
-            Api::<LatticeRestore>::all(client.clone()),
-            restore_ctrl::reconcile,
-            ctx.clone(),
-            "Restore",
-        ),
-        simple_controller(
-            Api::<LatticeService>::all(client),
-            service_backup_ctrl::reconcile,
-            ctx,
-            "ServiceBackup",
-        ),
-    ]);
-    controllers
-}
-
-/// Build ALL provider controllers (union of cluster + service, common controllers deduplicated).
-///
-/// Used by `run_all_slices()`.
-pub fn build_all_provider_controllers(
-    client: Client,
-    cedar: Arc<PolicyEngine>,
-    config: lattice_common::SharedConfig,
-) -> Vec<Pin<Box<dyn Future<Output = ()> + Send>>> {
-    let ctx = Arc::new(ControllerContext::new(client.clone(), config));
-    let cedar_ctx = Arc::new(cedar_validation_ctrl::CedarValidationContext {
-        client: client.clone(),
-        cedar,
-    });
-
-    // Common controllers (CedarPolicy, DNSProvider, CertIssuer, LatticeQuota)
-    let mut controllers = common_provider_controllers(&client, &ctx, cedar_ctx, None);
-
-    // Cluster-only
-    tracing::info!("- InfraProvider controller");
-    tracing::info!("- SecretProvider controller");
-    tracing::info!("- OIDCProvider controller");
-    controllers.extend([
-        simple_controller(
-            Api::<InfraProvider>::all(client.clone()),
-            cloud_provider_ctrl::reconcile,
-            ctx.clone(),
-            "InfraProvider",
-        ),
-        simple_controller(
-            Api::<SecretProvider>::all(client.clone()),
-            secrets_provider_ctrl::reconcile,
-            ctx.clone(),
-            "SecretProvider",
-        ),
-        simple_controller(
-            Api::<OIDCProvider>::all(client.clone()),
-            oidc_provider_ctrl::reconcile,
-            ctx.clone(),
-            "OIDCProvider",
-        ),
-    ]);
-
-    // Service-only
-    tracing::info!("- BackupStore controller");
-    tracing::info!("- LatticeClusterBackup controller");
-    tracing::info!("- LatticeRestore controller");
-    tracing::info!("- ServiceBackupSchedule controller");
-    controllers.extend([
-        simple_controller(
-            Api::<BackupStore>::all(client.clone()),
-            backup_store_ctrl::reconcile,
-            ctx.clone(),
-            "BackupStore",
-        ),
-        simple_controller(
-            Api::<LatticeClusterBackup>::all(client.clone()),
-            cluster_backup_ctrl::reconcile,
-            ctx.clone(),
-            "ClusterBackup",
-        ),
-        simple_controller(
-            Api::<LatticeRestore>::all(client.clone()),
-            restore_ctrl::reconcile,
-            ctx.clone(),
-            "Restore",
-        ),
-        simple_controller(
-            Api::<LatticeService>::all(client),
-            service_backup_ctrl::reconcile,
-            ctx,
-            "ServiceBackup",
-        ),
-    ]);
-
-    controllers
-}
+// ---------------------------------------------------------------------------
+// Resolution helpers
+// ---------------------------------------------------------------------------
 
 /// Resolve provider type from the first LatticeCluster CRD
 pub async fn resolve_provider_type_from_cluster(client: &Client) -> ProviderType {
@@ -701,11 +608,15 @@ async fn read_first_cluster(client: &Client) -> Option<LatticeCluster> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Graph utilities
+// ---------------------------------------------------------------------------
+
 /// Compute the set of affected neighbor names when a service or mesh member changes.
 ///
 /// Returns deduplicated names of all dependencies and dependents (excluding `self_name`).
 fn affected_neighbors(
-    graph: &lattice_common::graph::ServiceGraph,
+    graph: &ServiceGraph,
     namespace: &str,
     self_name: &str,
 ) -> Vec<String> {
@@ -739,7 +650,7 @@ fn resource_identity(meta: &kube::api::ObjectMeta, kind: &str) -> Option<(String
 /// Pre-populate the ServiceGraph with all existing resources so that
 /// reconciliation after an operator restart doesn't demote Ready services
 /// to Compiling while waiting for dependency information to trickle in.
-async fn warmup_graph(client: &Client, graph: &lattice_common::graph::ServiceGraph) {
+pub async fn warmup_graph(client: &Client, graph: &ServiceGraph) {
     warmup_list::<LatticeService>(client, "LatticeServices", |item| {
         if let Some((ns, name)) = resource_identity(&item.metadata, "LatticeService") {
             graph.put_service(&ns, &name, &item.spec);
@@ -814,8 +725,12 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Graph auditor
+// ---------------------------------------------------------------------------
+
 /// Interval between graph audit cycles.
-const GRAPH_AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const GRAPH_AUDIT_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Spawn a background task that periodically removes orphaned graph nodes.
 ///
@@ -824,8 +739,8 @@ const GRAPH_AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 /// event-driven controllers can't self-heal from.
 pub fn spawn_graph_auditor(
     client: Client,
-    graph: Arc<lattice_common::graph::ServiceGraph>,
-    token: tokio_util::sync::CancellationToken,
+    graph: Arc<ServiceGraph>,
+    token: CancellationToken,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(GRAPH_AUDIT_INTERVAL);
@@ -850,7 +765,7 @@ pub fn spawn_graph_auditor(
 /// directions: remove orphaned nodes and re-add missing ones.
 async fn audit_graph_orphans(
     client: &Client,
-    graph: &lattice_common::graph::ServiceGraph,
+    graph: &ServiceGraph,
 ) -> Result<(), kube::Error> {
     let services = Api::<LatticeService>::all(client.clone())
         .list(&kube::api::ListParams::default())
@@ -974,8 +889,12 @@ async fn audit_graph_orphans(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// ObjectRef helpers
+// ---------------------------------------------------------------------------
+
 /// Collect ObjectRefs for every service in the graph (used to trigger re-reconciliation of all services).
-fn all_service_refs(graph: &lattice_common::graph::ServiceGraph) -> Vec<ObjectRef<LatticeService>> {
+fn all_service_refs(graph: &ServiceGraph) -> Vec<ObjectRef<LatticeService>> {
     let mut refs = Vec::new();
     for ns in graph.list_namespaces() {
         for svc in graph.list_services(&ns) {
@@ -986,7 +905,7 @@ fn all_service_refs(graph: &lattice_common::graph::ServiceGraph) -> Vec<ObjectRe
 }
 
 fn all_mesh_member_refs(
-    graph: &lattice_common::graph::ServiceGraph,
+    graph: &ServiceGraph,
 ) -> Vec<ObjectRef<LatticeMeshMember>> {
     graph
         .all_mesh_eligible()

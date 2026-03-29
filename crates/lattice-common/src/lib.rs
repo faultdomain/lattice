@@ -38,7 +38,6 @@ pub use kube_utils::{
 };
 pub use leader_election::{
     LeaderElectionError, LeaderElector, LeaderGuard, LEADER_LABEL_KEY, LEADER_LABEL_VALUE,
-    LEADER_LEASE_NAME,
 };
 pub use protocol::{CsrRequest, CsrResponse, DistributableResources};
 

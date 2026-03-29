@@ -3,16 +3,11 @@
 //! This is the main entry point. It handles CLI parsing and starts subsystems.
 //! All business logic lives in library modules.
 //!
-//! # Architecture: Vertical Slices
+//! # Architecture: Per-Controller Leader Election
 //!
-//! Each `ControllerMode` is a vertical slice that owns its full lifecycle:
-//! CRDs, infrastructure, shared state, and controllers.
-//!
-//! # HA Leader Election
-//!
-//! When running with replicas > 1, pods compete for leadership using Kubernetes
-//! Leases. Only the leader runs controllers and accepts traffic. The leader writes
-//! Endpoints directly to route all Service traffic to itself.
+//! Every controller runs behind its own Kubernetes Lease. Multiple replicas
+//! compete for each lease independently, so controllers can distribute across
+//! pods. Losing leadership of one controller doesn't affect the others.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -24,10 +19,11 @@ use std::time::Duration;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use futures::StreamExt;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, CustomResourceExt};
+use tokio_util::sync::CancellationToken;
 
 use lattice_api::{oidc_from_crd, AuthChain, SaValidator, ServerConfig as AuthProxyConfig};
 use lattice_capi::installer::{CapiInstaller, NativeInstaller};
@@ -35,16 +31,17 @@ use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
 use lattice_common::crd::{
-    ClusterConfig, LatticeCluster, LatticeService, MonitoringConfig, OIDCProvider,
+    CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticeQuota,
+    LatticeService, OIDCProvider,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::telemetry::{init_telemetry, TelemetryConfig};
+use lattice_common::telemetry::init_telemetry;
 use lattice_common::CrdRegistry;
 use lattice_common::SharedConfig;
 use lattice_common::{
-    lattice_svc_dns, LeaderElector, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT,
-    DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE, LEADER_LEASE_NAME, OPERATOR_NAME,
+    lattice_svc_dns, DEFAULT_AUTH_PROXY_PORT, DEFAULT_HEALTH_PORT, LATTICE_SYSTEM_NAMESPACE,
+    OPERATOR_NAME,
 };
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
@@ -58,52 +55,14 @@ use lattice_operator::startup::{
 mod controller_runner;
 mod metrics;
 
+use lattice_common::CELL_SERVICE_NAME;
+
 #[derive(Parser, Debug)]
 #[command(name = "lattice", version, about, long_about = None)]
 struct Cli {
+    /// Print CRD schema and exit
     #[arg(long)]
     crd: bool,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-/// Vertical slice modes for the modular monolith architecture.
-///
-/// Each mode runs a specific subset of controllers and infrastructure:
-/// - `All`: Complete operator (default for single-deployment scenarios)
-/// - `Cluster`: Cluster lifecycle (provisioning, pivoting, scaling) + cell infrastructure
-/// - `Service`: Service mesh (policies, workloads, ingress) - no cell infrastructure
-#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
-pub enum ControllerMode {
-    /// Run all controllers and infrastructure
-    #[default]
-    All,
-    /// Run cluster lifecycle controller + cell infrastructure (gRPC, bootstrap, auth proxy)
-    Cluster,
-    /// Run service mesh controller only (no cell infrastructure)
-    Service,
-    /// Run auth proxy + gRPC agent server only (no controllers)
-    /// Deploy as a separate pod so operator restarts don't kill proxy connections
-    Proxy,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    Controller {
-        #[arg(long, short, value_enum, default_value = "all")]
-        mode: ControllerMode,
-    },
-}
-
-/// Owns controller futures and cleanup resources for a vertical slice
-struct SliceHandle {
-    controllers: Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
-    agent_token: Option<tokio_util::sync::CancellationToken>,
-    graph_auditor_token: Option<tokio_util::sync::CancellationToken>,
-    auth_proxy_supervisor: Option<tokio::task::JoinHandle<()>>,
-    infra_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 #[tokio::main]
@@ -122,10 +81,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    match cli.command {
-        Some(Commands::Controller { mode }) => run_controller(mode, prom_registry).await,
-        None => run_controller(ControllerMode::All, prom_registry).await,
-    }
+    run(prom_registry).await
 }
 
 fn init_crypto() {
@@ -135,7 +91,7 @@ fn init_crypto() {
 }
 
 fn init_telemetry_global() -> Option<prometheus::Registry> {
-    let config = TelemetryConfig {
+    let config = lattice_common::telemetry::TelemetryConfig {
         service_name: OPERATOR_NAME.to_string(),
         ..Default::default()
     };
@@ -147,7 +103,6 @@ fn init_telemetry_global() -> Option<prometheus::Registry> {
         }
         Err(e) => {
             eprintln!("WARNING: Failed to initialize telemetry: {}", e);
-            // Fall back to basic tracing
             use tracing_subscriber::{fmt, prelude::*, EnvFilter};
             let _ = tracing_subscriber::registry()
                 .with(fmt::layer())
@@ -158,11 +113,12 @@ fn init_telemetry_global() -> Option<prometheus::Registry> {
     }
 }
 
-async fn run_controller(
-    mode: ControllerMode,
-    prom_registry: Option<prometheus::Registry>,
-) -> anyhow::Result<()> {
-    tracing::info!(?mode, "Starting...");
+// ---------------------------------------------------------------------------
+// Main startup
+// ---------------------------------------------------------------------------
+
+async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> {
+    tracing::info!("Starting Lattice operator (per-controller leader election)...");
 
     // Parse all LATTICE_* env vars once at startup
     let config = Arc::new(
@@ -175,30 +131,22 @@ async fn run_controller(
 
     // Get pod identity from Downward API env vars (set in deployment manifest)
     let pod_name = std::env::var("POD_NAME").unwrap_or_else(|_| {
-        // Fallback for local development — log so misconfigured deployments are visible
         let name = format!("lattice-operator-{}", uuid::Uuid::new_v4());
         tracing::warn!(pod_name = %name, "POD_NAME not set (expected from Downward API), using generated name");
         name
     });
 
-    let debug_enabled = config.debug;
     let graph_holder: Arc<OnceLock<Arc<ServiceGraph>>> = Arc::new(OnceLock::new());
+    let (quota_sender, quota_store) = lattice_quota::quota_channel();
+    let cancel = CancellationToken::new();
 
-    // Start health server (runs on all pods for K8s probes)
-    let health_handle = start_health_server(prom_registry, graph_holder.clone(), debug_enabled);
+    // ── Pre-election services (run on ALL pods) ──
 
-    // Ensure webhook auth credentials exist (all pods load or create on first run).
-    // This must happen before starting the webhook so every replica validates the
-    // same credentials. The K8s Secret acts as the coordination point — the first
-    // pod to run creates it, others load the existing one.
+    let health_handle = start_health_server(prom_registry, graph_holder.clone(), config.debug);
+
     let webhook_creds =
         lattice_secret_provider::controller::ensure_webhook_credentials(&client).await?;
 
-    // Start the local secrets webhook on ALL pods (before leader election).
-    // The webhook is a stateless HTTP reader — any replica can serve ESO requests.
-    // Infrastructure setup (namespace, Service, ClusterSecretStore) happens on the
-    // leader later, but the HTTP endpoint must be available on every pod so the
-    // Service (which selects all operator pods) never routes to a non-listening replica.
     let webhook_client = client.clone();
     tokio::spawn(async move {
         if let Err(e) =
@@ -209,7 +157,6 @@ async fn run_controller(
         }
     });
 
-    // Start admission webhook server (all pods, stateless validation)
     let webhook_client = client.clone();
     tokio::spawn(async move {
         if let Err(e) = lattice_webhook::start_webhook_server(webhook_client).await {
@@ -217,47 +164,471 @@ async fn run_controller(
         }
     });
 
-    // Acquire leadership using Kubernetes Lease BEFORE any initialization
-    // Only the leader should install CRDs and infrastructure
-    let elector = Arc::new(LeaderElector::new(
-        client.clone(),
-        LEADER_LEASE_NAME,
-        LATTICE_SYSTEM_NAMESPACE,
-        &pod_name,
-    ));
-    let mut guard = elector.acquire().await?;
+    // ── Shared state ──
 
-    // Claim traffic by adding leader label to this pod
-    // Service selector includes this label, so only leader gets traffic
-    tracing::info!(pod = %pod_name, "Adding leader label to claim traffic...");
-    guard.claim_traffic(&pod_name).await?;
+    let cedar = load_cedar_engine(&client).await;
+    let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
 
-    // Report running operator image in status.latticeImage on startup
+    // Report running operator image in status.latticeImage
     if let Some(ref self_name) = config.cluster_name {
         report_running_image(&client, self_name).await;
     }
 
-    // Dispatch to the appropriate vertical slice
-    tracing::info!("Starting Lattice controllers...");
-    let handle = match mode {
-        ControllerMode::Cluster => run_cluster_slice(&client, &config).await?,
-        ControllerMode::Service => run_service_slice(&client, &graph_holder, &config).await?,
-        ControllerMode::Proxy => run_proxy_slice(&client, &config).await?,
-        ControllerMode::All => run_all_slices(&client, &graph_holder, &config).await?,
-    };
+    // ── Spawn all controllers (each with its own Kubernetes Lease) ──
 
-    // Destructure handle so we can move controllers into select_all
-    // while keeping the cleanup resources separate
-    let SliceHandle {
-        controllers,
-        parent_servers,
-        agent_token,
-        graph_auditor_token,
-        auth_proxy_supervisor,
-        infra_handle,
-    } = handle;
+    tracing::info!("Spawning controllers with per-controller leader election...");
 
-    // Run controllers until shutdown signal, controllers exit, or leadership lost
+    // Infrastructure controller (CRD install, CAPI, Istio, ESO)
+    let _h_infra = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "infra",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let capi_installer = capi_installer.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let capi_installer = capi_installer.clone();
+                Box::pin(async move {
+                    ensure_cluster_crds(&client).await.expect("CRD install failed");
+                    ensure_service_crds(&client).await.expect("CRD install failed");
+                    spawn_admission_webhook_configuration(client.clone());
+                    ensure_capi_infrastructure(&client, Some(&*capi_installer), &config)
+                        .await
+                        .expect("CAPI infrastructure failed");
+                    let handle =
+                        spawn_general_infrastructure(client.clone(), true, config.clone());
+                    spawn_webhook_infrastructure(client);
+                    // Wait for general infra then hold the lease forever
+                    if let Err(e) = handle.await {
+                        tracing::error!(error = ?e, "General infrastructure task failed");
+                    }
+                    std::future::pending::<()>().await;
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // Cell infrastructure (gRPC server, bootstrap webhook, auth proxy)
+    let _h_cell = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "cell",
+        cancel.clone(),
+        true, // claim_traffic for gRPC/auth-proxy routing
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let cedar = cedar.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let cedar = cedar.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticeCluster>(&client).await;
+                    let self_cluster_name = config.cluster_name.clone();
+                    match setup_cell_infra(&client, &self_cluster_name, cedar, &config).await {
+                        Ok((_servers, _agent_token, _auth_proxy, _route_tx)) => {
+                            // Hold the lease while cell infra is running
+                            std::future::pending::<()>().await;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Cell infrastructure setup failed");
+                        }
+                    }
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // LatticeCluster controller
+    let _h_cluster = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "cluster",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let capi_installer = capi_installer.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let capi_installer = capi_installer.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticeCluster>(&client).await;
+                    let self_cluster_name = config.cluster_name.clone();
+                    // parent_servers is None — children connect via the K8s
+                    // Service to whichever pod holds the cell lease
+                    controller_runner::build_cluster_controller(
+                        client,
+                        self_cluster_name,
+                        None,
+                        capi_installer,
+                        config,
+                    )
+                    .await;
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // LatticeService controller
+    let _h_service = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "service",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let cedar = cedar.clone();
+            let graph_holder = graph_holder.clone();
+            let quota_store = quota_store.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let cedar = cedar.clone();
+                let graph_holder = graph_holder.clone();
+                let quota_store = quota_store.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticeService>(&client).await;
+                    let cluster = controller_runner::resolve_cluster_config(&client, &config)
+                        .await
+                        .expect("cluster config required");
+                    let cluster_name = cluster.cluster_name.clone();
+                    let graph =
+                        controller_runner::ensure_graph(&client, &graph_holder, &cluster_name)
+                            .await;
+                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
+                    ));
+                    let metrics_scraper =
+                        Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"));
+                    controller_runner::build_service_controller(
+                        client,
+                        graph,
+                        cluster,
+                        cedar,
+                        registry,
+                        metrics_scraper,
+                        cost_provider,
+                        quota_store.clone(),
+                    )
+                    .await
+                    .await;
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // LatticeMeshMember controller
+    let _h_mesh_member = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "mesh-member",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let cedar = cedar.clone();
+            let graph_holder = graph_holder.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let cedar = cedar.clone();
+                let graph_holder = graph_holder.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticeMeshMember>(&client).await;
+                    let cluster_name = config
+                        .cluster_name_required()
+                        .expect("cluster name required")
+                        .to_string();
+                    let graph =
+                        controller_runner::ensure_graph(&client, &graph_holder, &cluster_name)
+                            .await;
+                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+                    // Spawn graph auditor alongside mesh-member controller
+                    let auditor_token = CancellationToken::new();
+                    controller_runner::spawn_graph_auditor(
+                        client.clone(),
+                        graph.clone(),
+                        auditor_token.clone(),
+                    );
+                    controller_runner::build_mesh_member_controller(
+                        client,
+                        graph,
+                        cluster_name,
+                        cedar,
+                        registry,
+                    )
+                    .await;
+                    auditor_token.cancel();
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // LatticeJob controller
+    let _h_job = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "job",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let cedar = cedar.clone();
+            let graph_holder = graph_holder.clone();
+            let quota_store = quota_store.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let cedar = cedar.clone();
+                let graph_holder = graph_holder.clone();
+                let quota_store = quota_store.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticeJob>(&client).await;
+                    let cluster = controller_runner::resolve_cluster_config(&client, &config)
+                        .await
+                        .expect("cluster config required");
+                    let graph = controller_runner::ensure_graph(
+                        &client,
+                        &graph_holder,
+                        &cluster.cluster_name,
+                    )
+                    .await;
+                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
+                    ));
+                    let metrics_scraper =
+                        Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"));
+                    controller_runner::build_job_controller(
+                        client, cluster, cedar, graph, registry, metrics_scraper, cost_provider, quota_store.clone(),
+                    )
+                    .await
+                    .await;
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // LatticeModel controller
+    let _h_model = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "model",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let cedar = cedar.clone();
+            let graph_holder = graph_holder.clone();
+            let quota_store = quota_store.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let cedar = cedar.clone();
+                let graph_holder = graph_holder.clone();
+                let quota_store = quota_store.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticeModel>(&client).await;
+                    let cluster = controller_runner::resolve_cluster_config(&client, &config)
+                        .await
+                        .expect("cluster config required");
+                    let graph = controller_runner::ensure_graph(
+                        &client,
+                        &graph_holder,
+                        &cluster.cluster_name,
+                    )
+                    .await;
+                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
+                    ));
+                    let metrics_scraper =
+                        Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"));
+                    controller_runner::build_model_controller(
+                        client, cluster, cedar, graph, registry, metrics_scraper, cost_provider, quota_store.clone(),
+                    )
+                    .await
+                    .await;
+                }) as Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // ── Provider controllers ──
+    //
+    // Each gets its own lease. Most use ControllerContext; Cedar and Quota
+    // have their own context types.
+
+    fn spawn_provider<K, ReconcileFut, Err>(
+        client: kube::Client,
+        pod_name: String,
+        lease: &'static str,
+        cancel: CancellationToken,
+        config: SharedConfig,
+        reconcile_fn: fn(Arc<K>, Arc<lattice_common::ControllerContext>) -> ReconcileFut,
+        label: &'static str,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        K: kube::Resource<DynamicType = ()>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+        ReconcileFut: Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
+        Err: std::error::Error + lattice_common::Retryable + Send + 'static,
+    {
+        tokio::spawn(controller_runner::leader_controller(
+            client.clone(),
+            pod_name,
+            lease,
+            cancel,
+            false,
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<K>(&client).await;
+                    let ctx = Arc::new(lattice_common::ControllerContext::new(
+                        client.clone(),
+                        config,
+                    ));
+                    controller_runner::simple_controller(
+                        Api::<K>::all(client),
+                        reconcile_fn,
+                        ctx,
+                        label,
+                    )
+                    .await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            },
+        ))
+    }
+
+    let _h_cedar = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "cedar",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let cedar = cedar.clone();
+            move || {
+                let client = client.clone();
+                let cedar = cedar.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<CedarPolicy>(&client).await;
+                    let ctx =
+                        Arc::new(lattice_api::cedar::validation::CedarValidationContext {
+                            client: client.clone(),
+                            cedar,
+                        });
+                    controller_runner::simple_controller(
+                        Api::<CedarPolicy>::all(client),
+                        lattice_api::cedar::validation::reconcile,
+                        ctx,
+                        "CedarPolicy",
+                    )
+                    .await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    let _h_dns = spawn_provider(
+        client.clone(), pod_name.clone(), "dns", cancel.clone(), config.clone(),
+        lattice_dns_provider::reconcile, "DNSProvider",
+    );
+    let _h_cert = spawn_provider(
+        client.clone(), pod_name.clone(), "cert", cancel.clone(), config.clone(),
+        lattice_cert_issuer::reconcile, "CertIssuer",
+    );
+
+    let _h_quota = tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "quota",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let config = config.clone();
+            let quota_sender = quota_sender.clone();
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let quota_sender = quota_sender.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticeQuota>(&client).await;
+                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
+                        lattice_cost::ConfigMapCostProvider::new(client.clone()),
+                    ));
+                    let ctx = Arc::new(lattice_quota::QuotaContext {
+                        client: client.clone(),
+                        cluster_name: config.cluster_name.clone(),
+                        cost_provider,
+                        sender: quota_sender.clone(),
+                    });
+                    controller_runner::simple_controller(
+                        Api::<LatticeQuota>::all(client),
+                        lattice_quota::reconcile,
+                        ctx,
+                        "LatticeQuota",
+                    )
+                    .await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    let _h_cloud = spawn_provider(
+        client.clone(), pod_name.clone(), "cloud", cancel.clone(), config.clone(),
+        lattice_cloud_provider::reconcile, "InfraProvider",
+    );
+    let _h_secret = spawn_provider(
+        client.clone(), pod_name.clone(), "secret", cancel.clone(), config.clone(),
+        lattice_secret_provider::controller::reconcile, "SecretProvider",
+    );
+    let _h_oidc = spawn_provider(
+        client.clone(), pod_name.clone(), "oidc", cancel.clone(), config.clone(),
+        lattice_api::auth::oidc_controller::reconcile, "OIDCProvider",
+    );
+    let _h_backup_store = spawn_provider(
+        client.clone(), pod_name.clone(), "backup-store", cancel.clone(), config.clone(),
+        lattice_backup::backup_store_controller::reconcile, "BackupStore",
+    );
+    let _h_cluster_backup = spawn_provider(
+        client.clone(), pod_name.clone(), "cluster-backup", cancel.clone(), config.clone(),
+        lattice_backup::cluster_backup_controller::reconcile, "ClusterBackup",
+    );
+    let _h_restore = spawn_provider(
+        client.clone(), pod_name.clone(), "restore", cancel.clone(), config.clone(),
+        lattice_backup::restore_controller::reconcile, "Restore",
+    );
+    let _h_service_backup = spawn_provider::<LatticeService, _, _>(
+        client.clone(), pod_name.clone(), "service-backup", cancel.clone(), config.clone(),
+        lattice_backup::service_backup_controller::reconcile, "ServiceBackup",
+    );
+
+    // ── Wait for shutdown signal ──
+
     let shutdown_signal = async {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to listen for SIGTERM");
@@ -271,412 +642,18 @@ async fn run_controller(
         }
     };
 
-    let controllers = futures::future::select_all(controllers);
+    shutdown_signal.await;
 
-    let infra_future = async {
-        if let Some(handle) = infra_handle {
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "General infrastructure installation failed");
-                    return true;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "General infrastructure task panicked");
-                    return true;
-                }
-            }
-        }
-        // Never resolve if infra succeeded — let other branches drive shutdown
-        std::future::pending::<bool>().await
-    };
+    // Cancel all controllers — each leader_controller loop will release its lease
+    tracing::info!("Cancelling all controllers...");
+    cancel.cancel();
 
-    tokio::select! {
-        (_, idx, _) = controllers => {
-            tracing::info!(controller_index = idx, "Controller exited");
-        }
-        _ = guard.lost() => {
-            tracing::warn!("Leadership lost, shutting down");
-        }
-        failed = infra_future => {
-            if failed {
-                tracing::error!("Shutting down due to infrastructure failure");
-            }
-        }
-        _ = shutdown_signal => {}
-    }
+    // Give controllers a moment to release leases gracefully
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Graceful shutdown: release leadership so standby can take over immediately
-    tracing::info!("Releasing leadership for fast failover...");
-    if let Err(e) = guard.release_leadership().await {
-        tracing::warn!(error = %e, "Failed to release leadership (standby will wait for lease expiry)");
-    }
-
-    // Stop services
     health_handle.abort();
-    if let Some(token) = agent_token {
-        token.cancel();
-    }
-    if let Some(token) = graph_auditor_token {
-        token.cancel();
-    }
-    if let Some(servers) = parent_servers {
-        servers.shutdown().await;
-    }
-    if let Some(handle) = auth_proxy_supervisor {
-        handle.abort();
-    }
     tracing::info!("Shutdown complete");
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Vertical slice functions
-// ---------------------------------------------------------------------------
-
-/// Cluster slice: LatticeCluster CRDs, cluster infra (CAPI, network policies),
-/// Cedar, cell infra (gRPC, bootstrap, auth proxy), cluster + provider controllers
-async fn run_cluster_slice(
-    client: &kube::Client,
-    config: &SharedConfig,
-) -> anyhow::Result<SliceHandle> {
-    let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
-
-    ensure_cluster_crds(client).await?;
-
-    // Register admission webhook now that CRDs exist (avoids chicken-and-egg)
-    spawn_admission_webhook_configuration(client.clone());
-
-    // cert-manager + CAPI must complete before controllers (they need CAPI to reconcile)
-    ensure_capi_infrastructure(client, Some(&*capi_installer), config).await?;
-
-    // General infra (Istio, ESO, monitoring) runs in background — needs workers first
-    let infra_handle = spawn_general_infrastructure(client.clone(), true, config.clone());
-
-    wait_for_api_ready_for::<LatticeCluster>(client).await;
-
-    let cedar = load_cedar_engine(client).await;
-
-    let self_cluster_name = config.cluster_name.clone();
-    let (parent_servers, agent_token, auth_proxy_supervisor, _route_update_tx) =
-        setup_cell_infra(client, &self_cluster_name, cedar.clone(), config).await?;
-
-    let mut controllers = controller_runner::build_cluster_controllers(
-        client.clone(),
-        self_cluster_name,
-        Some(parent_servers.clone()),
-        capi_installer,
-        config.clone(),
-    );
-    controllers.extend(controller_runner::build_cluster_provider_controllers(
-        client.clone(),
-        cedar,
-        config.clone(),
-    ));
-
-    Ok(SliceHandle {
-        controllers,
-        parent_servers: Some(parent_servers),
-        agent_token: Some(agent_token),
-        graph_auditor_token: None,
-        auth_proxy_supervisor,
-        infra_handle: Some(infra_handle),
-    })
-}
-
-/// Service slice: Service CRDs, service infra (Istio, Gateway API, ESO, Cilium),
-/// Cedar, CrdRegistry, service + provider controllers
-async fn run_service_slice(
-    client: &kube::Client,
-    graph_holder: &Arc<OnceLock<Arc<ServiceGraph>>>,
-    config: &SharedConfig,
-) -> anyhow::Result<SliceHandle> {
-    ensure_service_crds(client).await?;
-
-    // Register admission webhook now that CRDs exist (avoids chicken-and-egg)
-    spawn_admission_webhook_configuration(client.clone());
-
-    // General infra runs in background (no CAPI in service-only mode)
-    let infra_handle = spawn_general_infrastructure(client.clone(), false, config.clone());
-
-    wait_for_api_ready_for::<LatticeService>(client).await;
-
-    let cedar = load_cedar_engine(client).await;
-
-    let cluster = ClusterConfig {
-        cluster_name: config
-            .cluster_name_required()
-            .map_err(|e| anyhow::anyhow!(e))?
-            .to_string(),
-        provider_type: config.provider,
-        monitoring: MonitoringConfig {
-            enabled: config.monitoring_enabled,
-            ha: config.monitoring_ha,
-        },
-    };
-    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
-    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
-        lattice_cost::ConfigMapCostProvider::new(client.clone()),
-    ));
-
-    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha)?);
-
-    let (mut controllers, graph) = controller_runner::build_service_controllers(
-        client.clone(),
-        cluster.clone(),
-        cedar.clone(),
-        registry.clone(),
-        metrics_scraper.clone(),
-        cost_provider.clone(),
-    )
-    .await?;
-
-    let _ = graph_holder.set(graph.clone());
-
-    let graph_for_models = graph.clone();
-    let graph_for_auditor = graph.clone();
-    controllers.extend(
-        controller_runner::build_job_controllers(
-            client.clone(),
-            cluster.clone(),
-            cedar.clone(),
-            graph,
-            registry.clone(),
-            metrics_scraper.clone(),
-            cost_provider.clone(),
-        )
-        .await,
-    );
-
-    controllers.extend(
-        controller_runner::build_model_controllers(
-            client.clone(),
-            cluster,
-            cedar.clone(),
-            graph_for_models,
-            registry,
-            metrics_scraper,
-            cost_provider,
-        )
-        .await,
-    );
-
-    controllers.extend(controller_runner::build_service_provider_controllers(
-        client.clone(),
-        cedar,
-        config.clone(),
-    ));
-
-    spawn_webhook_infrastructure(client.clone());
-
-    let auditor_token = tokio_util::sync::CancellationToken::new();
-    controller_runner::spawn_graph_auditor(
-        client.clone(),
-        graph_for_auditor,
-        auditor_token.clone(),
-    );
-
-    Ok(SliceHandle {
-        controllers,
-        parent_servers: None,
-        agent_token: None,
-        graph_auditor_token: Some(auditor_token),
-        auth_proxy_supervisor: None,
-        infra_handle: Some(infra_handle),
-    })
-}
-
-/// Spawn admission webhook configuration registration in background.
-///
-/// Reads the CA PEM from the webhook TLS Secret (created by `start_webhook_server`
-/// on all pods before leader election) and applies the `ValidatingWebhookConfiguration`
-/// resource so the K8s API server routes admission requests to the webhook.
-/// Retries with backoff in case the TLS Secret hasn't been created yet.
-fn spawn_admission_webhook_configuration(client: kube::Client) {
-    tokio::spawn(async move {
-        if let Err(e) = retry_with_backoff(
-            &RetryConfig {
-                initial_delay: Duration::from_secs(2),
-                ..RetryConfig::default()
-            },
-            "ensure admission webhook configuration",
-            || async {
-                lattice_webhook::ensure_webhook_configuration(&client)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %e, "failed to register admission webhook configuration");
-        }
-    });
-}
-
-/// Spawn ESO webhook K8s infrastructure (namespace, Service, ClusterSecretStore) in background.
-///
-/// ESO pods won't schedule until workers are available (no CP toleration),
-/// so blocking would deadlock during bootstrap. The webhook HTTP server itself
-/// is started on ALL pods before leader election (see `run_controller`).
-fn spawn_webhook_infrastructure(client: kube::Client) {
-    tokio::spawn(async move {
-        if let Err(e) = retry_with_backoff(
-            &RetryConfig {
-                initial_delay: Duration::from_secs(2),
-                ..RetryConfig::default()
-            },
-            "ensure local webhook infrastructure (waiting for ESO)",
-            || async {
-                lattice_secret_provider::controller::ensure_local_webhook_infrastructure(&client)
-                    .await
-            },
-        )
-        .await
-        {
-            tracing::error!(error = %e, "failed to ensure local webhook infrastructure");
-        }
-    });
-}
-
-/// Proxy slice: auth proxy + gRPC agent server + route reconciler + CA rotation.
-/// No controllers, no CRD installation — just the networking infrastructure.
-/// Deploy as a separate pod so operator restarts don't kill proxy connections.
-async fn run_proxy_slice(
-    client: &kube::Client,
-    config: &SharedConfig,
-) -> anyhow::Result<SliceHandle> {
-    // Cedar is still needed for authorization on proxy requests
-    let cedar = load_cedar_engine(client).await;
-
-    let (parent_servers, agent_token, auth_proxy_supervisor, _route_update_tx) =
-        setup_cell_infra(client, &config.cluster_name.clone(), cedar, config).await?;
-
-    Ok(SliceHandle {
-        controllers: vec![], // No controllers in proxy mode
-        parent_servers: Some(parent_servers),
-        agent_token: Some(agent_token),
-        graph_auditor_token: None,
-        auth_proxy_supervisor,
-        infra_handle: None,
-    })
-}
-
-/// All slices: union of Cluster + Service + Provider. Same behavior as the
-/// monolithic path, but composed from the individual pieces.
-async fn run_all_slices(
-    client: &kube::Client,
-    graph_holder: &Arc<OnceLock<Arc<ServiceGraph>>>,
-    config: &SharedConfig,
-) -> anyhow::Result<SliceHandle> {
-    let capi_installer: Arc<dyn CapiInstaller> = Arc::new(NativeInstaller::new());
-
-    // 1. Install ALL CRDs (union of cluster + service modes)
-    ensure_cluster_crds(client).await?;
-    ensure_service_crds(client).await?;
-
-    // Register admission webhook now that CRDs exist (avoids chicken-and-egg)
-    spawn_admission_webhook_configuration(client.clone());
-
-    // cert-manager + CAPI must complete before controllers (they need CAPI to reconcile)
-    ensure_capi_infrastructure(client, Some(&*capi_installer), config).await?;
-
-    // General infra (Istio, ESO, monitoring) runs in background — needs workers first
-    let infra_handle = spawn_general_infrastructure(client.clone(), true, config.clone());
-
-    wait_for_api_ready_for::<LatticeCluster>(client).await;
-
-    let cedar = load_cedar_engine(client).await;
-
-    let self_cluster_name = config.cluster_name.clone();
-    let (parent_servers, agent_token, auth_proxy_supervisor, _route_update_tx) =
-        setup_cell_infra(client, &self_cluster_name, cedar.clone(), config).await?;
-
-    let mut controllers = controller_runner::build_cluster_controllers(
-        client.clone(),
-        self_cluster_name,
-        Some(parent_servers.clone()),
-        capi_installer,
-        config.clone(),
-    );
-
-    // Service controllers need provider type + monitoring from the LatticeCluster CRD
-    let cluster = ClusterConfig {
-        cluster_name: config
-            .cluster_name_required()
-            .map_err(|e| anyhow::anyhow!(e))?
-            .to_string(),
-        provider_type: controller_runner::resolve_provider_type_from_cluster(client).await,
-        monitoring: controller_runner::resolve_monitoring_from_cluster(client).await,
-    };
-    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
-    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(Arc::new(
-        lattice_cost::ConfigMapCostProvider::new(client.clone()),
-    ));
-    let metrics_scraper = Arc::new(metrics::VmMetricsScraper::new(cluster.monitoring.ha)?);
-    let (service_controllers, graph) = controller_runner::build_service_controllers(
-        client.clone(),
-        cluster.clone(),
-        cedar.clone(),
-        registry.clone(),
-        metrics_scraper.clone(),
-        cost_provider.clone(),
-    )
-    .await?;
-    controllers.extend(service_controllers);
-
-    let _ = graph_holder.set(graph.clone());
-
-    let graph_for_models = graph.clone();
-    let graph_for_auditor = graph.clone();
-    controllers.extend(
-        controller_runner::build_job_controllers(
-            client.clone(),
-            cluster.clone(),
-            cedar.clone(),
-            graph,
-            registry.clone(),
-            metrics_scraper.clone(),
-            cost_provider.clone(),
-        )
-        .await,
-    );
-
-    controllers.extend(
-        controller_runner::build_model_controllers(
-            client.clone(),
-            cluster,
-            cedar.clone(),
-            graph_for_models,
-            registry,
-            metrics_scraper,
-            cost_provider,
-        )
-        .await,
-    );
-
-    controllers.extend(controller_runner::build_all_provider_controllers(
-        client.clone(),
-        cedar,
-        config.clone(),
-    ));
-
-    spawn_webhook_infrastructure(client.clone());
-
-    let auditor_token = tokio_util::sync::CancellationToken::new();
-    controller_runner::spawn_graph_auditor(
-        client.clone(),
-        graph_for_auditor,
-        auditor_token.clone(),
-    );
-
-    Ok(SliceHandle {
-        controllers,
-        parent_servers: Some(parent_servers),
-        agent_token: Some(agent_token),
-        graph_auditor_token: Some(auditor_token),
-        auth_proxy_supervisor,
-        infra_handle: Some(infra_handle),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +697,7 @@ async fn has_parent_config(client: &kube::Client) -> bool {
 /// For leaf clusters: spawns a background `cell_activation_watcher` that polls the
 /// self-cluster CRD every 30s and promotes to cell when `parent_config` appears.
 ///
-/// Returns (parent_servers, agent_cancellation_token, auth_proxy_supervisor)
+/// Returns (parent_servers, agent_cancellation_token, auth_proxy_supervisor, route_update_tx)
 async fn setup_cell_infra(
     client: &kube::Client,
     self_cluster_name: &Option<String>,
@@ -728,7 +705,7 @@ async fn setup_cell_infra(
     config: &SharedConfig,
 ) -> anyhow::Result<(
     Arc<ParentServers<DefaultManifestGenerator>>,
-    tokio_util::sync::CancellationToken,
+    CancellationToken,
     Option<tokio::task::JoinHandle<()>>,
     Option<lattice_cell::route_reconciler::RouteUpdateSender>,
 )> {
@@ -739,8 +716,6 @@ async fn setup_cell_infra(
     let servers = Arc::new(ParentServers::new(parent_config, client).await?);
 
     // Start route reconciler on ALL clusters (not just parents).
-    // Watches local LatticeServices with advertise: true, merges with child routes.
-    // On leaf clusters the child channel is unused but the local watcher still runs.
     let (route_update_tx, all_routes_rx) = match self_cluster_name.as_ref() {
         Some(name) => {
             let (tx, rx) = lattice_cell::route_reconciler::spawn_route_reconciler(
@@ -753,7 +728,7 @@ async fn setup_cell_infra(
     };
 
     // Start agent connection to parent (if we have one)
-    let agent_token = tokio_util::sync::CancellationToken::new();
+    let agent_token = CancellationToken::new();
     if let Some(ref name) = self_cluster_name {
         let client = client.clone();
         let name = name.clone();
@@ -821,10 +796,6 @@ async fn setup_cell_infra(
     Ok((servers, agent_token, auth_proxy_supervisor, route_update_tx))
 }
 
-/// Activate cell infrastructure: start servers, auth proxy, CA rotation, and crash recovery.
-///
-/// Shared by both immediate cell activation (in `setup_cell_infra`) and deferred
-/// promotion (in `cell_activation_watcher`).
 /// Parameters for activating cell services.
 struct CellActivationParams {
     extra_sans: Vec<String>,
@@ -833,6 +804,7 @@ struct CellActivationParams {
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
 }
 
+/// Activate cell infrastructure: start servers, auth proxy, CA rotation, and crash recovery.
 async fn activate_cell_services(
     client: &kube::Client,
     servers: &Arc<ParentServers<DefaultManifestGenerator>>,
@@ -874,13 +846,6 @@ async fn activate_cell_services(
 }
 
 /// Background task that watches for `parent_config` to appear on the self-cluster CRD.
-///
-/// When promotion is detected (parent_config added), this function:
-/// - Creates the LB Service
-/// - Waits for the LB address
-/// - Starts cell servers with the LB address as a TLS SAN
-/// - Starts auth proxy and CA rotation
-/// - Runs crash recovery (re-register existing clusters)
 async fn cell_activation_watcher(
     client: kube::Client,
     self_cluster_name: String,
@@ -894,12 +859,10 @@ async fn cell_activation_watcher(
     };
 
     loop {
-        // Already running — done
         if servers.is_running() {
             return;
         }
 
-        // Read self-cluster CRD
         let clusters: Api<LatticeCluster> = Api::all(client.clone());
         let cluster = match clusters.get(&self_cluster_name).await {
             Ok(c) => c,
@@ -915,11 +878,9 @@ async fn cell_activation_watcher(
             continue;
         };
 
-        // parent_config found — promote to cell
         tracing::info!("parent_config detected, promoting to cell...");
         let provider_type = cluster.spec.provider.provider_type();
 
-        // Create LB Service
         if let Err(e) = ensure_cell_service_exists(
             &client,
             pc.bootstrap_port,
@@ -934,17 +895,18 @@ async fn cell_activation_watcher(
             continue;
         }
 
-        // Wait for LB address
         let lb_address = loop {
             match discover_cell_host(&client).await {
                 Ok(Some(host)) => break host,
                 Ok(None) => {
                     tracing::debug!("Waiting for cell LoadBalancer address...");
-                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL).await;
+                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL)
+                        .await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to discover cell host, retrying");
-                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL).await;
+                    tokio::time::sleep(LOAD_BALANCER_POLL_INTERVAL)
+                        .await;
                 }
             }
         };
@@ -953,8 +915,6 @@ async fn cell_activation_watcher(
         let extra_sans = vec![lb_address];
         let cluster_name = Some(self_cluster_name.clone());
 
-        // Store the proxy handle so it lives as long as this task —
-        // dropping it would shut down the proxy immediately.
         let _proxy_handle = match activate_cell_services(
             &client,
             &servers,
@@ -977,24 +937,58 @@ async fn cell_activation_watcher(
         };
 
         tracing::info!("Cell infrastructure activated (cluster promoted to parent)");
-        // Keep the proxy handle alive for the lifetime of this task.
-        // The proxy task runs independently but needs the handle alive
-        // so graceful_shutdown can be called if needed in the future.
-        // This task suspends here forever — the process exit handles cleanup.
         std::future::pending::<()>().await;
     }
 }
 
+/// Spawn admission webhook configuration registration in background.
+fn spawn_admission_webhook_configuration(client: kube::Client) {
+    tokio::spawn(async move {
+        if let Err(e) = retry_with_backoff(
+            &RetryConfig {
+                initial_delay: Duration::from_secs(2),
+                ..RetryConfig::default()
+            },
+            "ensure admission webhook configuration",
+            || async {
+                lattice_webhook::ensure_webhook_configuration(&client)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %e, "failed to register admission webhook configuration");
+        }
+    });
+}
+
+/// Spawn ESO webhook K8s infrastructure (namespace, Service, ClusterSecretStore) in background.
+fn spawn_webhook_infrastructure(client: kube::Client) {
+    tokio::spawn(async move {
+        if let Err(e) = retry_with_backoff(
+            &RetryConfig {
+                initial_delay: Duration::from_secs(2),
+                ..RetryConfig::default()
+            },
+            "ensure local webhook infrastructure (waiting for ESO)",
+            || async {
+                lattice_secret_provider::controller::ensure_local_webhook_infrastructure(&client)
+                    .await
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %e, "failed to ensure local webhook infrastructure");
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
-// Health, auth proxy, and watcher functions (unchanged)
+// Health, auth proxy, and watcher functions
 // ---------------------------------------------------------------------------
 
 /// Start the health check server for Kubernetes probes
-///
-/// Runs on all pods:
-/// - `/healthz` - liveness probe (process alive)
-/// - `/readyz` - readiness probe (ready to become leader or already leading)
-/// - `/metrics` - Prometheus scrape endpoint (all OpenTelemetry metrics)
 fn start_health_server(
     prom_registry: Option<prometheus::Registry>,
     graph_holder: Arc<OnceLock<Arc<ServiceGraph>>>,
@@ -1084,11 +1078,6 @@ fn start_health_server(
 }
 
 /// Start the auth proxy server for authenticated cluster access
-///
-/// The auth proxy provides:
-/// - ServiceAccount token authentication (via TokenReview API)
-/// - Cedar policy authorization
-/// - Routing to local or child cluster K8s APIs
 async fn start_auth_proxy(
     client: &kube::Client,
     parent_servers: Arc<ParentServers<DefaultManifestGenerator>>,
@@ -1097,22 +1086,15 @@ async fn start_auth_proxy(
     cedar: Arc<PolicyEngine>,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    // Get cluster name (default to "unknown")
     let cluster_name = cluster_name
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Accept both the custom "lattice-proxy" audience (used by TokenRequest
-    // tokens like istiod's) and the default K8s API audience (used by
-    // Secret-based admin tokens). The audiences list is passed in the
-    // TokenReview spec so the API server validates against these instead
-    // of its own default audience.
     let sa_validator = Arc::new(SaValidator::new(client.clone()).with_audiences(vec![
         lattice_common::kube_utils::PROXY_TOKEN_AUDIENCE.to_string(),
         "https://kubernetes.default.svc.cluster.local".to_string(),
     ]));
 
-    // Try to load OIDC provider from CRD
     let oidc_validator = match oidc_from_crd(client).await {
         Ok(v) => {
             tracing::info!(issuer = %v.config().issuer_url, "OIDC authentication enabled");
@@ -1124,14 +1106,11 @@ async fn start_auth_proxy(
         }
     };
 
-    // Create auth chain with OIDC (if available) + SA fallback
     let auth_chain = Arc::new(match oidc_validator {
         Some(oidc) => AuthChain::new(oidc, sa_validator),
         None => AuthChain::sa_only(sa_validator),
     });
 
-    // Generate server certificate and get CA cert for kubeconfig generation
-    // Include LB address in SANs if available (for external access)
     let ca_bundle = parent_servers.ca_bundle().read().await;
     let cell_dns = lattice_svc_dns(CELL_SERVICE_NAME);
     let mut sans: Vec<&str> = vec!["localhost", "127.0.0.1", &cell_dns];
@@ -1147,7 +1126,6 @@ async fn start_auth_proxy(
     let ca_cert_pem = ca_bundle.trust_bundle_pem();
     drop(ca_bundle);
 
-    // Create server config
     let addr: SocketAddr = match format!("0.0.0.0:{}", DEFAULT_AUTH_PROXY_PORT).parse() {
         Ok(a) => a,
         Err(e) => {
@@ -1156,12 +1134,9 @@ async fn start_auth_proxy(
         }
     };
 
-    // Use LB address for base_url if available (for external kubeconfig generation)
-    // Fall back to internal service DNS if no LB
     let base_host = extra_sans.first().map(|s| s.as_str()).unwrap_or(&cell_dns);
     let base_url = format!("https://{}:{}", base_host, DEFAULT_AUTH_PROXY_PORT);
 
-    // Clone values needed for peer route sync
     let proxy_ca_cert = ca_cert_pem.clone();
     let peer_proxy_url = base_url.clone();
 
@@ -1175,31 +1150,22 @@ async fn start_auth_proxy(
         base_url,
     };
 
-    // Create backend from cell registries
     let subtree = parent_servers.subtree_registry();
     let agent_registry = parent_servers.agent_registry();
     let backend = Arc::new(CellProxyBackend::new(subtree, agent_registry));
 
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
 
-    // Start remote secret controller for Istio multi-cluster discovery.
-    // Uses direct API server kubeconfig for local child clusters.
     controller_runner::spawn_remote_secret_controller(client.clone());
 
-    // Enable peer route sync: the gRPC server will push sibling/parent routes
-    // to connected children using the external auth proxy URL.
     if let Some(rx) = all_routes_rx {
         parent_servers
             .set_peer_config(peer_proxy_url, proxy_ca_cert, rx)
             .await;
     }
 
-    // Start OIDCProvider watcher to reload OIDC config when CRDs change
     start_oidc_provider_watcher(client.clone(), auth_chain.clone());
 
-    // Start with supervised restart — if the HTTPS listener crashes, restart
-    // with capped exponential backoff. The operator and cluster self-management
-    // continue regardless of proxy state.
     let proxy_handle = match lattice_api::start_server(
         config.clone(),
         auth_chain.clone(),
@@ -1215,19 +1181,14 @@ async fn start_auth_proxy(
         }
     };
 
-    // Spawn supervisor that restarts on crash
     let supervisor = tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(30);
 
-        // Wait for initial proxy to exit (without triggering shutdown)
         proxy_handle.wait().await;
 
         loop {
-            tracing::warn!(
-                restart_in = ?backoff,
-                "Auth proxy exited, restarting..."
-            );
+            tracing::warn!(restart_in = ?backoff, "Auth proxy exited, restarting...");
             tokio::time::sleep(backoff).await;
 
             match lattice_api::start_server(
@@ -1252,19 +1213,14 @@ async fn start_auth_proxy(
         }
     });
 
-    // Return the supervisor handle. On shutdown, abort it.
     Some(supervisor)
 }
 
 /// Start a background task to watch for OIDCProvider CRD changes and reload the OIDC validator.
-///
-/// On any change (create/update/delete), re-loads from CRD. If no providers remain,
-/// clears OIDC so SA auth is the only active validator.
 fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>) {
     tokio::spawn(async move {
         let api: Api<OIDCProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-        // Use a shorter timeout than client's read_timeout to prevent "body read timed out"
         let watcher_config = watcher::Config::default().timeout(25);
         let watcher = watcher::watcher(api, watcher_config);
         let mut watcher = std::pin::pin!(watcher);
@@ -1305,10 +1261,6 @@ fn start_oidc_provider_watcher(client: kube::Client, auth_chain: Arc<AuthChain>)
 }
 
 /// Report the currently running operator image in `status.latticeImage`.
-///
-/// Reads the `lattice-operator` Deployment image and patches the self-cluster's
-/// LatticeCluster status so the image is visible immediately on startup,
-/// even before the first reconcile loop.
 async fn report_running_image(client: &kube::Client, cluster_name: &str) {
     use k8s_openapi::api::apps::v1::Deployment;
 

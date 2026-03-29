@@ -16,6 +16,7 @@ lattice-infra = { workspace = true }
 lattice-secret-provider = { workspace = true }
 lattice-volcano = { workspace = true }
 lattice-workload = { workspace = true }
+lattice-quota = { workspace = true }
 lattice-tetragon = { workspace = true }
 lattice-cost = { workspace = true }
 

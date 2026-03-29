@@ -140,6 +140,7 @@ pub struct ServiceCompiler<'a> {
     monitoring: MonitoringConfig,
     extension_phases: &'a [Arc<dyn CompilerPhase>],
     eso_content_hash: String,
+    quota_budget: Option<lattice_quota::QuotaBudget>,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -166,6 +167,7 @@ impl<'a> ServiceCompiler<'a> {
             monitoring,
             extension_phases: &[],
             eso_content_hash: String::new(),
+            quota_budget: None,
         }
     }
 
@@ -181,6 +183,12 @@ impl<'a> ServiceCompiler<'a> {
     /// Set the ESO content hash for triggering rollouts on secret rotation.
     pub fn with_eso_content_hash(mut self, hash: String) -> Self {
         self.eso_content_hash = hash;
+        self
+    }
+
+    /// Set quota budget for enforcement during compilation.
+    pub fn with_quota_budget(mut self, budget: lattice_quota::QuotaBudget) -> Self {
+        self.quota_budget = Some(budget);
         self
     }
 
@@ -235,6 +243,10 @@ impl<'a> ServiceCompiler<'a> {
         .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)
         .with_ingress(service.spec.ingress.clone())
         .with_eso_content_hash(self.eso_content_hash.clone());
+
+        if let Some(ref budget) = self.quota_budget {
+            compiler = compiler.with_quota_budget(budget.clone(), service.spec.replicas);
+        }
 
         if service.spec.topology.is_some() {
             compiler = compiler.with_topology();
