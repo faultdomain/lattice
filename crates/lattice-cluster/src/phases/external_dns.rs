@@ -4,7 +4,8 @@
 //! by a LatticeCluster. External-dns watches Services/Ingresses and creates DNS
 //! records in the configured provider.
 
-use kube::api::{Api, Patch, PatchParams};
+use k8s_openapi::api::core::v1::Secret;
+use kube::api::{Api, ObjectMeta, Patch, PatchParams};
 use kube::{Client, ResourceExt};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
@@ -64,8 +65,22 @@ pub async fn reconcile_external_dns(
         };
 
         let resolved_secret_ref = provider.k8s_secret_ref();
-        let manifests =
-            build_external_dns_manifests(&provider.spec, provider_name, &cluster_name, resolved_secret_ref.as_ref());
+
+        // Sync credentials into the external-dns namespace if needed.
+        // For manual mode, the secret lives in lattice-system but the pod
+        // runs in external-dns — secretKeyRef only resolves same-namespace.
+        if let Some(ref secret_ref) = resolved_secret_ref {
+            if secret_ref.namespace != EXTERNAL_DNS_NAMESPACE {
+                sync_secret_to_namespace(client, secret_ref, EXTERNAL_DNS_NAMESPACE).await?;
+            }
+        }
+
+        let manifests = build_external_dns_manifests(
+            &provider.spec,
+            provider_name,
+            &cluster_name,
+            resolved_secret_ref.as_ref(),
+        );
 
         for manifest in &manifests {
             apply_manifest(client, manifest).await?;
@@ -128,6 +143,60 @@ async fn apply_manifest(client: &Client, manifest: &Value) -> Result<(), Error> 
             )));
         }
     }
+
+    Ok(())
+}
+
+/// Copy a Secret from its source namespace into the target namespace.
+///
+/// Uses SSA so the reconciler owns the synced copy. The secret data and type
+/// are copied; metadata is replaced with the target namespace.
+async fn sync_secret_to_namespace(
+    client: &Client,
+    source_ref: &SecretRef,
+    target_namespace: &str,
+) -> Result<(), Error> {
+    let source_api: Api<Secret> = Api::namespaced(client.clone(), &source_ref.namespace);
+    let source = source_api.get(&source_ref.name).await.map_err(|e| {
+        Error::internal(format!(
+            "failed to read credentials secret '{}/{}': {e}",
+            source_ref.namespace, source_ref.name
+        ))
+    })?;
+
+    let target_api: Api<Secret> = Api::namespaced(client.clone(), target_namespace);
+    let synced = Secret {
+        metadata: ObjectMeta {
+            name: Some(source_ref.name.clone()),
+            namespace: Some(target_namespace.to_string()),
+            ..Default::default()
+        },
+        type_: source.type_.clone(),
+        data: source.data.clone(),
+        string_data: source.string_data.clone(),
+        ..Default::default()
+    };
+
+    target_api
+        .patch(
+            &source_ref.name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Apply(&synced),
+        )
+        .await
+        .map_err(|e| {
+            Error::internal(format!(
+                "failed to sync secret '{}' to namespace '{}': {e}",
+                source_ref.name, target_namespace
+            ))
+        })?;
+
+    debug!(
+        secret = %source_ref.name,
+        from = %source_ref.namespace,
+        to = %target_namespace,
+        "Synced credentials secret to external-dns namespace"
+    );
 
     Ok(())
 }
