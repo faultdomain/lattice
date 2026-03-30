@@ -863,6 +863,36 @@ impl ResourceSpec {
         self.id.as_deref()
     }
 
+    /// Create a secret ResourceSpec for testing.
+    ///
+    /// Shorthand for building a `type: secret` ResourceSpec with the given
+    /// remote key and provider. Use in tests only.
+    pub fn test_secret(remote_key: &str, provider: &str) -> Self {
+        Self {
+            type_: ResourceType::Secret,
+            id: Some(remote_key.to_string()),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Create a secret ResourceSpec for testing with explicit keys.
+    pub fn test_secret_with_keys(remote_key: &str, provider: &str, keys: &[&str]) -> Self {
+        Self {
+            type_: ResourceType::Secret,
+            id: Some(remote_key.to_string()),
+            params: ResourceParams::Secret(SecretParams {
+                provider: provider.to_string(),
+                keys: Some(keys.iter().map(|k| k.to_string()).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     /// Get the K8s Secret name that will be created by ESO for this secret resource
     pub fn secret_k8s_name(&self, service_name: &str, resource_name: &str) -> Option<String> {
         if !self.type_.is_secret() {

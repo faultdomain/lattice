@@ -191,17 +191,6 @@ mod tests {
     use lattice_secret_provider::eso::{build_external_secret, build_templated_external_secret};
     use std::collections::BTreeMap;
 
-    fn eso_credentials(remote_key: &str, provider: &str) -> ResourceSpec {
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(remote_key.to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: provider.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
 
     fn sample_provider(provider_type: InfraProviderType) -> InfraProvider {
         let (name, region) = match provider_type {
@@ -215,7 +204,7 @@ mod tests {
         let credentials = if provider_type == InfraProviderType::Docker {
             None
         } else {
-            Some(eso_credentials(&format!("infra/{name}"), "lattice-local"))
+            Some(ResourceSpec::test_secret(&format!("infra/{name}"), "lattice-local"))
         };
 
         InfraProvider::new(

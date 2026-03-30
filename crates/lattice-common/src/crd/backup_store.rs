@@ -4,11 +4,13 @@
 //! It translates to a single Velero BackupStorageLocation resource.
 //! Storage concerns are fully separated from scheduling and scope.
 
-use kube::CustomResource;
+use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::types::Condition;
+use super::types::{Condition, SecretRef};
+use super::workload::resources::ResourceSpec;
+use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// Storage provider type for backup destinations
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -90,9 +92,11 @@ pub struct BackupStorageSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_provider_ref: Option<String>,
 
-    /// Direct reference to a Kubernetes secret with credentials
+    /// ESO-managed credential source for backup storage.
+    /// The controller creates an ExternalSecret that syncs credentials
+    /// from a ClusterSecretStore into a Velero-compatible secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_secret_ref: Option<String>,
+    pub credentials: Option<ResourceSpec>,
 }
 
 /// Phase of a BackupStore
@@ -172,6 +176,24 @@ pub struct BackupStoreSpec {
     pub storage: BackupStorageSpec,
 }
 
+impl BackupStore {
+    /// Resolve the K8s Secret containing backup storage credentials.
+    ///
+    /// Returns a synthetic ref pointing to the ESO-synced secret
+    /// `{name}-credentials` in `lattice-system`. Returns `None` if
+    /// no credentials are configured.
+    pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
+        if self.spec.storage.credentials.is_some() {
+            Some(SecretRef {
+                name: format!("{}-credentials", self.name_any()),
+                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,7 +236,11 @@ storage:
     bucket: backups
     endpoint: "http://minio.minio-system.svc:9000"
     forcePathStyle: true
-  credentialsSecretRef: minio-creds
+  credentials:
+    type: secret
+    id: backup/minio-creds
+    params:
+      provider: lattice-local
 "#,
         );
 
@@ -229,6 +255,7 @@ storage:
             Some("http://minio.minio-system.svc:9000".to_string())
         );
         assert_eq!(s3.force_path_style, Some(true));
+        assert!(spec.storage.credentials.is_some());
     }
 
     #[test]

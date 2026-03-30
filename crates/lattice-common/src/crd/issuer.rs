@@ -4,11 +4,13 @@
 //! operator reconciles into cert-manager ClusterIssuer resources. Supports
 //! ACME, CA, self-signed, and Vault PKI.
 
-use kube::CustomResource;
+use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::SecretRef;
+use super::workload::resources::ResourceSpec;
+use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// CertIssuer defines a certificate issuer configuration.
 ///
@@ -107,9 +109,9 @@ pub struct AcmeIssuerSpec {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CaIssuerSpec {
-    /// Reference to a secret containing the CA certificate and private key.
-    /// The secret must contain `tls.crt` and `tls.key` entries.
-    pub secret_ref: SecretRef,
+    /// ESO-managed credential source for the CA certificate and private key.
+    /// The synced secret must contain `tls.crt` and `tls.key` entries.
+    pub credentials: ResourceSpec,
 }
 
 /// Vault PKI issuer configuration
@@ -122,8 +124,8 @@ pub struct VaultIssuerSpec {
     /// PKI mount path (e.g., "pki")
     pub path: String,
 
-    /// Reference to a secret containing Vault authentication credentials
-    pub auth_secret_ref: SecretRef,
+    /// ESO-managed credential source for Vault authentication
+    pub auth_credentials: ResourceSpec,
 }
 
 /// DNS configuration for a cluster.
@@ -183,6 +185,27 @@ impl std::fmt::Display for CertIssuerPhase {
     }
 }
 
+impl CertIssuer {
+    /// Resolve the K8s Secret for this issuer's credentials.
+    ///
+    /// Returns a synthetic ref pointing to the ESO-synced secret
+    /// `{name}-credentials` in `lattice-system`. Returns `None` for
+    /// types that don't need credentials (SelfSigned, ACME HTTP-01).
+    pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
+        match self.spec.type_ {
+            IssuerType::Ca => Some(SecretRef {
+                name: format!("{}-credentials", self.name_any()),
+                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+            }),
+            IssuerType::Vault => Some(SecretRef {
+                name: format!("{}-credentials", self.name_any()),
+                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl CertIssuerSpec {
     /// Validate the issuer spec. Returns an error if invalid.
     pub fn validate(&self) -> Result<(), crate::Error> {
@@ -222,6 +245,11 @@ impl CertIssuerSpec {
                 if vault.path.is_empty() {
                     return Err(crate::Error::validation("vault.path cannot be empty"));
                 }
+                if !vault.auth_credentials.type_.is_secret() {
+                    return Err(crate::Error::validation(
+                        "vault.authCredentials must be type: secret",
+                    ));
+                }
             }
             IssuerType::SelfSigned => {
                 // No config needed — but reject extraneous fields
@@ -257,11 +285,14 @@ impl DnsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crd::{ResourceParams, ResourceType, SecretParams};
+    use crate::crd::workload::resources::ResourceSpec;
     use std::collections::BTreeMap;
 
     fn make_issuer(name: &str, spec: CertIssuerSpec) -> CertIssuer {
         CertIssuer::new(name, spec)
     }
+
 
     // =========================================================================
     // ACME Issuer Tests
@@ -383,10 +414,7 @@ mod tests {
                 type_: IssuerType::Ca,
                 acme: None,
                 ca: Some(CaIssuerSpec {
-                    secret_ref: SecretRef {
-                        name: "internal-ca".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    credentials: ResourceSpec::test_secret("pki/internal-ca", "lattice-local"),
                 }),
                 vault: None,
             },
@@ -460,10 +488,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: "pki".to_string(),
-                    auth_secret_ref: SecretRef {
-                        name: "vault-auth".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
                 }),
             },
         );
@@ -495,10 +520,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: String::new(),
                     path: "pki".to_string(),
-                    auth_secret_ref: SecretRef {
-                        name: "vault-auth".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
                 }),
             },
         );
@@ -516,10 +538,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: String::new(),
-                    auth_secret_ref: SecretRef {
-                        name: "vault-auth".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
                 }),
             },
         );

@@ -25,11 +25,13 @@ pub struct ResolvedDnsProvider<'a> {
 
 /// Build a cert-manager ClusterIssuer JSON value from a CertIssuer spec.
 ///
+/// `issuer_secret_name` is the ESO-synced secret name from `CertIssuer.k8s_secret_ref()`.
 /// For ACME DNS-01 challenges, `dns_provider` must be provided when the
 /// CertIssuer spec references a DNSProvider via `acme.dnsProviderRef`.
 pub fn build_cluster_issuer(
     name: &str,
     spec: &CertIssuerSpec,
+    issuer_secret_name: Option<&str>,
     dns_provider: Option<&ResolvedDnsProvider<'_>>,
 ) -> Result<Value, String> {
     let issuer_name = format!("lattice-{}", name);
@@ -37,13 +39,14 @@ pub fn build_cluster_issuer(
     let cm_spec = match spec.type_ {
         IssuerType::SelfSigned => json!({ "selfSigned": {} }),
         IssuerType::Ca => {
-            let ca = spec
-                .ca
+            spec.ca
                 .as_ref()
                 .ok_or("ca config required when type is ca")?;
+            let secret_name = issuer_secret_name
+                .ok_or("CA issuer requires ESO credentials")?;
             json!({
                 "ca": {
-                    "secretName": ca.secret_ref.name
+                    "secretName": secret_name
                 }
             })
         }
@@ -82,6 +85,8 @@ pub fn build_cluster_issuer(
                 .vault
                 .as_ref()
                 .ok_or("vault config required when type is vault")?;
+            let secret_name = issuer_secret_name
+                .ok_or("Vault issuer requires ESO credentials")?;
             json!({
                 "vault": {
                     "server": vault.server,
@@ -90,7 +95,7 @@ pub fn build_cluster_issuer(
                         "kubernetes": {
                             "role": "cert-manager",
                             "secretRef": {
-                                "name": vault.auth_secret_ref.name,
+                                "name": secret_name,
                                 "key": "token"
                             }
                         }
@@ -223,8 +228,9 @@ mod tests {
     use super::*;
     use lattice_common::crd::{
         AcmeIssuerSpec, AzureDnsConfig, CaIssuerSpec, CloudflareConfig, GoogleDnsConfig,
-        PiholeConfig, Route53Config, SecretRef, VaultIssuerSpec,
+        PiholeConfig, ResourceParams, ResourceType, Route53Config, SecretParams, VaultIssuerSpec,
     };
+    use lattice_common::crd::workload::resources::ResourceSpec;
 
     fn assert_metadata(val: &Value, expected_name: &str) {
         assert_eq!(val["apiVersion"], "cert-manager.io/v1");
@@ -244,7 +250,7 @@ mod tests {
             ca: None,
             vault: None,
         };
-        let result = build_cluster_issuer("dev", &spec, None).unwrap();
+        let result = build_cluster_issuer("dev", &spec, None, None).unwrap();
         assert_metadata(&result, "lattice-dev");
         assert_eq!(result["spec"]["selfSigned"], json!({}));
     }
@@ -255,16 +261,13 @@ mod tests {
             type_: IssuerType::Ca,
             acme: None,
             ca: Some(CaIssuerSpec {
-                secret_ref: SecretRef {
-                    name: "my-ca-secret".to_string(),
-                    namespace: "lattice-system".to_string(),
-                },
+                credentials: ResourceSpec::test_secret("pki/internal-ca", "lattice-local"),
             }),
             vault: None,
         };
-        let result = build_cluster_issuer("internal", &spec, None).unwrap();
+        let result = build_cluster_issuer("internal", &spec, Some("internal-credentials"), None).unwrap();
         assert_metadata(&result, "lattice-internal");
-        assert_eq!(result["spec"]["ca"]["secretName"], "my-ca-secret");
+        assert_eq!(result["spec"]["ca"]["secretName"], "internal-credentials");
     }
 
     #[test]
@@ -275,7 +278,7 @@ mod tests {
             ca: None,
             vault: None,
         };
-        let err = build_cluster_issuer("bad", &spec, None).unwrap_err();
+        let err = build_cluster_issuer("bad", &spec, None, None).unwrap_err();
         assert!(err.contains("ca config required"));
     }
 
@@ -291,7 +294,7 @@ mod tests {
             ca: None,
             vault: None,
         };
-        let result = build_cluster_issuer("public", &spec, None).unwrap();
+        let result = build_cluster_issuer("public", &spec, None, None).unwrap();
         assert_metadata(&result, "lattice-public");
 
         let acme = &result["spec"]["acme"];
@@ -317,7 +320,7 @@ mod tests {
             ca: None,
             vault: None,
         };
-        let err = build_cluster_issuer("bad", &spec, None).unwrap_err();
+        let err = build_cluster_issuer("bad", &spec, None, None).unwrap_err();
         assert!(err.contains("acme config required"));
     }
 
@@ -345,7 +348,7 @@ mod tests {
             secret_name: Some("route53-prod-credentials"),
         };
 
-        let result = build_cluster_issuer("public", &spec, Some(&dp)).unwrap();
+        let result = build_cluster_issuer("public", &spec, None, Some(&dp)).unwrap();
         assert_metadata(&result, "lattice-public");
 
         let solver = &result["spec"]["acme"]["solvers"][0];
@@ -379,7 +382,7 @@ mod tests {
             vault: None,
         };
 
-        let result = build_cluster_issuer("cf", &spec, Some(&dp)).unwrap();
+        let result = build_cluster_issuer("cf", &spec, None, Some(&dp)).unwrap();
         let solver = &result["spec"]["acme"]["solvers"][0];
         let cf = &solver["dns01"]["cloudflare"];
         assert_eq!(cf["apiTokenSecretRef"]["name"], "cf-prod-credentials");
@@ -420,7 +423,7 @@ mod tests {
             vault: None,
         };
 
-        let result = build_cluster_issuer("gcp", &spec, Some(&dp)).unwrap();
+        let result = build_cluster_issuer("gcp", &spec, None, Some(&dp)).unwrap();
         let solver = &result["spec"]["acme"]["solvers"][0];
         let gdns = &solver["dns01"]["cloudDNS"];
         assert_eq!(gdns["project"], "my-project");
@@ -479,7 +482,7 @@ mod tests {
             vault: None,
         };
 
-        let result = build_cluster_issuer("az", &spec, Some(&dp)).unwrap();
+        let result = build_cluster_issuer("az", &spec, None, Some(&dp)).unwrap();
         let solver = &result["spec"]["acme"]["solvers"][0];
         let az = &solver["dns01"]["azureDNS"];
         assert_eq!(az["subscriptionID"], "sub-123");
@@ -527,7 +530,7 @@ mod tests {
             ca: None,
             vault: None,
         };
-        let err = build_cluster_issuer("bad", &spec, None).unwrap_err();
+        let err = build_cluster_issuer("bad", &spec, None, None).unwrap_err();
         assert!(err.contains("dns_provider must be provided"));
     }
 
@@ -540,13 +543,10 @@ mod tests {
             vault: Some(VaultIssuerSpec {
                 server: "https://vault.example.com".to_string(),
                 path: "pki/issue/my-role".to_string(),
-                auth_secret_ref: SecretRef {
-                    name: "vault-token".to_string(),
-                    namespace: "lattice-system".to_string(),
-                },
+                auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
             }),
         };
-        let result = build_cluster_issuer("vault-pki", &spec, None).unwrap();
+        let result = build_cluster_issuer("vault-pki", &spec, Some("vault-pki-credentials"), None).unwrap();
         assert_metadata(&result, "lattice-vault-pki");
 
         let vault = &result["spec"]["vault"];
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(vault["auth"]["kubernetes"]["role"], "cert-manager");
         assert_eq!(
             vault["auth"]["kubernetes"]["secretRef"]["name"],
-            "vault-token"
+            "vault-pki-credentials"
         );
         assert_eq!(vault["auth"]["kubernetes"]["secretRef"]["key"], "token");
     }
@@ -568,7 +568,7 @@ mod tests {
             ca: None,
             vault: None,
         };
-        let err = build_cluster_issuer("bad", &spec, None).unwrap_err();
+        let err = build_cluster_issuer("bad", &spec, None, None).unwrap_err();
         assert!(err.contains("vault config required"));
     }
 

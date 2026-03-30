@@ -11,7 +11,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Secret;
 use kube::api::Api;
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -24,6 +23,9 @@ use lattice_common::status_check;
 use lattice_common::{
     ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
     REQUEUE_SUCCESS_SECS,
+};
+use lattice_secret_provider::credentials::{
+    reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
 };
 
 const FIELD_MANAGER: &str = "lattice-cert-issuer-controller";
@@ -135,21 +137,19 @@ async fn validate_issuer(client: &Client, issuer: &CertIssuer) -> Result<(), Rec
                 ReconcileError::Validation("ca config required when type is ca".into())
             })?;
 
-            let secret_ns = &ca.secret_ref.namespace;
-            let secret_name = &ca.secret_ref.name;
+            reconcile_eso_credentials(
+                client,
+                &ProviderCredentialConfig {
+                    provider_name: &issuer.name_any(),
+                    credentials: &ca.credentials,
+                    credential_data: None,
+                    target_namespace: LATTICE_SYSTEM_NAMESPACE,
+                    field_manager: FIELD_MANAGER,
+                },
+            )
+            .await?;
 
-            let secrets: Api<Secret> = Api::namespaced(client.clone(), secret_ns);
-            secrets
-                .get(secret_name)
-                .await
-                .map_err(ReconcileError::Kube)?;
-
-            debug!(
-                cert_issuer = %issuer.name_any(),
-                secret = %secret_name,
-                namespace = %secret_ns,
-                "CA secret verified"
-            );
+            debug!(cert_issuer = %issuer.name_any(), "CA credentials reconciled via ESO");
             Ok(())
         }
         IssuerType::Vault => {
@@ -157,21 +157,19 @@ async fn validate_issuer(client: &Client, issuer: &CertIssuer) -> Result<(), Rec
                 ReconcileError::Validation("vault config required when type is vault".into())
             })?;
 
-            let secret_ns = &vault.auth_secret_ref.namespace;
-            let secret_name = &vault.auth_secret_ref.name;
+            reconcile_eso_credentials(
+                client,
+                &ProviderCredentialConfig {
+                    provider_name: &issuer.name_any(),
+                    credentials: &vault.auth_credentials,
+                    credential_data: None,
+                    target_namespace: LATTICE_SYSTEM_NAMESPACE,
+                    field_manager: FIELD_MANAGER,
+                },
+            )
+            .await?;
 
-            let secrets: Api<Secret> = Api::namespaced(client.clone(), secret_ns);
-            secrets
-                .get(secret_name)
-                .await
-                .map_err(ReconcileError::Kube)?;
-
-            debug!(
-                cert_issuer = %issuer.name_any(),
-                secret = %secret_name,
-                namespace = %secret_ns,
-                "Vault auth secret verified"
-            );
+            debug!(cert_issuer = %issuer.name_any(), "Vault auth credentials reconciled via ESO");
             Ok(())
         }
         IssuerType::SelfSigned => {
@@ -230,8 +228,10 @@ async fn update_status(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec, SecretRef, VaultIssuerSpec,
+        AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec, ResourceParams, ResourceType, SecretParams,
+        VaultIssuerSpec,
     };
+    use lattice_common::crd::workload::resources::ResourceSpec;
 
     // =========================================================================
     // Test Helpers
@@ -260,10 +260,7 @@ mod tests {
                 type_: IssuerType::Ca,
                 acme: None,
                 ca: Some(CaIssuerSpec {
-                    secret_ref: SecretRef {
-                        name: "internal-ca".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    credentials: ResourceSpec::test_secret("pki/internal-ca", "lattice-local"),
                 }),
                 vault: None,
             },
@@ -280,10 +277,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: "pki".to_string(),
-                    auth_secret_ref: SecretRef {
-                        name: "vault-auth".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
                 }),
             },
         )
@@ -418,10 +412,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: String::new(),
                     path: "pki".to_string(),
-                    auth_secret_ref: SecretRef {
-                        name: "vault-auth".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
                 }),
             },
         );
@@ -439,10 +430,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: String::new(),
-                    auth_secret_ref: SecretRef {
-                        name: "vault-auth".to_string(),
-                        namespace: "lattice-system".to_string(),
-                    },
+                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
                 }),
             },
         );

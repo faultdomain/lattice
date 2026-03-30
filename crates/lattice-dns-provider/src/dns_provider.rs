@@ -178,18 +178,6 @@ mod tests {
         ResourceParams, ResourceSpec, ResourceType, Route53Config, SecretParams,
     };
 
-    fn eso_credentials(remote_key: &str, provider: &str, keys: &[&str]) -> ResourceSpec {
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(remote_key.to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: provider.to_string(),
-                keys: Some(keys.iter().map(|k| k.to_string()).collect()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
 
     fn sample_pihole_provider() -> DNSProvider {
         DNSProvider::new(
@@ -207,7 +195,7 @@ mod tests {
         DNSProvider::new(
             "route53-prod",
             DNSProviderSpec {
-                credentials: Some(eso_credentials(
+                credentials: Some(ResourceSpec::test_secret_with_keys(
                     "dns/aws/prod",
                     "vault-prod",
                     &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
@@ -225,7 +213,7 @@ mod tests {
         DNSProvider::new(
             "cloudflare-prod",
             DNSProviderSpec {
-                credentials: Some(eso_credentials(
+                credentials: Some(ResourceSpec::test_secret_with_keys(
                     "dns/cloudflare/prod",
                     "vault-prod",
                     &["CF_API_TOKEN"],
@@ -432,7 +420,7 @@ mod tests {
         let provider = DNSProvider::new(
             "google-prod",
             DNSProviderSpec {
-                credentials: Some(eso_credentials("dns/gcp/prod", "vault-prod", &["key.json"])),
+                credentials: Some(ResourceSpec::test_secret_with_keys("dns/gcp/prod", "vault-prod", &["key.json"])),
                 google: Some(GoogleDnsConfig {
                     project: "my-project".to_string(),
                 }),
@@ -447,7 +435,7 @@ mod tests {
         let provider = DNSProvider::new(
             "azure-prod",
             DNSProviderSpec {
-                credentials: Some(eso_credentials("dns/azure/prod", "vault-prod", &["azure.json"])),
+                credentials: Some(ResourceSpec::test_secret_with_keys("dns/azure/prod", "vault-prod", &["azure.json"])),
                 azure: Some(AzureDnsConfig {
                     subscription_id: "sub-123".to_string(),
                     resource_group: "rg-dns".to_string(),

@@ -342,20 +342,7 @@ impl DNSProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ResourceParams, ResourceType, SecretParams};
-
-    fn eso_credentials(remote_key: &str, provider: &str, keys: &[&str]) -> ResourceSpec {
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(remote_key.to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: provider.to_string(),
-                keys: Some(keys.iter().map(|k| k.to_string()).collect()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
+    use crate::crd::workload::resources::ResourceSpec;
 
     #[test]
     fn pihole_provider_yaml() {
@@ -536,7 +523,7 @@ spec:
         let provider = DNSProvider::new(
             "route53-prod",
             DNSProviderSpec {
-                credentials: Some(eso_credentials("dns/aws/prod", "vault-prod", &["key"])),
+                credentials: Some(ResourceSpec::test_secret_with_keys("dns/aws/prod", "vault-prod", &["key"])),
                 ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
             },
         );

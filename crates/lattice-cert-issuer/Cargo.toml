@@ -7,6 +7,7 @@ description = "CertIssuer controller for Lattice - validates certificate issuer 
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-secret-provider = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

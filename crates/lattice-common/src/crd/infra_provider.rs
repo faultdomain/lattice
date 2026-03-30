@@ -235,19 +235,7 @@ impl InfraProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ResourceParams, ResourceType, SecretParams};
-
-    fn eso_credentials(remote_key: &str, provider: &str) -> ResourceSpec {
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(remote_key.to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: provider.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
+    use crate::crd::workload::resources::ResourceSpec;
 
     #[test]
     fn aws_provider_yaml() {
@@ -309,7 +297,7 @@ spec:
             InfraProviderSpec {
                 provider_type: InfraProviderType::AWS,
                 region: None,
-                credentials: Some(eso_credentials("infra/aws/prod", "vault-prod")),
+                credentials: Some(ResourceSpec::test_secret("infra/aws/prod", "vault-prod")),
                 credential_data: None,
                 aws: None,
                 proxmox: None,

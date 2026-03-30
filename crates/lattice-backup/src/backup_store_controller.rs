@@ -220,7 +220,7 @@ mod tests {
                     gcs: None,
                     azure: None,
                     cloud_provider_ref: Some("aws-prod".to_string()),
-                    credentials_secret_ref: None,
+                    credentials: None,
                 },
             },
             status: None,
