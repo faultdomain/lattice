@@ -37,9 +37,6 @@ const AUTOSCALE_POOL: &str = "autoscale";
 /// Timeout for node provisioning (CAPI + VM boot + kubelet join)
 const NODE_PROVISION_TIMEOUT: Duration = Duration::from_secs(900); // 15 min
 
-/// Timeout for scale-down after workload removal
-const SCALE_DOWN_TIMEOUT: Duration = Duration::from_secs(600); // 10 min
-
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 // =============================================================================
@@ -367,75 +364,6 @@ spec:
     Ok(())
 }
 
-// =============================================================================
-// Test: Scale down to zero
-// =============================================================================
-
-async fn test_scale_down_to_zero(kubeconfig: &str) -> Result<(), String> {
-    info!("[NodeAutoscaling] Testing scale-down to zero...");
-
-    // Delete the trigger pod — the node should become unneeded
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "pod",
-        "trigger-scaleup",
-        "-n",
-        TEST_NAMESPACE,
-        "--grace-period=0",
-        "--force",
-    ])
-    .await;
-
-    info!("[NodeAutoscaling] Trigger pod deleted, waiting for scale-down...");
-
-    // Wait for the MachineDeployment to scale back to 0
-    let cluster_name = get_workload_cluster_name();
-    let md_name = format!("{}-pool-{}", cluster_name, AUTOSCALE_POOL);
-    let capi_ns = format!("capi-{}", cluster_name);
-    let kc = kubeconfig.to_string();
-
-    wait_for_condition(
-        &format!("MachineDeployment '{}' to scale to 0", md_name),
-        SCALE_DOWN_TIMEOUT,
-        POLL_INTERVAL,
-        || {
-            let kc = kc.clone();
-            let md_name = md_name.clone();
-            let capi_ns = capi_ns.clone();
-            async move {
-                let replicas = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    "machinedeployment",
-                    &md_name,
-                    "-n",
-                    &capi_ns,
-                    "-o",
-                    "jsonpath={.spec.replicas}",
-                ])
-                .await;
-                match &replicas {
-                    Ok(r) if r.trim() == "0" => Ok(true),
-                    Ok(r) => {
-                        info!(
-                            "[NodeAutoscaling] MD replicas still at {}, waiting...",
-                            r.trim()
-                        );
-                        Ok(false)
-                    }
-                    Err(_) => Ok(false),
-                }
-            }
-        },
-    )
-    .await?;
-
-    info!("[NodeAutoscaling] Scale-down to zero complete");
-    Ok(())
-}
 
 // =============================================================================
 // Cleanup
