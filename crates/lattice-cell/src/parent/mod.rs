@@ -462,6 +462,9 @@ pub async fn load_or_create_ca(
                 metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
                     name: Some(CA_SECRET.to_string()),
                     namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                    labels: Some(BTreeMap::from([
+                        ("lattice.dev/distribute".to_string(), "true".to_string()),
+                    ])),
                     ..Default::default()
                 },
                 type_: Some("Opaque".to_string()),
@@ -531,6 +534,9 @@ async fn persist_ca_bundle(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(CA_SECRET.to_string()),
             namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+            labels: Some(BTreeMap::from([
+                ("lattice.dev/distribute".to_string(), "true".to_string()),
+            ])),
             ..Default::default()
         },
         type_: Some("Opaque".to_string()),
