@@ -77,6 +77,9 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock versions.toml ./
 COPY crates ./crates
 COPY scripts/runtime ./scripts
+# Pre-downloaded artifacts so build.rs skips network downloads
+COPY test-charts ./test-charts
+COPY test-providers ./test-providers
 
 # Build with BuildKit cache mounts for incremental compilation
 # - registry/git: caches downloaded crates
