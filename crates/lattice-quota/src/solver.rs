@@ -411,14 +411,11 @@ fn clamp_plan(
         Some(pool_min) => pool_min.max(quota_min),
         None => quota_min,
     };
+    // Pool spec max is the autoscaler ceiling — quotas raise min but don't
+    // reduce max. The autoscaler only scales to meet pending pods anyway;
+    // capping max to 0 just prevents it from ever working.
     let max_nodes = match spec.max {
-        Some(pool_max) => {
-            if quota_max == 0 {
-                pool_max // No quota demand — preserve pool spec max
-            } else {
-                pool_max.min(quota_max).max(min_nodes)
-            }
-        }
+        Some(pool_max) => pool_max.max(min_nodes),
         None => quota_max.max(min_nodes),
     };
     PoolCapacityPlan {
