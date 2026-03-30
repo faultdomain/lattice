@@ -228,7 +228,7 @@ mod tests {
     use super::*;
     use lattice_common::crd::{
         AcmeIssuerSpec, AzureDnsConfig, CaIssuerSpec, CloudflareConfig, GoogleDnsConfig,
-        PiholeConfig, ResourceParams, ResourceType, Route53Config, SecretParams, VaultIssuerSpec,
+        PiholeConfig, Route53Config, VaultIssuerSpec,
     };
     use lattice_common::crd::workload::resources::ResourceSpec;
 

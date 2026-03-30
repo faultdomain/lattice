@@ -228,7 +228,7 @@ async fn update_status(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec, ResourceParams, ResourceType, SecretParams,
+        AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec,
         VaultIssuerSpec,
     };
     use lattice_common::crd::workload::resources::ResourceSpec;

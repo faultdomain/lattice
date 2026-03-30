@@ -285,7 +285,7 @@ impl DnsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ResourceParams, ResourceType, SecretParams};
+    
     use crate::crd::workload::resources::ResourceSpec;
     use std::collections::BTreeMap;
 

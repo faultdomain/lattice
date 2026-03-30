@@ -56,9 +56,10 @@ pub fn resolve_mirrors(
         }
         covered_upstreams.insert(mirror.upstream.clone());
         let creds = mirror
-            .credentials_ref
+            .credentials
             .as_ref()
-            .and_then(|r| resolved_credentials.get(&r.name))
+            .and_then(|r| r.id.as_ref())
+            .and_then(|id| resolved_credentials.get(id))
             .cloned();
         let (host, plain_http) = parse_mirror_scheme(&mirror.mirror);
         result.push(ResolvedMirror {
@@ -72,9 +73,10 @@ pub fn resolve_mirrors(
     // Pass 2: expand @infra for build-time registries not already covered
     if let Some(infra) = infra_entry {
         let infra_creds = infra
-            .credentials_ref
+            .credentials
             .as_ref()
-            .and_then(|r| resolved_credentials.get(&r.name))
+            .and_then(|r| r.id.as_ref())
+            .and_then(|id| resolved_credentials.get(id))
             .cloned();
         let (infra_host, infra_plain_http) = parse_mirror_scheme(&infra.mirror);
         for reg in lattice_infra::upstream_registries() {
@@ -93,9 +95,10 @@ pub fn resolve_mirrors(
     // Pass 3: * catch-all for ANY registry not already covered
     if let Some(wildcard) = wildcard_entry {
         let wildcard_creds = wildcard
-            .credentials_ref
+            .credentials
             .as_ref()
-            .and_then(|r| resolved_credentials.get(&r.name))
+            .and_then(|r| r.id.as_ref())
+            .and_then(|id| resolved_credentials.get(id))
             .cloned();
         let (wildcard_host, wildcard_plain_http) = parse_mirror_scheme(&wildcard.mirror);
 
@@ -368,7 +371,7 @@ mod tests {
         let spec_mirrors = vec![RegistryMirror {
             upstream: "docker.io".to_string(),
             mirror: "harbor.corp.com".to_string(),
-            credentials_ref: None,
+            credentials: None,
         }];
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
 
@@ -382,7 +385,7 @@ mod tests {
         let spec_mirrors = vec![RegistryMirror {
             upstream: "@infra".to_string(),
             mirror: "harbor.corp.com".to_string(),
-            credentials_ref: None,
+            credentials: None,
         }];
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
 
@@ -405,7 +408,7 @@ mod tests {
         let spec_mirrors = vec![RegistryMirror {
             upstream: "*".to_string(),
             mirror: "wildcard-mirror.com".to_string(),
-            credentials_ref: None,
+            credentials: None,
         }];
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
 
@@ -431,12 +434,12 @@ mod tests {
             RegistryMirror {
                 upstream: "docker.io".to_string(),
                 mirror: "docker-specific.com".to_string(),
-                credentials_ref: None,
+                credentials: None,
             },
             RegistryMirror {
                 upstream: "@infra".to_string(),
                 mirror: "harbor.corp.com".to_string(),
-                credentials_ref: None,
+                credentials: None,
             },
         ];
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
@@ -459,12 +462,12 @@ mod tests {
             RegistryMirror {
                 upstream: "@infra".to_string(),
                 mirror: "infra-mirror.com".to_string(),
-                credentials_ref: None,
+                credentials: None,
             },
             RegistryMirror {
                 upstream: "*".to_string(),
                 mirror: "wildcard-mirror.com".to_string(),
-                credentials_ref: None,
+                credentials: None,
             },
         ];
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
@@ -484,21 +487,18 @@ mod tests {
 
     #[test]
     fn resolve_mirrors_credentials_propagation() {
-        use lattice_common::crd::SecretRef;
+        use lattice_common::crd::workload::resources::ResourceSpec;
 
         let spec_mirrors = vec![
             RegistryMirror {
                 upstream: "docker.io".to_string(),
                 mirror: "harbor.corp.com".to_string(),
-                credentials_ref: Some(SecretRef {
-                    name: "harbor-creds".to_string(),
-                    namespace: "lattice-system".to_string(),
-                }),
+                credentials: Some(ResourceSpec::test_secret("harbor-creds", "lattice-local")),
             },
             RegistryMirror {
                 upstream: "*".to_string(),
                 mirror: "default-mirror.com".to_string(),
-                credentials_ref: None,
+                credentials: None,
             },
         ];
 
@@ -583,7 +583,7 @@ mod tests {
         let spec_mirrors = vec![RegistryMirror {
             upstream: "docker.io".to_string(),
             mirror: "http://localhost:5555".to_string(),
-            credentials_ref: None,
+            credentials: None,
         }];
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
 
@@ -597,7 +597,7 @@ mod tests {
         let spec_mirrors = vec![RegistryMirror {
             upstream: "@infra".to_string(),
             mirror: "http://localhost:5555".to_string(),
-            credentials_ref: None,
+            credentials: None,
         }];
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
 

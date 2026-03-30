@@ -967,10 +967,12 @@ impl Installer {
 
     /// Apply registry mirror credential secrets from companion files on disk.
     ///
-    /// For each `credentialsRef` in `spec.registryMirrors`, looks for a Secret YAML
-    /// file named `{secret_name}.yaml` (or `.yml`) in the same directory as the
-    /// LatticeCluster config file. Applies matching secrets to the bootstrap cluster
-    /// so the controller can read them when reconciling the LatticeCluster.
+    /// Apply registry mirror credential secrets to `lattice-secrets` namespace.
+    ///
+    /// For each mirror with `credentials`, looks for a Secret YAML file named
+    /// `{remote_key}.yaml` (or `.yml`) in the config directory. The secret is
+    /// applied to `lattice-secrets` so the cluster controller can read it
+    /// when embedding credentials in CAPI manifests.
     async fn apply_registry_mirror_credentials(&self, client: &Client) -> Result<()> {
         let mirrors = match &self.cluster.spec.registry_mirrors {
             Some(m) if !m.is_empty() => m,
@@ -979,16 +981,16 @@ impl Installer {
 
         let mut applied = std::collections::HashSet::new();
         for mirror in mirrors {
-            let secret_ref = match &mirror.credentials_ref {
-                Some(r) => r,
+            let remote_key = match mirror.credentials.as_ref().and_then(|r| r.id.as_ref()) {
+                Some(key) => key,
                 None => continue,
             };
 
-            if !applied.insert(secret_ref.name.clone()) {
-                continue; // Already applied this secret
+            if !applied.insert(remote_key.clone()) {
+                continue;
             }
 
-            let secret_path = self.find_secret_file(&secret_ref.name).await?;
+            let secret_path = self.find_secret_file(remote_key).await?;
             let secret_yaml = tokio::fs::read_to_string(&secret_path).await.map_err(|e| {
                 Error::validation(format!(
                     "Failed to read registry credential secret file {}: {}",
@@ -1014,12 +1016,18 @@ impl Installer {
                     ))
                 })?;
 
-            // Override namespace to lattice-system so the controller can find it
-            secret.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+            // Apply to lattice-secrets as an ESO source secret
+            secret.metadata.namespace =
+                Some(lattice_common::LOCAL_SECRETS_NAMESPACE.to_string());
+            let labels = secret.metadata.labels.get_or_insert_with(Default::default);
+            labels.insert(
+                "lattice.dev/secret-source".to_string(),
+                "true".to_string(),
+            );
 
             info!(
                 "Applying registry credential secret '{}' from {}",
-                secret_ref.name,
+                remote_key,
                 secret_path.display()
             );
             Self::apply_credentials_secret(client, &secret).await?;

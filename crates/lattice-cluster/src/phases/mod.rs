@@ -300,7 +300,7 @@ pub async fn generate_capi_manifests(
     if let Some(ref mirrors) = cluster.spec.registry_mirrors {
         if !mirrors.is_empty() {
             let resolved_credentials =
-                resolve_registry_credentials(mirrors, ctx.kube.as_ref()).await?;
+                resolve_registry_credentials(mirrors, ctx).await?;
             bootstrap.registry_mirrors =
                 lattice_capi::provider::registry::resolve_mirrors(mirrors, &resolved_credentials);
         }
@@ -321,37 +321,77 @@ pub async fn generate_capi_manifests(
     provider.generate_capi_manifests(cluster, &bootstrap).await
 }
 
-/// Read registry mirror credential secrets and return name→content map.
+/// Reconcile ESO credentials for registry mirrors and read the synced secrets.
+///
+/// Creates ExternalSecrets in `lattice-system` for each mirror's credentials,
+/// then reads the ESO-synced secrets to extract `.dockerconfigjson` content.
+/// Returns a map of remote_key → dockerconfigjson content.
 async fn resolve_registry_credentials(
     mirrors: &[lattice_common::crd::RegistryMirror],
-    kube: &dyn crate::controller::KubeClient,
+    ctx: &crate::controller::Context,
 ) -> Result<std::collections::HashMap<String, String>, Error> {
+    use lattice_secret_provider::credentials::{
+        reconcile_credentials, ProviderCredentialConfig,
+    };
+
     let mut creds = std::collections::HashMap::new();
+    let mut reconciled = std::collections::HashSet::new();
+
     for mirror in mirrors {
-        if let Some(ref secret_ref) = mirror.credentials_ref {
-            if creds.contains_key(&secret_ref.name) {
-                continue;
-            }
-            let secret = kube
-                .get_secret(&secret_ref.name, &secret_ref.namespace)
-                .await
-                .map_err(|e| {
-                    Error::internal(format!(
-                        "failed to read registry credential secret {}/{}: {}",
-                        secret_ref.namespace, secret_ref.name, e
-                    ))
-                })?;
-            if let Some(secret) = secret {
-                if let Some(data) = secret.data {
-                    if let Some(dockerconfig) = data.get(".dockerconfigjson") {
-                        let content = String::from_utf8(dockerconfig.0.clone()).map_err(|e| {
-                            Error::internal(format!(
-                                "invalid UTF-8 in registry credential secret {}: {}",
-                                secret_ref.name, e
-                            ))
-                        })?;
-                        creds.insert(secret_ref.name.clone(), content);
-                    }
+        let resource = match &mirror.credentials {
+            Some(r) => r,
+            None => continue,
+        };
+        let remote_key = match resource.id.as_ref() {
+            Some(key) => key.clone(),
+            None => continue,
+        };
+        if !reconciled.insert(remote_key.clone()) {
+            continue;
+        }
+
+        let provider_name = format!("registry-{}", remote_key.replace('/', "-"));
+
+        // Create ExternalSecret in lattice-system
+        if let Some(ref client) = ctx.client {
+            reconcile_credentials(
+                client,
+                &ProviderCredentialConfig {
+                    provider_name: &provider_name,
+                    credentials: resource,
+                    credential_data: None,
+                    target_namespace: lattice_common::LATTICE_SYSTEM_NAMESPACE,
+                    field_manager: "lattice-cluster-controller",
+                },
+            )
+            .await
+            .map_err(|e| {
+                Error::internal(format!(
+                    "failed to reconcile registry credential ESO for '{remote_key}': {e}",
+                ))
+            })?;
+        }
+
+        // Read the ESO-synced secret
+        let secret_name = format!("{provider_name}-credentials");
+        let secret = ctx
+            .kube
+            .get_secret(&secret_name, lattice_common::LATTICE_SYSTEM_NAMESPACE)
+            .await
+            .map_err(|e| {
+                Error::internal(format!(
+                    "failed to read ESO-synced registry credential '{secret_name}': {e}",
+                ))
+            })?;
+        if let Some(secret) = secret {
+            if let Some(data) = secret.data {
+                if let Some(dockerconfig) = data.get(".dockerconfigjson") {
+                    let content = String::from_utf8(dockerconfig.0.clone()).map_err(|e| {
+                        Error::internal(format!(
+                            "invalid UTF-8 in registry credential '{secret_name}': {e}",
+                        ))
+                    })?;
+                    creds.insert(remote_key, content);
                 }
             }
         }

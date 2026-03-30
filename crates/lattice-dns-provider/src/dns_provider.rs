@@ -174,8 +174,7 @@ async fn update_status(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        AzureDnsConfig, CloudflareConfig, DNSProviderSpec, GoogleDnsConfig, PiholeConfig,
-        ResourceParams, ResourceSpec, ResourceType, Route53Config, SecretParams,
+        AzureDnsConfig, CloudflareConfig, DNSProviderSpec, GoogleDnsConfig, PiholeConfig, ResourceSpec, Route53Config,
     };
 
 

@@ -738,12 +738,10 @@ pub struct RegistryMirror {
     /// (e.g., a local pull-through cache). Defaults to HTTPS when no scheme is given.
     /// Examples: `"harbor.corp.com"`, `"http://localhost:5555"`.
     pub mirror: String,
-    /// Optional reference to a Secret containing registry credentials.
-    /// The secret must contain a `.dockerconfigjson` key.
-    /// On the installer, the secret is read from the local cluster.
-    /// On child clusters, it's expected in lattice-system.
+    /// ESO-managed credential source for registry authentication.
+    /// The synced secret must contain a `.dockerconfigjson` key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_ref: Option<SecretRef>,
+    pub credentials: Option<super::workload::resources::ResourceSpec>,
 }
 
 // =============================================================================

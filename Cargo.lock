@@ -2828,6 +2828,7 @@ dependencies = [
  "lattice-infra",
  "lattice-move",
  "lattice-proto",
+ "lattice-secret-provider",
  "minijinja",
  "mockall",
  "parking_lot",
