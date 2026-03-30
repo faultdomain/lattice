@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
+use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, EXTERNAL_DNS_NAMESPACE, VELERO_NAMESPACE};
 
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
@@ -41,8 +41,11 @@ pub const CAPI: &[&str] = &[
     "capi-ipam-in-cluster-system",
 ];
 
+/// Infrastructure addons (no MeshMember, need API server access)
+pub const ADDONS: &[&str] = &[EXTERNAL_DNS_NAMESPACE, VELERO_NAMESPACE];
+
 /// All namespace slices that are excluded from default-deny.
-const ALL_SLICES: &[&[&str]] = &[CORE, CNI, MESH, CERT, CAPI];
+const ALL_SLICES: &[&[&str]] = &[CORE, CNI, MESH, CERT, CAPI, ADDONS];
 
 /// Get all system namespaces that should be excluded from default-deny policies.
 ///
@@ -92,6 +95,8 @@ mod tests {
         assert!(namespaces.contains(&"istio-system"));
         assert!(namespaces.contains(&"cert-manager"));
         assert!(namespaces.contains(&"capi-system"));
+        assert!(namespaces.contains(&"external-dns"));
+        assert!(namespaces.contains(&"velero"));
     }
 
     #[test]
