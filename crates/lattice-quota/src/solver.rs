@@ -412,7 +412,13 @@ fn clamp_plan(
         None => quota_min,
     };
     let max_nodes = match spec.max {
-        Some(pool_max) => pool_max.min(quota_max).max(min_nodes),
+        Some(pool_max) => {
+            if quota_max == 0 {
+                pool_max // No quota demand — preserve pool spec max
+            } else {
+                pool_max.min(quota_max).max(min_nodes)
+            }
+        }
         None => quota_max.max(min_nodes),
     };
     PoolCapacityPlan {
