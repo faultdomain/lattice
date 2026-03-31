@@ -246,8 +246,13 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
                     match setup_cell_infra(&client, &self_cluster_name, cedar, &config).await {
-                        Ok((servers, _agent_token, _auth_proxy, _route_tx)) => {
-                            let _ = parent_servers_tx.send(Some(servers));
+                        Ok((servers, agent_token, _auth_proxy, _route_tx)) => {
+                            let _ = parent_servers_tx.send(Some(servers.clone()));
+                            // Guard ensures cell infra is torn down on leadership loss.
+                            // Dropping a CancellationToken does NOT cancel it — the
+                            // guard explicitly cancels and shuts down servers so agents
+                            // reconnect to the new leader's gRPC server.
+                            let _guard = CellInfraGuard { agent_token, servers };
                             std::future::pending::<()>().await;
                         }
                         Err(e) => {
@@ -590,6 +595,27 @@ async fn has_parent_config(client: &kube::Client) -> bool {
         lattice_common::ParentConnectionConfig::read(client).await,
         Ok(Some(_))
     )
+}
+
+/// Drop guard that tears down cell infrastructure on leadership loss.
+///
+/// When the leader controller drops this future (leadership lost), the guard
+/// cancels the agent token and shuts down the gRPC server. This forces
+/// connected agents to reconnect to the new leader's fresh subtree registry.
+struct CellInfraGuard {
+    agent_token: CancellationToken,
+    servers: Arc<ParentServers<DefaultManifestGenerator>>,
+}
+
+impl Drop for CellInfraGuard {
+    fn drop(&mut self) {
+        tracing::info!("Cell leadership lost, shutting down cell infrastructure");
+        self.agent_token.cancel();
+        let servers = self.servers.clone();
+        tokio::spawn(async move {
+            servers.shutdown().await;
+        });
+    }
 }
 
 /// Set up cell infrastructure (gRPC servers, agent connection, auth proxy)
