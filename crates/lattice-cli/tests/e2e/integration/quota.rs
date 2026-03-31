@@ -19,7 +19,7 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml, delete_namespace, ensure_fresh_namespace, get_workload_cluster_name, run_kubectl,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl,
     wait_for_condition, wait_for_resource_phase, with_diagnostics, DiagnosticContext,
     DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
@@ -41,7 +41,6 @@ pub async fn run_quota_tests(kubeconfig: &str) -> Result<(), String> {
         test_quota_lifecycle(kubeconfig).await?;
         test_quota_enforcement(kubeconfig).await?;
         test_quota_exceeded_phase(kubeconfig).await?;
-        test_quota_md_annotations(kubeconfig).await?;
 
         cleanup(kubeconfig).await;
 
@@ -89,7 +88,7 @@ metadata:
   namespace: lattice-system
 spec:
   principal: 'Lattice::Group::"quota-test-team"'
-  soft:
+  limits:
     cpu: "4"
     memory: "8Gi"
   maxPerWorkload:
@@ -341,178 +340,6 @@ spec:
     ])
     .await;
 
-    Ok(())
-}
-
-// =============================================================================
-// Test: Quota solver patches MachineDeployment min/max annotations
-// =============================================================================
-
-async fn test_quota_md_annotations(kubeconfig: &str) -> Result<(), String> {
-    info!("[Quota] Testing MachineDeployment annotation patching...");
-
-    let cluster_name = get_workload_cluster_name();
-    let capi_ns = format!("capi-{}", cluster_name);
-
-    // Create a quota with hard limits — this should drive min_nodes on MDs
-    let hard_quota_yaml = r#"
-apiVersion: lattice.dev/v1alpha1
-kind: LatticeQuota
-metadata:
-  name: test-hard-quota
-  namespace: lattice-system
-spec:
-  principal: 'Lattice::Group::"quota-test-team"'
-  soft:
-    cpu: "32"
-    memory: "64Gi"
-  hard:
-    cpu: "16"
-    memory: "32Gi"
-"#;
-
-    apply_yaml(kubeconfig, hard_quota_yaml).await?;
-
-    // Wait for the quota to become Active
-    wait_for_resource_phase(
-        kubeconfig,
-        "latticequota",
-        LATTICE_NS,
-        "test-hard-quota",
-        "Active",
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-
-    // Wait for the solver to patch MachineDeployment annotations.
-    // The quota controller runs capacity reconciliation after each reconcile,
-    // which patches the min/max annotations on MachineDeployments.
-    let kc = kubeconfig.to_string();
-    let ns = capi_ns.clone();
-    wait_for_condition(
-        "MachineDeployment autoscaler annotations to be patched",
-        Duration::from_secs(120),
-        POLL_INTERVAL,
-        || {
-            let kc = kc.clone();
-            let ns = ns.clone();
-            let cluster = cluster_name.clone();
-            async move {
-                // List MachineDeployments in the CAPI namespace
-                let mds = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "machinedeployment",
-                    "-n", &ns,
-                    "-l", &format!("cluster.x-k8s.io/cluster-name={}", cluster),
-                    "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.annotations}{\"\\n\"}{end}",
-                ]).await;
-
-                match mds {
-                    Ok(output) => {
-                        let has_annotations = output
-                            .lines()
-                            .any(|line| {
-                                line.contains("autoscaler-node-group-min-size")
-                                    || line.contains("autoscaler-node-group-max-size")
-                            });
-                        if has_annotations {
-                            info!("[Quota] MachineDeployment annotations detected");
-                        }
-                        Ok(has_annotations)
-                    }
-                    Err(_) => Ok(false),
-                }
-            }
-        },
-    )
-    .await?;
-
-    // Verify specific annotation values on the default pool
-    let default_md = format!("{}-pool-default", cluster_name);
-    let min_annotation = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "machinedeployment",
-        &default_md,
-        "-n",
-        &capi_ns,
-        "-o",
-        "jsonpath={.metadata.annotations.cluster\\.x-k8s\\.io/cluster-api-autoscaler-node-group-min-size}",
-    ])
-    .await;
-
-    let max_annotation = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "machinedeployment",
-        &default_md,
-        "-n",
-        &capi_ns,
-        "-o",
-        "jsonpath={.metadata.annotations.cluster\\.x-k8s\\.io/cluster-api-autoscaler-node-group-max-size}",
-    ])
-    .await;
-
-    match (min_annotation, max_annotation) {
-        (Ok(min), Ok(max)) => {
-            let min_val = min.trim();
-            let max_val = max.trim();
-
-            if min_val.is_empty() && max_val.is_empty() {
-                // Pool may not have capacity info — skip annotation check
-                info!("[Quota] Default pool has no autoscaler annotations (may lack capacity hints)");
-            } else {
-                info!(
-                    "[Quota] MachineDeployment '{}' annotations: min={}, max={}",
-                    default_md, min_val, max_val
-                );
-
-                // min should be > 0 (hard quota demands capacity)
-                if !min_val.is_empty() {
-                    let min_nodes: u32 = min_val
-                        .parse()
-                        .map_err(|e| format!("invalid min annotation: {e}"))?;
-                    if min_nodes == 0 {
-                        return Err(
-                            "min-size annotation is 0 despite hard quota — solver should have computed > 0"
-                                .to_string(),
-                        );
-                    }
-                }
-
-                // max should be >= min
-                if !min_val.is_empty() && !max_val.is_empty() {
-                    let min_nodes: u32 = min_val.parse().unwrap_or(0);
-                    let max_nodes: u32 = max_val.parse().unwrap_or(0);
-                    if max_nodes < min_nodes {
-                        return Err(format!(
-                            "max-size ({max_nodes}) < min-size ({min_nodes}) — invariant violation"
-                        ));
-                    }
-                }
-            }
-        }
-        _ => {
-            info!("[Quota] Could not read MD annotations (pool may not exist yet)");
-        }
-    }
-
-    // Clean up the hard quota
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "latticequota",
-        "test-hard-quota",
-        "-n",
-        LATTICE_NS,
-        "--ignore-not-found",
-    ])
-    .await;
-
-    info!("[Quota] MachineDeployment annotation test passed");
     Ok(())
 }
 

@@ -83,8 +83,7 @@ mod tests {
             "test",
             LatticeQuotaSpec {
                 principal: "Lattice::Group::\"team\"".to_string(),
-                soft: BTreeMap::from([("cpu".to_string(), "10".to_string())]),
-                hard: None,
+                limits: BTreeMap::from([("cpu".to_string(), "10".to_string())]),
                 max_per_workload: None,
                 enabled: true,
             },
@@ -116,8 +115,7 @@ mod tests {
             "test",
             LatticeQuotaSpec {
                 principal: "Lattice::Group::\"team\"".to_string(),
-                soft: BTreeMap::from([("cpu".to_string(), "20".to_string())]),
-                hard: None,
+                limits: BTreeMap::from([("cpu".to_string(), "20".to_string())]),
                 max_per_workload: None,
                 enabled: true,
             },

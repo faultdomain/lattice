@@ -80,7 +80,7 @@ pub async fn reconcile(
     };
 
     let (usage, workload_count, ns_labels) = compute_usage(client, &principal).await;
-    let exceeded = is_exceeded(&usage, &quota.spec.soft);
+    let exceeded = is_exceeded(&usage, &quota.spec.limits);
     let phase = if exceeded {
         LatticeQuotaPhase::Exceeded
     } else {
@@ -246,9 +246,9 @@ async fn compute_usage(
     acc.into_result()
 }
 
-fn is_exceeded(usage: &WorkloadResourceDemand, soft: &BTreeMap<String, String>) -> bool {
+fn is_exceeded(usage: &WorkloadResourceDemand, limits: &BTreeMap<String, String>) -> bool {
     let raw = usage.to_raw_map();
-    for (key, limit_str) in soft {
+    for (key, limit_str) in limits {
         if let Ok(limit) = parse_resource_by_key(key, limit_str) {
             if raw.get(key.as_str()).copied().unwrap_or(0) > limit {
                 return true;

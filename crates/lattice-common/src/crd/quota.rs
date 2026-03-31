@@ -2,14 +2,8 @@
 //!
 //! A LatticeQuota defines resource consumption limits (CPU, memory, GPU) for a
 //! Cedar principal (User, Group, or Service). The quota controller tracks usage
-//! in status, and the workload compiler enforces soft limits at compile time.
-//!
-//! - **Soft limits** (required): burst ceiling. The compiler rejects workloads
-//!   that would exceed these. Sum of soft quotas tells the autoscaler the
-//!   maximum scale target.
-//! - **Hard limits** (optional): guaranteed reserved capacity. The cluster keeps
-//!   at least this much provisioned even when unused. Sum of hard quotas defines
-//!   minimum cluster compute.
+//! in status, and the workload compiler rejects deployments that would exceed
+//! the limits.
 //!
 //! Example:
 //! ```yaml
@@ -20,14 +14,10 @@
 //!   namespace: lattice-system
 //! spec:
 //!   principal: 'Lattice::Group::"ml-team"'
-//!   soft:
+//!   limits:
 //!     cpu: "128"
 //!     memory: "512Gi"
 //!     nvidia.com/gpu: "16"
-//!   hard:
-//!     cpu: "64"
-//!     memory: "256Gi"
-//!     nvidia.com/gpu: "8"
 //!   maxPerWorkload:
 //!     nvidia.com/gpu: "8"
 //! ```
@@ -62,23 +52,12 @@ pub struct LatticeQuotaSpec {
     /// Cedar principal string (e.g., `Lattice::Group::"ml-team"`)
     pub principal: String,
 
-    /// Soft resource limits — burst ceiling for the principal.
+    /// Resource limits for the principal.
     ///
     /// The compiler rejects workloads that would exceed these limits.
-    /// The sum of all soft quotas tells the autoscaler the maximum it may
-    /// need to scale to. This is the default and only required limit.
-    ///
     /// Keys are resource names: `cpu` (cores), `memory` (bytes with suffix),
     /// `nvidia.com/gpu` (count). Values are Kubernetes quantity strings.
-    pub soft: BTreeMap<String, String>,
-
-    /// Hard resource limits — guaranteed reserved capacity for the principal.
-    ///
-    /// The cluster will keep at least this much capacity provisioned even when
-    /// unused. The sum of all hard quotas defines the minimum compute the
-    /// cluster must maintain. Optional — omit for best-effort (soft-only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hard: Option<BTreeMap<String, String>>,
+    pub limits: BTreeMap<String, String>,
 
     /// Optional per-workload caps. Any single workload exceeding these is rejected
     /// regardless of total quota availability.
@@ -97,26 +76,7 @@ impl LatticeQuotaSpec {
         QuotaPrincipal::parse(&self.principal)
             .map_err(|e| crate::Error::validation(e.to_string()))?;
 
-        validate_resource_map(&self.soft, "soft")?;
-
-        if let Some(ref hard) = self.hard {
-            validate_resource_map(hard, "hard")?;
-
-            // Hard limits must not exceed soft limits
-            for (key, hard_val) in hard {
-                if let Some(soft_val) = self.soft.get(key) {
-                    let hard_parsed = parse_resource_by_key(key, hard_val)
-                        .map_err(|_| crate::Error::validation(format!("hard.{key}: invalid")))?;
-                    let soft_parsed = parse_resource_by_key(key, soft_val)
-                        .map_err(|_| crate::Error::validation(format!("soft.{key}: invalid")))?;
-                    if hard_parsed > soft_parsed {
-                        return Err(crate::Error::validation(format!(
-                            "hard.{key} ({hard_val}) exceeds soft.{key} ({soft_val})"
-                        )));
-                    }
-                }
-            }
-        }
+        validate_resource_map(&self.limits, "limits")?;
 
         if let Some(ref max) = self.max_per_workload {
             validate_resource_map(max, "maxPerWorkload")?;
@@ -143,7 +103,7 @@ pub struct LatticeQuotaStatus {
     #[serde(default)]
     pub phase: LatticeQuotaPhase,
 
-    /// Current resource usage by the principal (same keys as `spec.soft`)
+    /// Current resource usage by the principal (same keys as `spec.limits`)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub used: BTreeMap<String, String>,
 
@@ -169,7 +129,7 @@ pub enum LatticeQuotaPhase {
     Pending,
     /// Quota is active and usage is within limits
     Active,
-    /// Usage exceeds hard limits
+    /// Usage exceeds limits
     Exceeded,
     /// Quota spec is invalid
     Invalid,
@@ -395,12 +355,11 @@ mod tests {
     fn validate_valid_spec() {
         let spec = LatticeQuotaSpec {
             principal: "Lattice::Group::\"team\"".to_string(),
-            soft: BTreeMap::from([
+            limits: BTreeMap::from([
                 ("cpu".to_string(), "100".to_string()),
                 ("memory".to_string(), "512Gi".to_string()),
                 ("nvidia.com/gpu".to_string(), "16".to_string()),
             ]),
-            hard: None,
             max_per_workload: Some(BTreeMap::from([(
                 "nvidia.com/gpu".to_string(),
                 "8".to_string(),
@@ -411,35 +370,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_with_hard_within_soft() {
-        let spec = LatticeQuotaSpec {
-            principal: "Lattice::Group::\"team\"".to_string(),
-            soft: BTreeMap::from([("cpu".to_string(), "100".to_string())]),
-            hard: Some(BTreeMap::from([("cpu".to_string(), "64".to_string())])),
-            max_per_workload: None,
-            enabled: true,
-        };
-        assert!(spec.validate().is_ok());
-    }
-
-    #[test]
-    fn validate_hard_exceeds_soft() {
-        let spec = LatticeQuotaSpec {
-            principal: "Lattice::Group::\"team\"".to_string(),
-            soft: BTreeMap::from([("cpu".to_string(), "64".to_string())]),
-            hard: Some(BTreeMap::from([("cpu".to_string(), "100".to_string())])),
-            max_per_workload: None,
-            enabled: true,
-        };
-        assert!(spec.validate().is_err());
-    }
-
-    #[test]
     fn validate_bad_principal() {
         let spec = LatticeQuotaSpec {
             principal: "not-valid".to_string(),
-            soft: BTreeMap::new(),
-            hard: None,
+            limits: BTreeMap::new(),
             max_per_workload: None,
             enabled: true,
         };
@@ -450,8 +384,7 @@ mod tests {
     fn validate_bad_cpu_quantity() {
         let spec = LatticeQuotaSpec {
             principal: "Lattice::Group::\"team\"".to_string(),
-            soft: BTreeMap::from([("cpu".to_string(), "abc".to_string())]),
-            hard: None,
+            limits: BTreeMap::from([("cpu".to_string(), "abc".to_string())]),
             max_per_workload: None,
             enabled: true,
         };
@@ -462,8 +395,7 @@ mod tests {
     fn validate_bad_memory_quantity() {
         let spec = LatticeQuotaSpec {
             principal: "Lattice::Group::\"team\"".to_string(),
-            soft: BTreeMap::from([("memory".to_string(), "notmemory".to_string())]),
-            hard: None,
+            limits: BTreeMap::from([("memory".to_string(), "notmemory".to_string())]),
             max_per_workload: None,
             enabled: true,
         };
@@ -474,8 +406,7 @@ mod tests {
     fn validate_bad_gpu_quantity() {
         let spec = LatticeQuotaSpec {
             principal: "Lattice::Group::\"team\"".to_string(),
-            soft: BTreeMap::from([("nvidia.com/gpu".to_string(), "not-a-number".to_string())]),
-            hard: None,
+            limits: BTreeMap::from([("nvidia.com/gpu".to_string(), "not-a-number".to_string())]),
             max_per_workload: None,
             enabled: true,
         };
@@ -499,22 +430,17 @@ metadata:
   name: ml-team-gpu-budget
 spec:
   principal: 'Lattice::Group::"ml-team"'
-  soft:
+  limits:
     cpu: "128"
     memory: "512Gi"
     nvidia.com/gpu: "16"
-  hard:
-    cpu: "64"
-    memory: "256Gi"
-    nvidia.com/gpu: "8"
   maxPerWorkload:
     nvidia.com/gpu: "8"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let quota: LatticeQuota = serde_json::from_value(value).expect("deserialize");
         assert!(quota.spec.principal.contains("ml-team"));
-        assert_eq!(quota.spec.soft.get("cpu").unwrap(), "128");
-        assert_eq!(quota.spec.hard.as_ref().unwrap().get("cpu").unwrap(), "64");
+        assert_eq!(quota.spec.limits.get("cpu").unwrap(), "128");
         assert_eq!(
             quota
                 .spec
@@ -530,22 +456,21 @@ spec:
     }
 
     #[test]
-    fn soft_only_quota_yaml() {
+    fn minimal_quota_yaml() {
         let yaml = r#"
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeQuota
 metadata:
-  name: dev-team-soft-only
+  name: dev-team
 spec:
   principal: 'Lattice::Group::"dev-team"'
-  soft:
+  limits:
     cpu: "32"
     memory: "128Gi"
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let quota: LatticeQuota = serde_json::from_value(value).expect("deserialize");
-        assert!(quota.spec.hard.is_none());
-        assert_eq!(quota.spec.soft.get("cpu").unwrap(), "32");
+        assert_eq!(quota.spec.limits.get("cpu").unwrap(), "32");
         assert!(quota.spec.validate().is_ok());
     }
 }

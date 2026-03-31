@@ -63,14 +63,14 @@ impl QuotaBudget {
                 .cloned()
                 .unwrap_or_default();
 
-            // For each resource in the soft limits, compute remaining = soft - used
-            for (key, soft_str) in &quota.spec.soft {
-                let soft = parse_resource_by_key(key, soft_str).unwrap_or(0);
+            // For each resource in the limits, compute remaining = limit - used
+            for (key, limit_str) in &quota.spec.limits {
+                let limit = parse_resource_by_key(key, limit_str).unwrap_or(0);
                 let current = used
                     .get(key)
                     .and_then(|v| parse_resource_by_key(key, v).ok())
                     .unwrap_or(0);
-                let remaining = (soft - current).max(0);
+                let remaining = (limit - current).max(0);
 
                 // Take the tightest constraint across all matching quotas
                 let entry = budget.remaining.entry(key.clone()).or_insert(i64::MAX);
@@ -158,8 +158,7 @@ mod tests {
             "test-quota",
             LatticeQuotaSpec {
                 principal: "Lattice::Group::\"team\"".to_string(),
-                soft: BTreeMap::from([("cpu".to_string(), soft_cpu.to_string())]),
-                hard: None,
+                limits: BTreeMap::from([("cpu".to_string(), soft_cpu.to_string())]),
                 max_per_workload: max_cpu
                     .map(|v| BTreeMap::from([("cpu".to_string(), v.to_string())])),
                 enabled: true,
