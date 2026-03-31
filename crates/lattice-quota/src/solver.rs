@@ -1,20 +1,21 @@
-//! Capacity solver — translates aggregate quota demands into pool node counts.
+//! Capacity solver — translates hard quota demands into pool min_nodes.
 //!
-//! Uses LP relaxation with ceiling rounding to find the minimum-cost node
-//! allocation that satisfies all quota constraints. Solves in microseconds
-//! even with hundreds of pool types.
+//! Hard quotas guarantee reserved capacity. The solver finds the minimum-cost
+//! node allocation satisfying hard constraints and sets `min_nodes` on each
+//! pool's MachineDeployment. `max_nodes` comes from the admin-configured
+//! `spec.max` — the solver never touches it.
+//!
+//! Soft quotas are enforced at compile time (workload rejection), not at the
+//! infrastructure level. The autoscaler handles scaling within spec.max
+//! to meet pending pods.
 //!
 //! # Architecture
 //!
-//! The solver is a pipeline:
 //! 1. Build pool shapes from specs + cost rates
-//! 2. Collect constraints from demand (each resource type = one constraint)
+//! 2. Collect constraints from hard demand (each resource type = one constraint)
 //! 3. Feed constraints into the LP solver
 //! 4. Ceil fractional results to whole nodes
-//! 5. Clamp by pool spec min/max
-//!
-//! New constraint types (taints, priority classes, affinity) are added by
-//! implementing `SolverConstraint` — no changes to the core solver needed.
+//! 5. Clamp min by pool spec min, max by pool spec max
 
 use std::collections::BTreeMap;
 
@@ -201,7 +202,10 @@ impl SolverConstraint for CostBudgetConstraint {
 // Demand aggregation
 // =============================================================================
 
-/// Aggregate quota demand — sum of all quota limits.
+/// Aggregate hard quota demand — sum of all hard quota limits.
+///
+/// Only hard quotas drive infrastructure. Soft quotas are enforced at
+/// compile time (workload rejection) and don't affect node counts.
 #[derive(Clone, Debug, Default)]
 pub struct AggregateDemand {
     /// Sum of hard quota CPU (millis)
@@ -212,14 +216,6 @@ pub struct AggregateDemand {
     pub hard_gpu_count: u32,
     /// Sum of hard quota hourly cost budget (USD, 0 = no constraint)
     pub hard_cost_budget: f64,
-    /// Sum of soft quota CPU (millis)
-    pub soft_cpu_millis: i64,
-    /// Sum of soft quota memory (bytes)
-    pub soft_memory_bytes: i64,
-    /// Sum of soft quota GPUs
-    pub soft_gpu_count: u32,
-    /// Sum of soft quota hourly cost budget (USD, 0 = no constraint)
-    pub soft_cost_budget: f64,
 }
 
 impl AggregateDemand {
@@ -230,16 +226,6 @@ impl AggregateDemand {
             self.hard_memory_bytes,
             self.hard_gpu_count,
             self.hard_cost_budget,
-        )
-    }
-
-    /// Build constraint list for soft demands (burst ceiling).
-    fn soft_constraints(&self) -> Vec<Box<dyn SolverConstraint>> {
-        build_constraints(
-            self.soft_cpu_millis,
-            self.soft_memory_bytes,
-            self.soft_gpu_count,
-            self.soft_cost_budget,
         )
     }
 }
@@ -270,11 +256,6 @@ pub fn aggregate_quotas(quotas: &[LatticeQuota]) -> AggregateDemand {
             continue;
         }
 
-        demand.soft_cpu_millis += parse_quantity(&quota.spec.soft, CPU_RESOURCE);
-        demand.soft_memory_bytes += parse_quantity(&quota.spec.soft, MEMORY_RESOURCE);
-        demand.soft_gpu_count += parse_quantity(&quota.spec.soft, GPU_RESOURCE) as u32;
-        demand.soft_cost_budget += parse_cost(&quota.spec.soft);
-
         if let Some(ref hard) = quota.spec.hard {
             demand.hard_cpu_millis += parse_quantity(hard, CPU_RESOURCE);
             demand.hard_memory_bytes += parse_quantity(hard, MEMORY_RESOURCE);
@@ -290,13 +271,11 @@ pub fn aggregate_quotas(quotas: &[LatticeQuota]) -> AggregateDemand {
 // Core solver
 // =============================================================================
 
-/// Solve pool capacity plans from aggregate demand, pool specs, and cost rates.
+/// Solve pool capacity plans from hard quota demand and pool specs.
 ///
-/// Runs ILP twice:
-/// - Hard demands → min_nodes (guaranteed reserved capacity)
-/// - Soft demands → max_nodes (autoscaler ceiling)
-///
-/// Both minimize total hourly cost. Pool spec min/max clamp the result.
+/// Runs LP once for hard demands → min_nodes (guaranteed reserved capacity).
+/// max_nodes comes from pool spec.max (admin-configured ceiling).
+/// Soft quotas are enforced at compile time, not here.
 pub fn solve(
     pools: &BTreeMap<String, WorkerPoolSpec>,
     demand: &AggregateDemand,
@@ -318,15 +297,13 @@ pub fn solve(
     }
 
     let hard_solution = solve_lp(&pool_shapes, &demand.hard_constraints());
-    let soft_solution = solve_lp(&pool_shapes, &demand.soft_constraints());
 
     let plans: Vec<PoolCapacityPlan> = pool_shapes
         .iter()
         .enumerate()
         .map(|(i, (pool_id, spec, _))| {
             let quota_min = hard_solution.get(i).copied().unwrap_or(0);
-            let quota_max = soft_solution.get(i).copied().unwrap_or(0);
-            clamp_plan(pool_id, spec, quota_min, quota_max)
+            clamp_plan(pool_id, spec, quota_min)
         })
         .collect();
 
@@ -401,24 +378,9 @@ fn solve_lp(
     }
 }
 
-fn clamp_plan(
-    pool_id: &str,
-    spec: &WorkerPoolSpec,
-    quota_min: u32,
-    quota_max: u32,
-) -> PoolCapacityPlan {
-    let min_nodes = match spec.min {
-        Some(pool_min) => pool_min.max(quota_min),
-        None => quota_min,
-    };
-    let max_nodes = match spec.max {
-        // Admin configured a ceiling — respect it. The solver sets min
-        // from hard quotas; max is the admin's decision. The autoscaler
-        // only scales to meet pending pods, so pool_max is safe.
-        Some(pool_max) => pool_max.max(min_nodes),
-        // No admin ceiling — solver's demand-based max is the constraint.
-        None => quota_max.max(min_nodes),
-    };
+fn clamp_plan(pool_id: &str, spec: &WorkerPoolSpec, quota_min: u32) -> PoolCapacityPlan {
+    let min_nodes = spec.min.unwrap_or(0).max(quota_min);
+    let max_nodes = spec.max.unwrap_or(min_nodes).max(min_nodes);
     PoolCapacityPlan {
         pool_id: pool_id.to_string(),
         min_nodes,
@@ -499,52 +461,56 @@ mod tests {
     }
 
     #[test]
-    fn solve_cpu_only() {
+    fn solve_hard_sets_min() {
         let mut pools = BTreeMap::new();
-        pools.insert("compute".to_string(), cpu_pool(16, 64));
+        let mut spec = cpu_pool(16, 64);
+        spec.max = Some(10);
+        pools.insert("compute".to_string(), spec);
         let demand = AggregateDemand {
-            soft_cpu_millis: 64_000,
-            soft_memory_bytes: 128 * 1024 * 1024 * 1024,
+            hard_cpu_millis: 64_000,
+            hard_memory_bytes: 128 * 1024 * 1024 * 1024,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        assert_eq!(plans[0].max_nodes, 4);
-        assert_eq!(plans[0].min_nodes, 0);
+        assert_eq!(result.plans[0].min_nodes, 4);
+        assert_eq!(result.plans[0].max_nodes, 10);
     }
 
     #[test]
     fn solve_gpu_demand() {
         let mut pools = BTreeMap::new();
-        pools.insert("gpu".to_string(), gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM"));
-        pools.insert("compute".to_string(), cpu_pool(32, 128));
+        let mut gpu_spec = gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM");
+        gpu_spec.max = Some(4);
+        pools.insert("gpu".to_string(), gpu_spec);
+        let mut cpu_spec = cpu_pool(32, 128);
+        cpu_spec.max = Some(10);
+        pools.insert("compute".to_string(), cpu_spec);
         let demand = AggregateDemand {
-            soft_gpu_count: 16,
-            soft_cpu_millis: 100_000,
-            soft_memory_bytes: 256 * 1024 * 1024 * 1024,
+            hard_gpu_count: 16,
+            hard_cpu_millis: 100_000,
+            hard_memory_bytes: 256 * 1024 * 1024 * 1024,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        let gpu_plan = plans.iter().find(|p| p.pool_id == "gpu").unwrap();
-        assert_eq!(gpu_plan.max_nodes, 2);
-        let cpu_plan = plans.iter().find(|p| p.pool_id == "compute").unwrap();
-        assert_eq!(cpu_plan.max_nodes, 0);
+        let gpu_plan = result.plans.iter().find(|p| p.pool_id == "gpu").unwrap();
+        assert_eq!(gpu_plan.min_nodes, 2);
+        assert_eq!(gpu_plan.max_nodes, 4);
     }
 
     #[test]
-    fn solve_hard_vs_soft() {
+    fn solve_max_from_spec() {
         let mut pools = BTreeMap::new();
-        pools.insert("compute".to_string(), cpu_pool(16, 64));
+        let mut spec = cpu_pool(16, 64);
+        spec.min = Some(0);
+        spec.max = Some(8);
+        pools.insert("compute".to_string(), spec);
         let demand = AggregateDemand {
             hard_cpu_millis: 32_000,
-            soft_cpu_millis: 80_000,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        assert_eq!(plans[0].min_nodes, 2);
-        assert_eq!(plans[0].max_nodes, 5);
+        assert_eq!(result.plans[0].min_nodes, 2);
+        assert_eq!(result.plans[0].max_nodes, 8);
     }
 
     #[test]
@@ -555,13 +521,12 @@ mod tests {
         pools.insert("compute".to_string(), spec);
         let demand = AggregateDemand {
             hard_cpu_millis: 16_000,
-            soft_cpu_millis: 32_000,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        assert_eq!(plans[0].min_nodes, 3);
-        assert_eq!(plans[0].max_nodes, 3);
+        // pool min (3) > quota min (1)
+        assert_eq!(result.plans[0].min_nodes, 3);
+        assert_eq!(result.plans[0].max_nodes, 3);
     }
 
     #[test]
@@ -570,33 +535,25 @@ mod tests {
         let mut spec = cpu_pool(16, 64);
         spec.max = Some(5);
         pools.insert("compute".to_string(), spec);
-        let demand = AggregateDemand {
-            soft_cpu_millis: 160_000,
-            ..Default::default()
-        };
-        let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        assert_eq!(plans[0].max_nodes, 5);
+        // No hard demand — min stays 0, max from spec
+        let result = solve(&pools, &AggregateDemand::default(), &test_rates());
+        assert_eq!(result.plans[0].min_nodes, 0);
+        assert_eq!(result.plans[0].max_nodes, 5);
     }
 
     #[test]
-    fn solve_cost_optimizes_across_pool_types() {
-        // With LP relaxation + ceil, the solver may pick a fractional large node
-        // (0.25 * 64 = 16 cores) and ceil to 1, which is valid. The key invariant:
-        // total provisioned CPU >= demanded CPU.
+    fn solve_cost_optimizes_hard_across_pools() {
         let mut pools = BTreeMap::new();
         pools.insert("small".to_string(), cpu_pool(4, 16));
         pools.insert("large".to_string(), cpu_pool(64, 256));
         let demand = AggregateDemand {
-            soft_cpu_millis: 16_000,
+            hard_cpu_millis: 16_000,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        let small = plans.iter().find(|p| p.pool_id == "small").unwrap();
-        let large = plans.iter().find(|p| p.pool_id == "large").unwrap();
-        // Either 4 small or 1 large satisfies 16 cores — solver picks cheapest
-        let total_cpu = small.max_nodes as i64 * 4000 + large.max_nodes as i64 * 64000;
+        let small = result.plans.iter().find(|p| p.pool_id == "small").unwrap();
+        let large = result.plans.iter().find(|p| p.pool_id == "large").unwrap();
+        let total_cpu = small.min_nodes as i64 * 4000 + large.min_nodes as i64 * 64000;
         assert!(
             total_cpu >= 16_000,
             "provisioned {total_cpu}m < demanded 16000m"
@@ -608,13 +565,13 @@ mod tests {
         let mut pools = BTreeMap::new();
         pools.insert("compute".to_string(), cpu_pool(32, 64));
         let demand = AggregateDemand {
-            soft_cpu_millis: 32_000,
-            soft_memory_bytes: 256 * 1024 * 1024 * 1024,
+            hard_cpu_millis: 32_000,
+            hard_memory_bytes: 256 * 1024 * 1024 * 1024,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        assert_eq!(plans[0].max_nodes, 4);
+        // 256Gi / 64Gi per node = 4 nodes (memory is the bottleneck)
+        assert_eq!(result.plans[0].min_nodes, 4);
     }
 
     #[test]
@@ -622,12 +579,11 @@ mod tests {
         let mut pools = BTreeMap::new();
         pools.insert("compute".to_string(), cpu_pool(16, 64));
         let demand = AggregateDemand {
-            soft_cpu_millis: 17_000,
+            hard_cpu_millis: 17_000,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        assert_eq!(plans[0].max_nodes, 2);
+        assert_eq!(result.plans[0].min_nodes, 2);
     }
 
     #[test]
@@ -647,12 +603,11 @@ mod tests {
             },
         );
         let demand = AggregateDemand {
-            soft_cpu_millis: 100_000,
+            hard_cpu_millis: 100_000,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        assert!(plans.is_empty());
+        assert!(result.plans.is_empty());
     }
 
     #[test]
@@ -660,14 +615,14 @@ mod tests {
         let mut pools = BTreeMap::new();
         pools.insert("gpu".to_string(), gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM"));
         let demand = AggregateDemand {
-            soft_gpu_count: 32,
-            soft_cost_budget: 60.0,
+            hard_gpu_count: 32,
+            hard_cost_budget: 60.0,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        let gpu = plans.iter().find(|p| p.pool_id == "gpu").unwrap();
-        assert!(gpu.max_nodes < 4);
+        let gpu = result.plans.iter().find(|p| p.pool_id == "gpu").unwrap();
+        // Cost budget limits how many GPU nodes can be reserved
+        assert!(gpu.min_nodes < 4);
     }
 
     #[test]
@@ -679,15 +634,14 @@ mod tests {
         );
         pools.insert("l4".to_string(), gpu_pool(4, 48, 256, "NVIDIA-L4"));
         let demand = AggregateDemand {
-            soft_gpu_count: 4,
+            hard_gpu_count: 4,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        let l4 = plans.iter().find(|p| p.pool_id == "l4").unwrap();
-        let h100 = plans.iter().find(|p| p.pool_id == "h100").unwrap();
-        assert_eq!(l4.max_nodes, 1);
-        assert_eq!(h100.max_nodes, 0);
+        let l4 = result.plans.iter().find(|p| p.pool_id == "l4").unwrap();
+        let h100 = result.plans.iter().find(|p| p.pool_id == "h100").unwrap();
+        assert_eq!(l4.min_nodes, 1);
+        assert_eq!(h100.min_nodes, 0);
     }
 
     #[test]
@@ -696,17 +650,14 @@ mod tests {
         pools.insert("gpu".to_string(), gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM"));
         pools.insert("compute".to_string(), cpu_pool(32, 128));
         let demand = AggregateDemand {
-            soft_gpu_count: 8,
-            soft_cpu_millis: 100_000,
-            soft_memory_bytes: 500 * 1024 * 1024 * 1024,
+            hard_gpu_count: 8,
+            hard_cpu_millis: 100_000,
+            hard_memory_bytes: 500 * 1024 * 1024 * 1024,
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        let plans = &result.plans;
-        let gpu = plans.iter().find(|p| p.pool_id == "gpu").unwrap();
-        let compute = plans.iter().find(|p| p.pool_id == "compute").unwrap();
-        assert_eq!(gpu.max_nodes, 1);
-        assert_eq!(compute.max_nodes, 0);
+        let gpu = result.plans.iter().find(|p| p.pool_id == "gpu").unwrap();
+        assert_eq!(gpu.min_nodes, 1);
     }
 
     #[test]
@@ -741,8 +692,7 @@ mod tests {
             },
         );
         let agg = aggregate_quotas(&[q1, q2]);
-        assert_eq!(agg.soft_cpu_millis, 96_000);
-        assert_eq!(agg.soft_gpu_count, 16);
+        // Only hard quotas are aggregated for the solver
         assert_eq!(agg.hard_cpu_millis, 32_000);
         assert_eq!(agg.hard_gpu_count, 4);
     }
@@ -754,13 +704,13 @@ mod tests {
             LatticeQuotaSpec {
                 principal: "Lattice::Group::\"x\"".to_string(),
                 soft: BTreeMap::from([("cpu".into(), "100".into())]),
-                hard: None,
+                hard: Some(BTreeMap::from([("cpu".into(), "50".into())])),
                 max_per_workload: None,
                 enabled: false,
             },
         );
         q.spec.enabled = false;
-        assert_eq!(aggregate_quotas(&[q]).soft_cpu_millis, 0);
+        assert_eq!(aggregate_quotas(&[q]).hard_cpu_millis, 0);
     }
 
     #[test]
@@ -776,7 +726,6 @@ mod tests {
             },
         );
         let agg = aggregate_quotas(&[q]);
-        assert!((agg.soft_cost_budget - 100.0).abs() < f64::EPSILON);
         assert!((agg.hard_cost_budget - 50.0).abs() < f64::EPSILON);
     }
 
@@ -843,32 +792,34 @@ mod tests {
     #[test]
     fn solve_reports_cost_range() {
         let mut pools = BTreeMap::new();
-        pools.insert("compute".to_string(), cpu_pool(16, 64));
+        let mut spec = cpu_pool(16, 64);
+        spec.max = Some(10);
+        pools.insert("compute".to_string(), spec);
         let demand = AggregateDemand {
-            hard_cpu_millis: 32_000,   // 2 nodes
-            soft_cpu_millis: 80_000,   // 5 nodes
+            hard_cpu_millis: 32_000, // 2 nodes reserved
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        // 16-core, 64Gi node @ $0.031/core + $0.004/GiB = $0.752/hr
         let node_cost = 0.752;
+        // min cost = 2 hard nodes, max cost = 10 (spec.max) nodes
         assert!((result.min_hourly_cost - 2.0 * node_cost).abs() < 0.01);
-        assert!((result.max_hourly_cost - 5.0 * node_cost).abs() < 0.01);
+        assert!((result.max_hourly_cost - 10.0 * node_cost).abs() < 0.01);
     }
 
     #[test]
     fn solve_cost_range_with_gpu() {
         let mut pools = BTreeMap::new();
-        pools.insert("gpu".to_string(), gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM"));
-        pools.insert("compute".to_string(), cpu_pool(32, 128));
+        let mut gpu_spec = gpu_pool(8, 192, 2048, "NVIDIA-H100-SXM");
+        gpu_spec.max = Some(4);
+        pools.insert("gpu".to_string(), gpu_spec);
+        let mut cpu_spec = cpu_pool(32, 128);
+        cpu_spec.max = Some(10);
+        pools.insert("compute".to_string(), cpu_spec);
         let demand = AggregateDemand {
-            hard_gpu_count: 8,         // 1 GPU node hard
-            soft_gpu_count: 16,        // 2 GPU nodes soft
-            soft_cpu_millis: 100_000,  // absorbed by GPU nodes
+            hard_gpu_count: 8, // 1 GPU node reserved
             ..Default::default()
         };
         let result = solve(&pools, &demand, &test_rates());
-        // GPU nodes are expensive, compute nodes may be zero
         assert!(result.min_hourly_cost > 0.0);
         assert!(result.max_hourly_cost >= result.min_hourly_cost);
     }

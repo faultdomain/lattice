@@ -3,13 +3,13 @@
 //! Owns the `LatticeQuota` CRD lifecycle and drives CAPI autoscaling:
 //!
 //! - Validates quota specs and tracks per-principal resource usage in status
-//! - Computes aggregate hard/soft limits across all quotas on the cluster
-//! - Translates quota sums into MachineDeployment min/max annotations
-//! - Pool-level `min`/`max` overrides always win over quota-derived values
+//! - Computes aggregate hard limits across all quotas on the cluster
+//! - Translates hard quota sums into MachineDeployment min annotations
+//! - Pool `spec.max` is the admin-configured autoscaler ceiling
 //!
-//! Soft quotas define the burst ceiling (autoscaler max). Hard quotas define
-//! guaranteed reserved capacity (autoscaler min). Soft-only quotas allow
-//! scale-to-zero; hard quotas keep nodes provisioned even when idle.
+//! Hard quotas guarantee reserved capacity (autoscaler min). Soft quotas
+//! are enforced at compile time (workload rejection) and don't affect
+//! infrastructure scaling. The autoscaler handles scaling within spec.max.
 
 #![deny(missing_docs)]
 

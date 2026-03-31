@@ -131,12 +131,8 @@ fn bench_solve(c: &mut Criterion) {
     // Vary pool count (instance types) — push toward AWS-scale catalog
     for pool_count in [10, 31, 50, 100, 200] {
         let pools = aws_like_pools(pool_count);
-        // Enterprise-scale: 10k cores, 40TB RAM, 256 GPUs, $5k/hr budget
+        // Enterprise-scale hard quotas: 5k cores, 20TB RAM, 128 GPUs, $2.5k/hr budget
         let demand = AggregateDemand {
-            soft_cpu_millis: 10_000_000,
-            soft_memory_bytes: 40_000_i64 * 1024 * 1024 * 1024,
-            soft_gpu_count: 256,
-            soft_cost_budget: 5000.0,
             hard_cpu_millis: 5_000_000,
             hard_memory_bytes: 20_000_i64 * 1024 * 1024 * 1024,
             hard_gpu_count: 128,
@@ -152,23 +148,19 @@ fn bench_solve(c: &mut Criterion) {
         );
     }
 
-    // CPU-only: 50k cores across 100 pool types (large SaaS platform)
+    // CPU-only: 25k reserved cores across 100 pool types
     let large_pools = aws_like_pools(100);
     let cpu_only = AggregateDemand {
-        soft_cpu_millis: 50_000_000,
-        soft_memory_bytes: 200_000_i64 * 1024 * 1024 * 1024,
+        hard_cpu_millis: 25_000_000,
+        hard_memory_bytes: 100_000_i64 * 1024 * 1024 * 1024,
         ..Default::default()
     };
     group.bench_function("cpu_only_100_pools", |b| {
         b.iter(|| solve(&large_pools, &cpu_only, &rates));
     });
 
-    // GPU-heavy: 512 GPUs, tight cost budget, 100 pool types
+    // GPU-heavy: 256 reserved GPUs, tight cost budget, 100 pool types
     let gpu_heavy = AggregateDemand {
-        soft_gpu_count: 512,
-        soft_cpu_millis: 20_000_000,
-        soft_memory_bytes: 80_000_i64 * 1024 * 1024 * 1024,
-        soft_cost_budget: 2000.0,
         hard_gpu_count: 256,
         hard_cpu_millis: 10_000_000,
         hard_memory_bytes: 40_000_i64 * 1024 * 1024 * 1024,
@@ -181,10 +173,6 @@ fn bench_solve(c: &mut Criterion) {
     // Worst case: 200 pool types, all constraints active
     let max_pools = aws_like_pools(200);
     let max_demand = AggregateDemand {
-        soft_cpu_millis: 100_000_000,
-        soft_memory_bytes: 400_000_i64 * 1024 * 1024 * 1024,
-        soft_gpu_count: 1024,
-        soft_cost_budget: 10_000.0,
         hard_cpu_millis: 50_000_000,
         hard_memory_bytes: 200_000_i64 * 1024 * 1024 * 1024,
         hard_gpu_count: 512,

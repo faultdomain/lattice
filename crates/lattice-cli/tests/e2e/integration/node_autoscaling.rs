@@ -23,8 +23,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml, delete_namespace, ensure_fresh_namespace, get_workload_cluster_name, run_kubectl,
-    wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT,
+    delete_namespace, ensure_fresh_namespace, get_workload_cluster_name, run_kubectl,
+    wait_for_condition, DEFAULT_TIMEOUT,
 };
 
 // =============================================================================
@@ -51,7 +51,6 @@ pub async fn run_node_autoscaling_tests(kubeconfig: &str) -> Result<(), String> 
 
     ensure_fresh_namespace(kubeconfig, TEST_NAMESPACE).await?;
 
-    create_autoscaling_quota(kubeconfig).await?;
     test_add_autoscaling_pool(kubeconfig).await?;
     test_verify_md_annotations(kubeconfig).await?;
     test_scale_from_zero(kubeconfig).await?;
@@ -59,47 +58,6 @@ pub async fn run_node_autoscaling_tests(kubeconfig: &str) -> Result<(), String> 
     // (5-10 min drain timers) rather than Lattice code.
 
     cleanup(kubeconfig).await;
-    Ok(())
-}
-
-// =============================================================================
-// Setup: Create quota so the solver allows scaling
-// =============================================================================
-
-const QUOTA_NAME: &str = "autoscaling-test-quota";
-const LATTICE_NS: &str = "lattice-system";
-
-/// Create a quota with soft limits that cover the autoscale pool.
-/// Without this, the solver sets max_nodes=0 and the autoscaler can't scale.
-async fn create_autoscaling_quota(kubeconfig: &str) -> Result<(), String> {
-    info!("[NodeAutoscaling] Creating quota for autoscale pool...");
-
-    let quota_yaml = format!(
-        r#"apiVersion: lattice.dev/v1alpha1
-kind: LatticeQuota
-metadata:
-  name: {QUOTA_NAME}
-  namespace: {LATTICE_NS}
-spec:
-  principal: 'Lattice::Group::"*"'
-  soft:
-    cpu: "8"
-    memory: "16Gi""#
-    );
-
-    apply_yaml(kubeconfig, &quota_yaml).await?;
-
-    wait_for_resource_phase(
-        kubeconfig,
-        "latticequota",
-        LATTICE_NS,
-        QUOTA_NAME,
-        "Active",
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-
-    info!("[NodeAutoscaling] Quota '{}' is Active", QUOTA_NAME);
     Ok(())
 }
 
@@ -415,19 +373,6 @@ async fn cleanup(kubeconfig: &str) {
     info!("[NodeAutoscaling] Cleaning up...");
 
     delete_namespace(kubeconfig, TEST_NAMESPACE).await;
-
-    // Delete the quota
-    let _ = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "latticequota",
-        QUOTA_NAME,
-        "-n",
-        LATTICE_NS,
-        "--ignore-not-found",
-    ])
-    .await;
 
     // Remove the autoscaling pool from the cluster spec
     let cluster_name = get_workload_cluster_name();
