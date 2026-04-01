@@ -29,8 +29,6 @@ const REQUEUE_SECS: u64 = 30;
 pub struct QuotaContext {
     /// Kubernetes client
     pub client: kube::Client,
-    /// Watch channel sender — pushes quota snapshots to workload controllers
-    pub sender: crate::QuotaSender,
 }
 
 /// Reconcile a LatticeQuota.
@@ -79,7 +77,7 @@ pub async fn reconcile(
         }
     };
 
-    let (usage, workload_count, ns_labels) = compute_usage(client, &principal).await;
+    let (usage, workload_count) = compute_usage(client, &principal).await;
     let exceeded = is_exceeded(&usage, &quota.spec.limits);
     let phase = if exceeded {
         LatticeQuotaPhase::Exceeded
@@ -98,25 +96,11 @@ pub async fn reconcile(
     )
     .await?;
 
-    // Send full snapshot through the watch channel
-    let all_quotas = list_all_quotas(client).await;
-    let _ = ctx.sender.send(crate::QuotaSnapshot {
-        quotas: all_quotas,
-        namespace_labels: ns_labels,
-    });
-
     info!(quota = %name, principal = %quota.spec.principal, phase = %phase, workloads = workload_count, "Reconciled LatticeQuota");
 
     Ok(Action::requeue(Duration::from_secs(REQUEUE_SECS)))
 }
 
-async fn list_all_quotas(client: &kube::Client) -> Vec<LatticeQuota> {
-    Api::<LatticeQuota>::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE)
-        .list(&Default::default())
-        .await
-        .map(|l| l.items)
-        .unwrap_or_default()
-}
 
 /// Accumulated usage from scanning workloads.
 struct UsageAccumulator {
@@ -158,22 +142,16 @@ impl UsageAccumulator {
         self.count += 1;
     }
 
-    fn into_result(self) -> (WorkloadResourceDemand, u32, BTreeMap<String, BTreeMap<String, String>>) {
-        let ns_labels_map = self.ns_cache.into_iter().collect();
-        (self.total, self.count, ns_labels_map)
+    fn into_result(self) -> (WorkloadResourceDemand, u32) {
+        (self.total, self.count)
     }
 }
 
-/// Compute total resource usage for a principal. Returns usage, workload count,
-/// and the namespace label cache (for the snapshot).
+/// Compute total resource usage for a principal. Returns usage and workload count.
 async fn compute_usage(
     client: &kube::Client,
     principal: &QuotaPrincipal,
-) -> (
-    WorkloadResourceDemand,
-    u32,
-    BTreeMap<String, BTreeMap<String, String>>,
-) {
+) -> (WorkloadResourceDemand, u32) {
     let mut acc = UsageAccumulator::new();
 
     match Api::<LatticeService>::all(client.clone())

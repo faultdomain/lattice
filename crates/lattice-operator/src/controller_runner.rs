@@ -30,7 +30,6 @@ use lattice_common::{CrdRegistry, LeaderElector, LATTICE_SYSTEM_NAMESPACE};
 use lattice_cost::CostProvider;
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_mesh_member::remote_secret;
-use lattice_quota::QuotaStore;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
 
@@ -128,7 +127,6 @@ pub struct SpawnContext {
     pub config: lattice_common::SharedConfig,
     pub cedar: Arc<PolicyEngine>,
     pub graph_holder: Arc<OnceLock<Arc<ServiceGraph>>>,
-    pub quota_store: QuotaStore,
 }
 
 impl SpawnContext {
@@ -197,7 +195,6 @@ impl SpawnContext {
         let config = self.config.clone();
         let cedar = self.cedar.clone();
         let graph_holder = self.graph_holder.clone();
-        let quota_store = self.quota_store.clone();
         tokio::spawn(leader_controller(
             self.client.clone(),
             self.pod_name.clone(),
@@ -209,7 +206,6 @@ impl SpawnContext {
                 let config = config.clone();
                 let cedar = cedar.clone();
                 let graph_holder = graph_holder.clone();
-                let quota_store = quota_store.clone();
                 let build = build.clone();
                 Box::pin(async move {
                     lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
@@ -218,7 +214,6 @@ impl SpawnContext {
                         &config,
                         &cedar,
                         &graph_holder,
-                        &quota_store,
                     )
                     .await;
                     build(params).await;
@@ -234,7 +229,6 @@ async fn resolve_workload_params(
     config: &lattice_common::SharedConfig,
     cedar: &Arc<PolicyEngine>,
     graph_holder: &OnceLock<Arc<ServiceGraph>>,
-    quota_store: &QuotaStore,
 ) -> WorkloadControllerParams {
     let cluster = resolve_cluster_config(client, config)
         .await
@@ -255,7 +249,6 @@ async fn resolve_workload_params(
         registry,
         metrics_scraper,
         cost_provider,
-        quota_store: quota_store.clone(),
     }
 }
 
@@ -323,7 +316,6 @@ pub struct WorkloadControllerParams {
     pub registry: Arc<CrdRegistry>,
     pub metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     pub cost_provider: Option<Arc<dyn CostProvider>>,
-    pub quota_store: QuotaStore,
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +403,6 @@ pub fn build_service_controller(
         registry,
         metrics_scraper,
         cost_provider,
-        quota_store,
     } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
@@ -434,7 +425,7 @@ pub fn build_service_controller(
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry))];
     service_ctx.cost_provider = cost_provider;
-    service_ctx.quota_store = quota_store;
+    service_ctx.client = Some(client.clone());
 
     let service_ctx = Arc::new(service_ctx);
 
@@ -647,7 +638,6 @@ pub fn build_job_controller(
         registry,
         metrics_scraper,
         cost_provider,
-        quota_store,
     } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
@@ -669,7 +659,7 @@ pub fn build_job_controller(
         metrics_scraper,
     );
     job_ctx.cost_provider = cost_provider;
-    job_ctx.quota_store = quota_store;
+    job_ctx.client = Some(client.clone());
     let ctx = Arc::new(job_ctx);
 
     let jobs: Api<LatticeJob> = Api::all(client);
@@ -705,7 +695,6 @@ pub fn build_model_controller(
         registry,
         metrics_scraper,
         cost_provider,
-        quota_store,
     } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
@@ -727,7 +716,7 @@ pub fn build_model_controller(
         metrics_scraper,
     );
     model_ctx.cost_provider = cost_provider;
-    model_ctx.quota_store = quota_store;
+    model_ctx.client = Some(client.clone());
     let ctx = Arc::new(model_ctx);
 
     let models: Api<LatticeModel> = Api::all(client);

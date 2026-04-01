@@ -135,7 +135,6 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     });
 
     let graph_holder: Arc<OnceLock<Arc<ServiceGraph>>> = Arc::new(OnceLock::new());
-    let (quota_sender, quota_store) = lattice_quota::quota_channel();
     let cancel = CancellationToken::new();
 
     // ── Pre-election services (run on ALL pods) ──
@@ -321,7 +320,6 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         config: config.clone(),
         cedar: cedar.clone(),
         graph_holder: graph_holder.clone(),
-        quota_store,
     };
 
     // Workload controllers (Service, Job, Model)
@@ -409,7 +407,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    // LatticeQuota (uses QuotaContext with sender channel)
+    // LatticeQuota (tracks usage in status, no cross-pod state)
     tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
@@ -420,12 +418,10 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
             let client = client.clone();
             move || {
                 let client = client.clone();
-                let quota_sender = quota_sender.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeQuota>(&client).await;
                     let ctx = Arc::new(lattice_quota::QuotaContext {
                         client: client.clone(),
-                        sender: quota_sender,
                     });
                     controller_runner::simple_controller(
                         Api::<LatticeQuota>::all(client),

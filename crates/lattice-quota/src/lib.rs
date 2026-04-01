@@ -3,8 +3,7 @@
 //! Owns the `LatticeQuota` CRD lifecycle:
 //!
 //! - Validates quota specs and tracks per-principal resource usage in status
-//! - Pushes quota snapshots through a watch channel for workload controllers
-//! - Workload compilers check budgets at compile time (soft limit enforcement)
+//! - Workload compilers read quotas from the K8s API at compile time
 //!
 //! Quotas are a budget system, not an infrastructure scaling system.
 //! Pool `spec.min`/`spec.max` control autoscaler bounds directly.
@@ -18,7 +17,7 @@ mod store;
 
 pub use budget::QuotaBudget;
 pub use controller::{reconcile, QuotaContext};
-pub use store::{channel as quota_channel, QuotaSender, QuotaSnapshot, QuotaStore};
+pub use store::resolve_budget;
 
 use std::collections::BTreeMap;
 

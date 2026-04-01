@@ -673,8 +673,8 @@ pub struct ServiceContext {
     pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
-    /// Shared quota store for enforcement
-    pub quota_store: lattice_quota::QuotaStore,
+    /// Kubernetes client for quota resolution (reads LatticeQuota CRDs directly)
+    pub client: Option<kube::Client>,
 }
 
 impl ServiceContext {
@@ -698,7 +698,7 @@ impl ServiceContext {
             extension_phases: Vec::new(),
             metrics_scraper,
             cost_provider: None,
-            quota_store: lattice_quota::QuotaStore::empty(),
+            client: None,
         }
     }
 
@@ -719,7 +719,7 @@ impl ServiceContext {
             extension_phases: Vec::new(),
             metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
-            quota_store: lattice_quota::QuotaStore::empty(),
+            client: None,
         }
     }
 }
@@ -863,9 +863,11 @@ async fn compile_and_apply(
         .as_ref()
         .cloned()
         .unwrap_or_default();
-    let quota_budget = ctx
-        .quota_store
-        .resolve_budget(namespace, name, &annotations);
+    let quota_budget = if let Some(ref client) = ctx.client {
+        lattice_quota::resolve_budget(client, namespace, name, &annotations).await
+    } else {
+        lattice_quota::QuotaBudget::default()
+    };
 
     let compiler = ServiceCompiler::new(
         &ctx.graph,

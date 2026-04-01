@@ -230,8 +230,8 @@ pub struct JobContext {
     pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
-    /// Shared quota store for enforcement
-    pub quota_store: lattice_quota::QuotaStore,
+    /// Kubernetes client for quota resolution
+    pub client: Option<kube::Client>,
 }
 
 impl JobContext {
@@ -254,7 +254,7 @@ impl JobContext {
             events,
             metrics_scraper,
             cost_provider: None,
-            quota_store: lattice_quota::QuotaStore::empty(),
+            client: None,
         }
     }
 
@@ -276,7 +276,7 @@ impl JobContext {
             events: Arc::new(lattice_common::NoopEventPublisher),
             metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
-            quota_store: lattice_quota::QuotaStore::empty(),
+            client: None,
         }
     }
 }
@@ -530,11 +530,12 @@ async fn submit_job(
         .as_ref()
         .cloned()
         .unwrap_or_default();
-    let quota_budget = ctx.quota_store.resolve_budget(
-        namespace,
-        job.metadata.name.as_deref().unwrap_or_default(),
-        &annotations,
-    );
+    let job_name = job.metadata.name.as_deref().unwrap_or_default();
+    let quota_budget = if let Some(ref client) = ctx.client {
+        lattice_quota::resolve_budget(client, namespace, job_name, &annotations).await
+    } else {
+        lattice_quota::QuotaBudget::default()
+    };
 
     let compiled = match compile_job(
         job,

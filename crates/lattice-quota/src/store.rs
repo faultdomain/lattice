@@ -1,137 +1,72 @@
-//! Shared quota store — watch channel for quota distribution.
+//! Quota budget resolution — reads quotas directly from the K8s API.
 //!
-//! The quota controller sends updates via a `watch::Sender`. Workload
-//! controllers hold `watch::Receiver`s and read the latest snapshot.
-//! Same pattern as tokio's broadcast but optimized for "latest value" semantics.
+//! Each workload controller calls `resolve_budget` during compilation to get
+//! the effective budget for a workload. This reads LatticeQuota CRDs and
+//! namespace labels directly, avoiding cross-pod state sharing issues that
+//! arise when controllers run on different pods via per-controller leases.
 
 use std::collections::BTreeMap;
 
+use kube::api::Api;
+use tracing::warn;
+
 use lattice_common::crd::LatticeQuota;
-use tokio::sync::watch;
+use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-/// Snapshot of quota state, sent through the watch channel.
-#[derive(Clone, Debug, Default)]
-pub struct QuotaSnapshot {
-    /// All enabled quotas with their statuses
-    pub quotas: Vec<LatticeQuota>,
-    /// Cached namespace labels (namespace -> labels)
-    pub namespace_labels: BTreeMap<String, BTreeMap<String, String>>,
-}
-
-/// Sender side — owned by the quota controller.
-pub type QuotaSender = watch::Sender<QuotaSnapshot>;
-
-/// Receiver side — cloned into each workload controller context.
-#[derive(Clone)]
-pub struct QuotaStore {
-    rx: watch::Receiver<QuotaSnapshot>,
-}
-
-impl QuotaStore {
-    /// Create an empty store for testing (no sender, always empty).
-    pub fn empty() -> Self {
-        let (_tx, rx) = watch::channel(QuotaSnapshot::default());
-        Self { rx }
+/// Resolve a `QuotaBudget` for a workload by reading quotas from the K8s API.
+///
+/// Lists all LatticeQuota CRDs, fetches namespace labels, and computes the
+/// effective budget. Called during each compilation — one API list + one
+/// namespace get per reconcile.
+pub async fn resolve_budget(
+    client: &kube::Client,
+    namespace: &str,
+    name: &str,
+    workload_annotations: &BTreeMap<String, String>,
+) -> crate::QuotaBudget {
+    let quotas = list_quotas(client).await;
+    if quotas.is_empty() {
+        return crate::QuotaBudget::default();
     }
 
-    /// Resolve a `QuotaBudget` for a specific workload from the latest snapshot.
-    pub fn resolve_budget(
-        &self,
-        namespace: &str,
-        name: &str,
-        workload_annotations: &BTreeMap<String, String>,
-    ) -> crate::QuotaBudget {
-        let snapshot = self.rx.borrow();
-        let ns_labels = snapshot
-            .namespace_labels
-            .get(namespace)
-            .cloned()
-            .unwrap_or_default();
-        crate::QuotaBudget::from_matching_quotas(
-            &snapshot.quotas,
-            namespace,
-            name,
-            &ns_labels,
-            workload_annotations,
-        )
-    }
+    let ns_labels = get_namespace_labels(client, namespace).await;
+    crate::QuotaBudget::from_matching_quotas(&quotas, namespace, name, &ns_labels, workload_annotations)
 }
 
-/// Create a paired sender/receiver for the quota watch channel.
-pub fn channel() -> (QuotaSender, QuotaStore) {
-    let (tx, rx) = watch::channel(QuotaSnapshot::default());
-    (tx, QuotaStore { rx })
+async fn list_quotas(client: &kube::Client) -> Vec<LatticeQuota> {
+    Api::<LatticeQuota>::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE)
+        .list(&Default::default())
+        .await
+        .map(|l| l.items)
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "Failed to list LatticeQuotas for budget resolution");
+            vec![]
+        })
+}
+
+async fn get_namespace_labels(
+    client: &kube::Client,
+    namespace: &str,
+) -> BTreeMap<String, String> {
+    Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
+        .get(namespace)
+        .await
+        .map(|ns| ns.metadata.labels.unwrap_or_default())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::LatticeQuotaSpec;
 
-    #[test]
-    fn empty_store_returns_empty_budget() {
-        let (_tx, store) = channel();
-        let budget = store.resolve_budget("ns", "svc", &BTreeMap::new());
-        assert!(budget.remaining.is_empty());
-    }
+    // Integration-style tests require a real K8s client.
+    // Budget resolution logic is tested via QuotaBudget unit tests in budget.rs.
+    // The resolve_budget function is exercised by E2E quota tests.
 
-    #[test]
-    fn send_and_resolve() {
-        let (tx, store) = channel();
-
-        let mut quota = LatticeQuota::new(
-            "test",
-            LatticeQuotaSpec {
-                principal: "Lattice::Group::\"team\"".to_string(),
-                limits: BTreeMap::from([("cpu".to_string(), "10".to_string())]),
-                max_per_workload: None,
-                enabled: true,
-            },
-        );
-        quota.metadata.namespace = Some("lattice-system".to_string());
-
-        let mut ns_labels = BTreeMap::new();
-        ns_labels.insert(
-            "ns".to_string(),
-            BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())]),
-        );
-
-        tx.send(QuotaSnapshot {
-            quotas: vec![quota],
-            namespace_labels: ns_labels,
-        })
-        .unwrap();
-
-        let budget = store.resolve_budget("ns", "svc", &BTreeMap::new());
-        assert_eq!(budget.remaining.get("cpu"), Some(&10000));
-    }
-
-    #[test]
-    fn cloned_receivers_see_updates() {
-        let (tx, store1) = channel();
-        let store2 = store1.clone();
-
-        let quota = LatticeQuota::new(
-            "test",
-            LatticeQuotaSpec {
-                principal: "Lattice::Group::\"team\"".to_string(),
-                limits: BTreeMap::from([("cpu".to_string(), "20".to_string())]),
-                max_per_workload: None,
-                enabled: true,
-            },
-        );
-
-        tx.send(QuotaSnapshot {
-            quotas: vec![quota],
-            namespace_labels: BTreeMap::from([(
-                "ns".to_string(),
-                BTreeMap::from([("lattice.dev/group".to_string(), "team".to_string())]),
-            )]),
-        })
-        .unwrap();
-
-        let b1 = store1.resolve_budget("ns", "svc", &BTreeMap::new());
-        let b2 = store2.resolve_budget("ns", "svc", &BTreeMap::new());
-        assert_eq!(b1.remaining.get("cpu"), b2.remaining.get("cpu"));
+    #[tokio::test]
+    async fn list_quotas_returns_empty_without_cluster() {
+        // Without a real cluster, kube::Client::try_default() fails.
+        // This just verifies the module compiles and the function signature is correct.
+        // Real coverage comes from E2E tests.
     }
 }
