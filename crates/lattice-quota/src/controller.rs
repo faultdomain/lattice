@@ -4,15 +4,15 @@
 //! principal, and pushes snapshots through a watch channel for workload
 //! controllers to consume.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kube::api::Api;
 use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
+use lattice_cache::ResourceCache;
 use lattice_common::crd::{
     LatticeJob, LatticeModel, LatticeQuota, LatticeQuotaPhase, LatticeQuotaStatus, LatticeService,
     QuotaPrincipal,
@@ -27,8 +27,10 @@ const REQUEUE_SECS: u64 = 30;
 
 /// Context for the quota controller.
 pub struct QuotaContext {
-    /// Kubernetes client
+    /// Kubernetes client (used for status writes only)
     pub client: kube::Client,
+    /// Resource cache for reading workloads and namespaces
+    pub cache: ResourceCache,
 }
 
 /// Reconcile a LatticeQuota.
@@ -77,7 +79,7 @@ pub async fn reconcile(
         }
     };
 
-    let (usage, workload_count) = compute_usage(client, &principal).await;
+    let (usage, workload_count) = compute_usage(&ctx.cache, &principal);
     let exceeded = is_exceeded(&usage, &quota.spec.limits);
     let phase = if exceeded {
         LatticeQuotaPhase::Exceeded
@@ -102,126 +104,79 @@ pub async fn reconcile(
 }
 
 
-/// Accumulated usage from scanning workloads.
-struct UsageAccumulator {
-    total: WorkloadResourceDemand,
-    count: u32,
-    ns_cache: HashMap<String, BTreeMap<String, String>>,
+/// Resolve namespace labels from the cache.
+fn ns_labels(cache: &ResourceCache, namespace: &str) -> BTreeMap<String, String> {
+    cache
+        .get::<k8s_openapi::api::core::v1::Namespace>(namespace)
+        .and_then(|ns| ns.metadata.labels.clone())
+        .unwrap_or_default()
 }
 
-impl UsageAccumulator {
-    fn new() -> Self {
-        Self {
-            total: WorkloadResourceDemand::default(),
-            count: 0,
-            ns_cache: HashMap::new(),
-        }
-    }
-
-    /// Check if a resource matches the principal, using the namespace label cache.
-    async fn matches(
-        &mut self,
-        client: &kube::Client,
-        principal: &QuotaPrincipal,
-        resource: &impl kube::ResourceExt,
-    ) -> bool {
-        let ns = resource.namespace().unwrap_or_default();
-        let ns_labels = cached_ns_labels(client, &ns, &mut self.ns_cache).await;
-        let empty = BTreeMap::new();
-        let annotations = resource.meta().annotations.as_ref().unwrap_or(&empty);
-        principal.matches_workload(&ns, &resource.name_any(), ns_labels, annotations)
-    }
-
-    /// Add a single workload's demand.
-    fn add_demand(&mut self, demand: &WorkloadResourceDemand) {
-        self.total += demand;
-    }
-
-    /// Increment the workload count.
-    fn add_workload(&mut self) {
-        self.count += 1;
-    }
-
-    fn into_result(self) -> (WorkloadResourceDemand, u32) {
-        (self.total, self.count)
-    }
+/// Check if a resource matches the principal using cached namespace labels.
+fn matches_principal(
+    cache: &ResourceCache,
+    principal: &QuotaPrincipal,
+    resource: &impl kube::ResourceExt,
+) -> bool {
+    let ns = resource.namespace().unwrap_or_default();
+    let labels = ns_labels(cache, &ns);
+    let empty = BTreeMap::new();
+    let annotations = resource.meta().annotations.as_ref().unwrap_or(&empty);
+    principal.matches_workload(&ns, &resource.name_any(), &labels, annotations)
 }
 
 /// Compute total resource usage for a principal. Returns usage and workload count.
-async fn compute_usage(
-    client: &kube::Client,
+fn compute_usage(
+    cache: &ResourceCache,
     principal: &QuotaPrincipal,
 ) -> (WorkloadResourceDemand, u32) {
-    let mut acc = UsageAccumulator::new();
+    let mut total = WorkloadResourceDemand::default();
+    let mut count: u32 = 0;
 
-    match Api::<LatticeService>::all(client.clone())
-        .list(&Default::default())
-        .await
-    {
-        Ok(services) => {
-            for svc in &services.items {
-                if !acc.matches(client, principal, svc).await {
-                    continue;
-                }
-                if let Ok(demand) = compute_workload_demand(&svc.spec.workload, svc.spec.replicas) {
-                    acc.add_demand(&demand);
-                    acc.add_workload();
+    for svc in cache.list::<LatticeService>() {
+        if !matches_principal(cache, principal, svc.as_ref()) {
+            continue;
+        }
+        if let Ok(demand) = compute_workload_demand(&svc.spec.workload, svc.spec.replicas) {
+            total += &demand;
+            count += 1;
+        }
+    }
+
+    for job in cache.list::<LatticeJob>() {
+        if !matches_principal(cache, principal, job.as_ref()) {
+            continue;
+        }
+        for task in job.spec.tasks.values() {
+            if let Ok(demand) =
+                compute_workload_demand(&task.workload, task.replicas.unwrap_or(1))
+            {
+                total += &demand;
+            }
+        }
+        count += 1;
+    }
+
+    for model in cache.list::<LatticeModel>() {
+        if !matches_principal(cache, principal, model.as_ref()) {
+            continue;
+        }
+        for role in model.spec.roles.values() {
+            if let Ok(demand) =
+                compute_workload_demand(&role.entry_workload, role.replicas.unwrap_or(1))
+            {
+                total += &demand;
+            }
+            if let (Some(ref ww), Some(wr)) = (&role.worker_workload, role.worker_replicas) {
+                if let Ok(demand) = compute_workload_demand(ww, wr) {
+                    total += &demand;
                 }
             }
         }
-        Err(e) => warn!(error = %e, "Failed to list LatticeServices for quota usage"),
+        count += 1;
     }
 
-    match Api::<LatticeJob>::all(client.clone())
-        .list(&Default::default())
-        .await
-    {
-        Ok(jobs) => {
-            for job in &jobs.items {
-                if !acc.matches(client, principal, job).await {
-                    continue;
-                }
-                for task in job.spec.tasks.values() {
-                    if let Ok(demand) =
-                        compute_workload_demand(&task.workload, task.replicas.unwrap_or(1))
-                    {
-                        acc.add_demand(&demand);
-                    }
-                }
-                acc.add_workload();
-            }
-        }
-        Err(e) => warn!(error = %e, "Failed to list LatticeJobs for quota usage"),
-    }
-
-    match Api::<LatticeModel>::all(client.clone())
-        .list(&Default::default())
-        .await
-    {
-        Ok(models) => {
-            for model in &models.items {
-                if !acc.matches(client, principal, model).await {
-                    continue;
-                }
-                for role in model.spec.roles.values() {
-                    if let Ok(demand) =
-                        compute_workload_demand(&role.entry_workload, role.replicas.unwrap_or(1))
-                    {
-                        acc.add_demand(&demand);
-                    }
-                    if let (Some(ref ww), Some(wr)) = (&role.worker_workload, role.worker_replicas) {
-                        if let Ok(demand) = compute_workload_demand(ww, wr) {
-                            acc.add_demand(&demand);
-                        }
-                    }
-                }
-                acc.add_workload();
-            }
-        }
-        Err(e) => warn!(error = %e, "Failed to list LatticeModels for quota usage"),
-    }
-
-    acc.into_result()
+    (total, count)
 }
 
 fn is_exceeded(usage: &WorkloadResourceDemand, limits: &BTreeMap<String, String>) -> bool {
@@ -234,23 +189,6 @@ fn is_exceeded(usage: &WorkloadResourceDemand, limits: &BTreeMap<String, String>
         }
     }
     false
-}
-
-async fn cached_ns_labels<'a>(
-    client: &kube::Client,
-    namespace: &str,
-    cache: &'a mut HashMap<String, BTreeMap<String, String>>,
-) -> &'a BTreeMap<String, String> {
-    if !cache.contains_key(namespace) {
-        let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
-        let labels = api
-            .get(namespace)
-            .await
-            .map(|ns| ns.metadata.labels.unwrap_or_default())
-            .unwrap_or_default();
-        cache.insert(namespace.to_string(), labels);
-    }
-    cache.get(namespace).expect("namespace was just inserted")
 }
 
 async fn update_status(

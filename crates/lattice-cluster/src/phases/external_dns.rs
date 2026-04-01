@@ -28,6 +28,7 @@ const FIELD_MANAGER: &str = "lattice-cluster-controller";
 pub async fn reconcile_external_dns(
     client: &Client,
     cluster: &LatticeCluster,
+    cache: &lattice_cache::ResourceCache,
 ) -> Result<(), Error> {
     let dns_config = match &cluster.spec.dns {
         Some(dns) if !dns.providers.is_empty() => dns,
@@ -38,7 +39,6 @@ pub async fn reconcile_external_dns(
     let ns = cluster
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
-    let dns_api: Api<DNSProvider> = Api::namespaced(client.clone(), &ns);
 
     // Ensure the shared namespace exists first
     let ns_manifest = build_namespace();
@@ -53,10 +53,10 @@ pub async fn reconcile_external_dns(
         .map_err(|e| Error::internal(format!("failed to apply external-dns namespace: {e}")))?;
 
     for provider_name in dns_config.providers.values() {
-        let provider = match dns_api.get(provider_name).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(provider = %provider_name, error = %e, "failed to fetch DNSProvider for external-dns, skipping");
+        let provider = match cache.get_namespaced::<DNSProvider>(provider_name, &ns) {
+            Some(p) => p,
+            None => {
+                warn!(provider = %provider_name, "DNSProvider not found in cache for external-dns, skipping");
                 continue;
             }
         };

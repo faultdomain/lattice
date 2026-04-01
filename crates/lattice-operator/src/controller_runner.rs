@@ -387,8 +387,41 @@ pub fn build_cluster_controller(
     capi_installer: Arc<dyn CapiInstaller>,
     config: lattice_common::SharedConfig,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    let cluster_issuer_ar = kube::discovery::ApiResource::from_gvk(
+        &kube::api::GroupVersionKind::gvk("cert-manager.io", "v1", "ClusterIssuer"),
+    );
     let cluster_cache = lattice_cache::ResourceCache::builder()
         .watch(kube::Api::<k8s_openapi::api::core::v1::Node>::all(client.clone()))
+        .watch(kube::Api::<LatticeCluster>::all(client.clone()))
+        .watch(kube::Api::<k8s_openapi::api::core::v1::Service>::namespaced(
+            client.clone(),
+            LATTICE_SYSTEM_NAMESPACE,
+        ))
+        .watch(kube::Api::<k8s_openapi::api::core::v1::Secret>::namespaced(
+            client.clone(),
+            LATTICE_SYSTEM_NAMESPACE,
+        ))
+        .watch(kube::Api::<lattice_common::crd::InfraProvider>::namespaced(
+            client.clone(),
+            LATTICE_SYSTEM_NAMESPACE,
+        ))
+        .watch(kube::Api::<k8s_openapi::api::core::v1::Pod>::all(client.clone()))
+        .watch(kube::Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(
+            client.clone(),
+            LATTICE_SYSTEM_NAMESPACE,
+        ))
+        .watch(kube::Api::<lattice_common::crd::CertIssuer>::namespaced(
+            client.clone(),
+            LATTICE_SYSTEM_NAMESPACE,
+        ))
+        .watch(kube::Api::<lattice_common::crd::DNSProvider>::namespaced(
+            client.clone(),
+            LATTICE_SYSTEM_NAMESPACE,
+        ))
+        .watch_dynamic(
+            kube::Api::<kube::api::DynamicObject>::all_with(client.clone(), &cluster_issuer_ar),
+            cluster_issuer_ar,
+        )
         .build();
 
     let mut ctx_builder = Context::builder(client.clone(), config)
@@ -541,12 +574,20 @@ pub fn build_mesh_member_controller(
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
+    let mm_cache = lattice_cache::ResourceCache::builder()
+        .watch(kube::Api::<k8s_openapi::api::core::v1::ConfigMap>::namespaced(
+            client.clone(),
+            "istio-system",
+        ))
+        .build();
+
     let mm_ctx = Arc::new(mesh_member_ctrl::MeshMemberContext {
         client: client.clone(),
         graph: graph.clone(),
         cluster_name,
         registry,
         cedar: Some(cedar),
+        cache: mm_cache,
     });
 
     let mesh_members: Api<LatticeMeshMember> = Api::all(client.clone());
@@ -623,6 +664,7 @@ pub fn build_mesh_member_controller(
 pub fn spawn_remote_secret_controller(client: Client) -> tokio::task::JoinHandle<()> {
     let ctx = Arc::new(remote_secret::RemoteSecretContext {
         client: client.clone(),
+        cache: lattice_cache::ResourceCache::empty(),
     });
 
     tracing::info!("- RemoteSecret controller");

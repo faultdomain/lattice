@@ -5,8 +5,7 @@
 
 use async_trait::async_trait;
 use kube::api::{Api, Patch, PatchParams, PostParams};
-use kube::{Client, Resource};
-use serde::de::DeserializeOwned;
+use kube::Client;
 use tracing::{debug, info, warn};
 
 #[cfg(test)]
@@ -26,20 +25,6 @@ pub struct NodeCounts {
     pub pool_resources: Vec<lattice_common::crd::PoolResourceSummary>,
 }
 
-/// Helper function to get a Kubernetes resource by name, returning None if not found.
-///
-/// This reduces boilerplate for the common pattern of handling 404 errors when
-/// fetching resources that may or may not exist.
-pub(crate) async fn get_optional<K>(api: &Api<K>, name: &str) -> Result<Option<K>, Error>
-where
-    K: Resource + Clone + DeserializeOwned + std::fmt::Debug,
-{
-    match api.get(name).await {
-        Ok(resource) => Ok(Some(resource)),
-        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
 ///
@@ -235,8 +220,7 @@ impl KubeClient for KubeClientImpl {
     }
 
     async fn get_cluster(&self, name: &str) -> Result<Option<LatticeCluster>, Error> {
-        let api: Api<LatticeCluster> = Api::all(self.client.clone());
-        get_optional(&api, name).await
+        Ok(self.cache.get::<LatticeCluster>(name).map(|arc| (*arc).clone()))
     }
 
     async fn get_secret(
@@ -245,8 +229,7 @@ impl KubeClient for KubeClientImpl {
         namespace: &str,
     ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, Error> {
         use k8s_openapi::api::core::v1::Secret;
-        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
-        get_optional(&api, name).await
+        Ok(self.cache.get_namespaced::<Secret>(name, namespace).map(|arc| (*arc).clone()))
     }
 
     async fn ensure_cell_service(
@@ -258,12 +241,11 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::Service;
 
-        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-
-        if get_optional(&api, CELL_SERVICE_NAME).await?.is_some() {
+        if self.cache.get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE).is_some() {
             debug!("cell service already exists");
         } else {
             info!("creating cell LoadBalancer service");
+            let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
             let service = lattice_common::kube_utils::build_cell_service(
                 bootstrap_port,
                 grpc_port,
@@ -283,15 +265,15 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<(), Error> {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
-        // Get current cluster to read existing finalizers
-        let cluster = match get_optional(&api, cluster_name).await? {
+        // Read current cluster from cache to check existing finalizers
+        let cluster = match self.cache.get::<LatticeCluster>(cluster_name) {
             Some(c) => c,
             None => {
                 debug!(cluster = %cluster_name, "Cluster not found, skipping finalizer addition");
                 return Ok(());
             }
         };
-        let mut finalizers = cluster.metadata.finalizers.unwrap_or_default();
+        let mut finalizers = cluster.metadata.finalizers.clone().unwrap_or_default();
 
         // Don't add if already present
         if finalizers.contains(&finalizer.to_string()) {
@@ -323,8 +305,8 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<(), Error> {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
-        // Get current cluster to read existing finalizers
-        let cluster = match get_optional(&api, cluster_name).await? {
+        // Read current cluster from cache to check existing finalizers
+        let cluster = match self.cache.get::<LatticeCluster>(cluster_name) {
             Some(c) => c,
             None => {
                 debug!(cluster = %cluster_name, "Cluster not found, finalizer already removed");
@@ -369,8 +351,7 @@ impl KubeClient for KubeClientImpl {
     async fn get_cell_host(&self) -> Result<Option<String>, Error> {
         use k8s_openapi::api::core::v1::Service;
 
-        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let svc = match get_optional(&api, CELL_SERVICE_NAME).await? {
+        let svc = match self.cache.get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -378,10 +359,11 @@ impl KubeClient for KubeClientImpl {
         // Get host from LoadBalancer ingress status
         let host = svc
             .status
-            .and_then(|s| s.load_balancer)
-            .and_then(|lb| lb.ingress)
-            .and_then(|ingress| ingress.first().cloned())
-            .and_then(|first| first.hostname.or(first.ip));
+            .as_ref()
+            .and_then(|s| s.load_balancer.as_ref())
+            .and_then(|lb| lb.ingress.as_ref())
+            .and_then(|ingress| ingress.first())
+            .and_then(|first| first.hostname.clone().or(first.ip.clone()));
 
         Ok(host)
     }
@@ -416,14 +398,11 @@ impl KubeClient for KubeClientImpl {
     async fn cell_service_exists(&self) -> Result<bool, Error> {
         use k8s_openapi::api::core::v1::Service;
 
-        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        Ok(get_optional(&api, CELL_SERVICE_NAME).await?.is_some())
+        Ok(self.cache.get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE).is_some())
     }
 
     async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error> {
-        let api: Api<LatticeCluster> = Api::all(self.client.clone());
-        let list = api.list(&Default::default()).await?;
-        Ok(list.items)
+        Ok(self.cache.list::<LatticeCluster>().into_iter().map(|arc| (*arc).clone()).collect())
     }
 
     async fn get_cloud_provider(
@@ -432,9 +411,7 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<Option<lattice_common::crd::InfraProvider>, Error> {
         use lattice_common::crd::InfraProvider;
 
-        let api: Api<InfraProvider> =
-            Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        get_optional(&api, name).await
+        Ok(self.cache.get_namespaced::<InfraProvider>(name, LATTICE_SYSTEM_NAMESPACE).map(|arc| (*arc).clone()))
     }
 
     async fn cordon_node(&self, name: &str) -> Result<(), Error> {
@@ -479,15 +456,16 @@ impl KubeClient for KubeClientImpl {
 
     async fn max_pending_gpu_request(&self) -> Result<u32, Error> {
         use k8s_openapi::api::core::v1::Pod;
-        use kube::api::ListParams;
         use lattice_common::resources::GPU_RESOURCE;
 
-        let pod_api: Api<Pod> = Api::all(self.client.clone());
-        let lp = ListParams::default().fields("status.phase=Pending");
-        let pods = pod_api.list(&lp).await?;
+        let pods = self.cache.list_filtered::<Pod>(|pod| {
+            pod.status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                == Some("Pending")
+        });
 
         let max_req = pods
-            .items
             .iter()
             .filter_map(|pod| {
                 let spec = pod.spec.as_ref()?;
@@ -530,16 +508,16 @@ impl KubeClient for KubeClientImpl {
     async fn get_operator_deployment_image(&self) -> Result<Option<String>, Error> {
         use k8s_openapi::api::apps::v1::Deployment;
 
-        let api: Api<Deployment> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let deploy = match get_optional(&api, OPERATOR_NAME).await? {
+        let deploy = match self.cache.get_namespaced::<Deployment>(OPERATOR_NAME, LATTICE_SYSTEM_NAMESPACE) {
             Some(d) => d,
             None => return Ok(None),
         };
         let image = deploy
             .spec
-            .and_then(|s| s.template.spec)
-            .and_then(|s| s.containers.first().cloned())
-            .and_then(|c| c.image);
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .and_then(|s| s.containers.first())
+            .and_then(|c| c.image.clone());
         Ok(image)
     }
 

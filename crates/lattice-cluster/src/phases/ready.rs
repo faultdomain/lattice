@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams};
+use kube::api::{Api, DynamicObject, GroupVersionKind, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
@@ -370,13 +370,13 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             if let Err(e) = reconcile_infrastructure(client, cluster).await {
                 warn!(error = %e, "failed to reconcile infrastructure, will retry");
             }
-            if let Err(e) = reconcile_issuers(client, cluster).await {
+            if let Err(e) = reconcile_issuers(client, cluster, &ctx.cache).await {
                 warn!(error = %e, "failed to reconcile issuers, will retry");
             }
-            if let Err(e) = reconcile_dns_forwarding(client, cluster).await {
+            if let Err(e) = reconcile_dns_forwarding(client, cluster, &ctx.cache).await {
                 warn!(error = %e, "failed to reconcile DNS forwarding, will retry");
             }
-            if let Err(e) = super::external_dns::reconcile_external_dns(client, cluster).await {
+            if let Err(e) = super::external_dns::reconcile_external_dns(client, cluster, &ctx.cache).await {
                 warn!(error = %e, "failed to reconcile external-dns, will retry");
             }
             if let Err(e) = reconcile_cluster_autoscaler(client, cluster).await {
@@ -480,12 +480,10 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
 /// For each issuer entry, fetches the CertIssuer CRD, builds a ClusterIssuer JSON,
 /// and applies it via server-side apply. After applying all issuers, removes stale
 /// ClusterIssuers that are labeled as managed but no longer referenced in the spec.
-async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<(), Error> {
+async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster, cache: &lattice_cache::ResourceCache) -> Result<(), Error> {
     let ns = cluster
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
-    let cert_issuer_api: Api<CertIssuer> = Api::namespaced(client.clone(), &ns);
-    let dns_provider_api: Api<DNSProvider> = Api::namespaced(client.clone(), &ns);
 
     let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
         "cert-manager.io",
@@ -497,13 +495,12 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
     let mut applied_names: HashSet<String> = HashSet::new();
 
     for (key, cert_issuer_name) in &cluster.spec.issuers {
-        let issuer_crd = match cert_issuer_api.get(cert_issuer_name).await {
-            Ok(crd) => crd,
-            Err(e) => {
+        let issuer_crd = match cache.get_namespaced::<CertIssuer>(cert_issuer_name, &ns) {
+            Some(crd) => crd,
+            None => {
                 warn!(
                     issuer = %cert_issuer_name,
-                    error = %e,
-                    "failed to fetch CertIssuer CRD, skipping"
+                    "CertIssuer not found in cache, skipping"
                 );
                 continue;
             }
@@ -527,8 +524,8 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
         // Fetch DNSProvider if needed for ACME DNS-01
         let dns_provider = if let Some(ref acme) = issuer_crd.spec.acme {
             if let Some(ref dns_ref) = acme.dns_provider_ref {
-                match dns_provider_api.get(dns_ref).await {
-                    Ok(dp) => {
+                match cache.get_namespaced::<DNSProvider>(dns_ref, &ns) {
+                    Some(dp) => {
                         let dp_phase = dp
                             .status
                             .as_ref()
@@ -543,14 +540,13 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
                             );
                             continue;
                         }
-                        Some(dp)
+                        Some((*dp).clone())
                     }
-                    Err(e) => {
+                    None => {
                         warn!(
                             issuer = %cert_issuer_name,
                             dns_provider = %dns_ref,
-                            error = %e,
-                            "failed to fetch DNSProvider, skipping issuer"
+                            "DNSProvider not found in cache, skipping issuer"
                         );
                         continue;
                     }
@@ -617,28 +613,26 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
         .map(|k| format!("lattice-{}", k))
         .collect();
 
-    let label_selector = format!("{}={}", LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE);
-    let list_params = ListParams::default().labels(&label_selector);
+    let all_cluster_issuers = cache.list_dynamic_filtered(&ar, |obj| {
+        obj.metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(LATTICE_MANAGED_BY_LABEL))
+            .is_some_and(|v| v == LATTICE_MANAGED_BY_VALUE)
+    });
 
-    match cluster_issuer_api.list(&list_params).await {
-        Ok(list) => {
-            for item in list.items {
-                if let Some(name) = item.metadata.name.as_deref() {
-                    if !expected_names.contains(name) {
-                        info!(cluster_issuer = %name, "Deleting stale ClusterIssuer");
-                        if let Err(e) = cluster_issuer_api.delete(name, &Default::default()).await {
-                            warn!(
-                                cluster_issuer = %name,
-                                error = %e,
-                                "failed to delete stale ClusterIssuer"
-                            );
-                        }
-                    }
+    for item in all_cluster_issuers {
+        if let Some(name) = item.metadata.name.as_deref() {
+            if !expected_names.contains(name) {
+                info!(cluster_issuer = %name, "Deleting stale ClusterIssuer");
+                if let Err(e) = cluster_issuer_api.delete(name, &Default::default()).await {
+                    warn!(
+                        cluster_issuer = %name,
+                        error = %e,
+                        "failed to delete stale ClusterIssuer"
+                    );
                 }
             }
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to list ClusterIssuers for cleanup");
         }
     }
 
@@ -654,7 +648,11 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<
 ///
 /// Cloud providers (Route53, Cloudflare, etc.) don't need CoreDNS forwarding —
 /// they're authoritative DNS managed by external-dns, resolved via public DNS.
-async fn reconcile_dns_forwarding(client: &Client, cluster: &LatticeCluster) -> Result<(), Error> {
+async fn reconcile_dns_forwarding(
+    client: &Client,
+    cluster: &LatticeCluster,
+    cache: &lattice_cache::ResourceCache,
+) -> Result<(), Error> {
     let dns_config = match &cluster.spec.dns {
         Some(dns) if !dns.providers.is_empty() => dns,
         _ => return Ok(()),
@@ -663,18 +661,14 @@ async fn reconcile_dns_forwarding(client: &Client, cluster: &LatticeCluster) -> 
     let ns = cluster
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
-    let dns_api: Api<DNSProvider> = Api::namespaced(client.clone(), &ns);
 
-    // Collect forward blocks for providers that declare a resolver address.
-    // Public DNS providers (Route53, Cloudflare, etc.) don't set resolver —
-    // their records resolve via the public DNS hierarchy after external-dns creates them.
     let mut custom_blocks = Vec::new();
 
     for provider_name in dns_config.providers.values() {
-        let provider = match dns_api.get(provider_name).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(provider = %provider_name, error = %e, "failed to fetch DNSProvider, skipping");
+        let provider = match cache.get_namespaced::<DNSProvider>(provider_name, &ns) {
+            Some(p) => p,
+            None => {
+                warn!(provider = %provider_name, "DNSProvider not found in cache, skipping");
                 continue;
             }
         };

@@ -34,6 +34,7 @@ const SERVICE_STUB_LABEL: &str = "lattice.dev/service-stub";
 /// Context for the remote secret reconciler.
 pub struct RemoteSecretContext {
     pub client: Client,
+    pub cache: lattice_cache::ResourceCache,
 }
 
 pub async fn reconcile(
@@ -48,8 +49,8 @@ pub async fn reconcile(
 
     if routes.spec.routes.is_empty() {
         cleanup_remote_secret(&ctx.client, &source_cluster).await;
-        cleanup_service_stubs(&ctx.client, &source_cluster).await;
-        cleanup_mesh_network(&ctx.client, &source_cluster).await;
+        cleanup_service_stubs(&ctx.client, &ctx.cache, &source_cluster).await;
+        cleanup_mesh_network(&ctx.client, &ctx.cache, &source_cluster).await;
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
@@ -64,10 +65,10 @@ pub async fn reconcile(
 
     let secret_name = format!("istio-remote-secret-{}", source_cluster);
     let kubeconfig = if is_peer {
-        let (proxy_url, ca_cert, token) = load_peer_proxy_credentials(&ctx.client).await?;
+        let (proxy_url, ca_cert, token) = load_peer_proxy_credentials(&ctx.cache)?;
         build_remote_kubeconfig(&source_cluster, &proxy_url, &ca_cert, &token)
     } else {
-        load_direct_kubeconfig(&ctx.client, &source_cluster).await?
+        load_direct_kubeconfig(&ctx.cache, &source_cluster)?
     };
 
     let mut labels = BTreeMap::new();
@@ -101,7 +102,7 @@ pub async fn reconcile(
         .map_err(|e| Error::internal(format!("failed to apply remote secret: {e}")))?;
 
     // Update meshNetworks so istiod knows how to route to this remote network
-    ensure_mesh_network(&ctx.client, &source_cluster).await;
+    ensure_mesh_network(&ctx.client, &ctx.cache, &source_cluster).await;
 
     // Ensure Service stubs for DNS resolution on this cluster
     ensure_service_stubs(&ctx.client, &source_cluster, &routes.spec.routes).await;
@@ -210,21 +211,24 @@ async fn ensure_service_stubs(client: &Client, source_cluster: &str, routes: &[C
 }
 
 /// Clean up Service stubs for a cluster that no longer has routes.
-async fn cleanup_service_stubs(client: &Client, source_cluster: &str) {
-    let label_selector = format!("{}={}", SERVICE_STUB_LABEL, source_cluster);
-    let svc_api = Api::<k8s_openapi::api::core::v1::Service>::all(client.clone());
-    let list = match svc_api
-        .list(&kube::api::ListParams::default().labels(&label_selector))
-        .await
-    {
-        Ok(list) => list,
-        Err(e) => {
-            warn!(error = %e, "failed to list service stubs for cleanup");
-            return;
-        }
-    };
+///
+/// Reads the list of Service stubs from the ResourceCache instead of listing
+/// via the K8s API. Filters by the `SERVICE_STUB_LABEL` matching the source cluster.
+async fn cleanup_service_stubs(
+    client: &Client,
+    cache: &lattice_cache::ResourceCache,
+    source_cluster: &str,
+) {
+    let stubs = cache.list_filtered::<k8s_openapi::api::core::v1::Service>(|svc| {
+        svc.metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(SERVICE_STUB_LABEL))
+            .map(|v| v == source_cluster)
+            .unwrap_or(false)
+    });
 
-    for svc in list {
+    for svc in stubs {
         let name = svc.metadata.name.as_deref().unwrap_or_default();
         let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
         let ns_api = Api::<k8s_openapi::api::core::v1::Service>::namespaced(client.clone(), ns);
@@ -240,21 +244,27 @@ async fn cleanup_service_stubs(client: &Client, source_cluster: &str) {
 ///
 /// Returns (proxy_url, ca_cert_pem, proxy_token) from the Secret written by
 /// the agent when it receives peer routes from the parent.
-async fn load_peer_proxy_credentials(client: &Client) -> Result<(String, String, String), Error> {
+///
+/// Reads from the ResourceCache (watching Secrets in lattice-system) instead
+/// of hitting the K8s API directly.
+fn load_peer_proxy_credentials(
+    cache: &lattice_cache::ResourceCache,
+) -> Result<(String, String, String), Error> {
     use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let secret = secrets
-        .get("lattice-peer-proxy-credentials")
-        .await
-        .map_err(|e| {
-            Error::internal(format!(
-                "peer proxy credentials not found (parent may not have sent PeerRouteSync yet): {e}"
-            ))
+    let secret = cache
+        .get_namespaced::<Secret>("lattice-peer-proxy-credentials", LATTICE_SYSTEM_NAMESPACE)
+        .ok_or_else(|| {
+            Error::internal(
+                "peer proxy credentials not found in cache \
+                 (parent may not have sent PeerRouteSync yet)"
+                    .to_string(),
+            )
         })?;
 
     let data = secret
         .data
+        .clone()
         .ok_or_else(|| Error::internal("peer proxy credentials secret has no data".to_string()))?;
 
     let get_field = |key: &str| -> Result<String, Error> {
@@ -276,17 +286,21 @@ async fn load_peer_proxy_credentials(client: &Client) -> Result<(String, String,
 ///
 /// Reads the `istiod-direct-kubeconfig-{cluster}` secret from istio-system,
 /// copied from the CAPI kubeconfig pre-pivot by the cluster controller.
-async fn load_direct_kubeconfig(client: &Client, cluster_name: &str) -> Result<String, Error> {
+fn load_direct_kubeconfig(
+    cache: &lattice_cache::ResourceCache,
+    cluster_name: &str,
+) -> Result<String, Error> {
     let secret_name = lattice_common::istiod_kubeconfig_secret_name(cluster_name);
-    let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
 
-    let secret = api.get(&secret_name).await.map_err(|e| {
-        Error::internal(format!(
-            "direct kubeconfig secret '{}' not found in istio-system \
-             (copied pre-pivot by cluster controller): {e}",
-            secret_name
-        ))
-    })?;
+    let secret = cache
+        .get_namespaced::<Secret>(&secret_name, "istio-system")
+        .ok_or_else(|| {
+            Error::internal(format!(
+                "direct kubeconfig secret '{}' not found in cache \
+                 (copied pre-pivot by cluster controller)",
+                secret_name
+            ))
+        })?;
 
     let data = secret.data.as_ref().ok_or_else(|| {
         Error::internal(format!(
@@ -351,18 +365,18 @@ async fn cleanup_remote_secret(client: &Client, source_cluster: &str) {
 /// parsed networks document and returns whether a write is needed.
 async fn update_mesh_networks(
     client: &Client,
+    cache: &lattice_cache::ResourceCache,
     operation: &str,
     modify: impl FnOnce(&mut serde_json::Value) -> bool,
 ) {
-    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "istio-system");
-
-    let cm = match cm_api.get("istio").await {
-        Ok(cm) => cm,
-        Err(e) => {
-            error!(error = %e, "failed to read istio ConfigMap for meshNetworks {}", operation);
+    let cm = match cache.get_namespaced::<ConfigMap>("istio", "istio-system") {
+        Some(cm) => cm,
+        None => {
+            error!("istio ConfigMap not found in cache for meshNetworks {}", operation);
             return;
         }
     };
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), "istio-system");
 
     let resource_version = cm
         .metadata
@@ -371,7 +385,7 @@ async fn update_mesh_networks(
         .unwrap_or_default()
         .to_string();
 
-    let data = cm.data.unwrap_or_default();
+    let data = cm.data.clone().unwrap_or_default();
     let current_str = data
         .get("meshNetworks")
         .cloned()
@@ -416,9 +430,13 @@ async fn update_mesh_networks(
 }
 
 /// Add a remote cluster's network entry to meshNetworks.
-async fn ensure_mesh_network(client: &Client, source_cluster: &str) {
+async fn ensure_mesh_network(
+    client: &Client,
+    cache: &lattice_cache::ResourceCache,
+    source_cluster: &str,
+) {
     let cluster = source_cluster.to_string();
-    update_mesh_networks(client, &format!("add {cluster}"), |doc| {
+    update_mesh_networks(client, cache, &format!("add {cluster}"), |doc| {
         let entry = serde_json::json!({
             "endpoints": [{"fromRegistry": &cluster}],
             "gateways": [{
@@ -436,9 +454,13 @@ async fn ensure_mesh_network(client: &Client, source_cluster: &str) {
 }
 
 /// Remove a remote cluster's network entry from meshNetworks.
-async fn cleanup_mesh_network(client: &Client, source_cluster: &str) {
+async fn cleanup_mesh_network(
+    client: &Client,
+    cache: &lattice_cache::ResourceCache,
+    source_cluster: &str,
+) {
     let cluster = source_cluster.to_string();
-    update_mesh_networks(client, &format!("remove {cluster}"), |doc| {
+    update_mesh_networks(client, cache, &format!("remove {cluster}"), |doc| {
         doc["networks"]
             .as_object_mut()
             .map(|obj| obj.remove(&cluster).is_some())

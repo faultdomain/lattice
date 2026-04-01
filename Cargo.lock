@@ -3027,6 +3027,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "lattice-cache",
  "lattice-cedar",
  "lattice-common",
  "serde",
@@ -3182,6 +3183,7 @@ version = "0.1.0"
 dependencies = [
  "k8s-openapi",
  "kube",
+ "lattice-cache",
  "lattice-common",
  "serde_json",
  "thiserror 2.0.18",

@@ -420,8 +420,17 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let client = client.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeQuota>(&client).await;
+                    let cache = lattice_cache::ResourceCache::builder()
+                        .watch(Api::<LatticeService>::all(client.clone()))
+                        .watch(Api::<LatticeJob>::all(client.clone()))
+                        .watch(Api::<LatticeModel>::all(client.clone()))
+                        .watch(Api::<k8s_openapi::api::core::v1::Namespace>::all(
+                            client.clone(),
+                        ))
+                        .build();
                     let ctx = Arc::new(lattice_quota::QuotaContext {
                         client: client.clone(),
+                        cache,
                     });
                     controller_runner::simple_controller(
                         Api::<LatticeQuota>::all(client),

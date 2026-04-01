@@ -42,6 +42,7 @@ pub struct MeshMemberContext {
     pub cluster_name: String,
     pub registry: Arc<CrdRegistry>,
     pub cedar: Option<Arc<PolicyEngine>>,
+    pub cache: lattice_cache::ResourceCache,
 }
 
 // =============================================================================
@@ -457,7 +458,7 @@ async fn do_reconcile(
     }
 
     let waypoint_ready = if !policies.service_entries.is_empty() {
-        is_waypoint_programmed(&ctx.client, registry, namespace).await
+        is_waypoint_programmed(&ctx.cache, registry, namespace)
     } else {
         true
     };
@@ -565,22 +566,25 @@ async fn ensure_namespace_ambient(
 /// ServiceEntries with `istio.io/use-waypoint` will fail to bind if applied
 /// before the waypoint is fully programmed. Returns `true` only when the
 /// Gateway has `Programmed: True` in its status conditions.
-async fn is_waypoint_programmed(client: &Client, registry: &CrdRegistry, namespace: &str) -> bool {
-    let ar = match registry.resolve(CrdKind::Gateway).await {
-        Ok(Some(ar)) => ar,
-        Ok(None) => return false,
-        Err(e) => {
-            warn!(error = %e, "CRD discovery failed checking waypoint status");
-            return false;
-        }
+///
+/// Reads from the ResourceCache instead of hitting the K8s API directly.
+/// Falls back to a direct API call if the Gateway CRD was not registered
+/// in the cache (e.g., CRD not installed at cache build time).
+fn is_waypoint_programmed(
+    cache: &lattice_cache::ResourceCache,
+    registry: &CrdRegistry,
+    namespace: &str,
+) -> bool {
+    let ar = match registry.resolve_cached(CrdKind::Gateway) {
+        Some(ar) => ar,
+        None => return false,
     };
 
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
     let waypoint = mesh::waypoint_name(namespace);
 
-    let gw = match api.get(&waypoint).await {
-        Ok(gw) => gw,
-        Err(_) => return false,
+    let gw = match cache.get_dynamic_namespaced(&ar, &waypoint, namespace) {
+        Some(gw) => gw,
+        None => return false,
     };
 
     // Check status.conditions for Programmed: True

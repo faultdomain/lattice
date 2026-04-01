@@ -7,6 +7,7 @@ description = "Quota controller for Lattice - enforces resource budgets at compi
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-cache = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

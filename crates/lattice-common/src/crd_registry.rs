@@ -224,6 +224,15 @@ impl CrdRegistry {
         registry
     }
 
+    /// Return the cached ApiResource for a CRD without triggering discovery.
+    ///
+    /// Returns `Some(ar)` if the CRD was found during startup or a previous
+    /// `resolve()` call, `None` otherwise. Use this in synchronous contexts
+    /// where lazy discovery is not needed (e.g., cache lookups).
+    pub fn resolve_cached(&self, kind: CrdKind) -> Option<ApiResource> {
+        self.entries.get(&kind).map(|r| r.clone())
+    }
+
     /// Resolve a CRD's ApiResource, running lazy discovery on cache miss.
     ///
     /// Returns `Ok(Some(ar))` when the CRD is found, `Ok(None)` when discovery

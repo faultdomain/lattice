@@ -22,8 +22,6 @@ pub use pure::{
 };
 
 // Re-export pub(crate) items for sibling modules (phases, etc.)
-// Note: is_control_plane_node, is_node_ready, and get_optional are
-// used internally by submodules via super:: imports
 
 // Re-export MockKubeClient and MockPivotOperations for tests
 #[cfg(test)]

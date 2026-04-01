@@ -10,6 +10,7 @@ fips = ["lattice-common/fips"]
 
 [dependencies]
 # Internal
+lattice-cache = { workspace = true }
 lattice-cedar = { workspace = true }
 lattice-common = { workspace = true }
 
