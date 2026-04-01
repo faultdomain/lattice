@@ -165,12 +165,16 @@ pub trait KubeClient: Send + Sync {
 /// Real Kubernetes client implementation
 pub struct KubeClientImpl {
     client: Client,
+    cache: lattice_cache::ResourceCache,
 }
 
 impl KubeClientImpl {
-    /// Create a new KubeClientImpl wrapping the given kube Client
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    /// Create a new KubeClientImpl wrapping the given kube Client and resource cache.
+    ///
+    /// Node reads (`get_ready_node_counts`, `list_nodes`) are served from the
+    /// cache; all writes still go through the API server.
+    pub fn new(client: Client, cache: lattice_cache::ResourceCache) -> Self {
+        Self { client, cache }
     }
 }
 
@@ -190,13 +194,12 @@ impl KubeClient for KubeClientImpl {
     async fn get_ready_node_counts(&self) -> Result<NodeCounts, Error> {
         use k8s_openapi::api::core::v1::Node;
 
-        let node_api: Api<Node> = Api::all(self.client.clone());
-        let nodes = node_api.list(&Default::default()).await?;
+        let nodes = self.cache.list::<Node>();
 
         let mut ready_control_plane = 0u32;
         let mut ready_workers = 0u32;
 
-        for node in &nodes.items {
+        for node in &nodes {
             if is_node_ready(node) {
                 if is_control_plane_node(node) {
                     ready_control_plane += 1;
@@ -520,9 +523,8 @@ impl KubeClient for KubeClientImpl {
     async fn list_nodes(&self) -> Result<Vec<k8s_openapi::api::core::v1::Node>, Error> {
         use k8s_openapi::api::core::v1::Node;
 
-        let node_api: Api<Node> = Api::all(self.client.clone());
-        let nodes = node_api.list(&Default::default()).await?;
-        Ok(nodes.items)
+        let nodes = self.cache.list::<Node>();
+        Ok(nodes.into_iter().map(|arc| (*arc).clone()).collect())
     }
 
     async fn get_operator_deployment_image(&self) -> Result<Option<String>, Error> {

@@ -60,6 +60,8 @@ pub struct Context {
     /// `prune_stale_error_counts()` should be called periodically to evict
     /// entries for clusters that no longer exist.
     pub error_counts: DashMap<String, u32>,
+    /// In-memory resource cache (Node watches) shared with KubeClientImpl.
+    pub cache: lattice_cache::ResourceCache,
 }
 
 /// Maximum number of entries before we force a prune (safety valve)
@@ -120,6 +122,7 @@ impl Context {
             }),
             events: Arc::new(NoopEventPublisher),
             error_counts: DashMap::new(),
+            cache: lattice_cache::ResourceCache::empty(),
         }
     }
 }
@@ -156,6 +159,7 @@ pub struct ContextBuilder {
     parent_servers: Option<Arc<ParentServers<DefaultManifestGenerator>>>,
     self_cluster_name: Option<String>,
     events: Option<Arc<dyn EventPublisher>>,
+    cache: Option<lattice_cache::ResourceCache>,
 }
 
 impl ContextBuilder {
@@ -170,6 +174,7 @@ impl ContextBuilder {
             parent_servers: None,
             self_cluster_name: None,
             events: None,
+            cache: None,
         }
     }
 
@@ -209,6 +214,12 @@ impl ContextBuilder {
         self
     }
 
+    /// Set the resource cache (Node watches, etc.)
+    pub fn cache(mut self, cache: lattice_cache::ResourceCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
     /// Build the Context
     pub fn build(self) -> Context {
         use lattice_capi::installer::NativeInstaller;
@@ -217,10 +228,14 @@ impl ContextBuilder {
             Arc::new(KubeEventPublisher::new(self.client.clone(), FIELD_MANAGER))
         });
 
+        let cache = self
+            .cache
+            .unwrap_or_else(lattice_cache::ResourceCache::empty);
+
         Context {
-            kube: self
-                .kube
-                .unwrap_or_else(|| Arc::new(KubeClientImpl::new(self.client.clone()))),
+            kube: self.kube.unwrap_or_else(|| {
+                Arc::new(KubeClientImpl::new(self.client.clone(), cache.clone()))
+            }),
             client: Some(self.client.clone()),
             capi: self
                 .capi
@@ -233,6 +248,7 @@ impl ContextBuilder {
             config: self.config,
             events,
             error_counts: DashMap::new(),
+            cache,
         }
     }
 }

@@ -387,7 +387,13 @@ pub fn build_cluster_controller(
     capi_installer: Arc<dyn CapiInstaller>,
     config: lattice_common::SharedConfig,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    let mut ctx_builder = Context::builder(client.clone(), config).capi_installer(capi_installer);
+    let cluster_cache = lattice_cache::ResourceCache::builder()
+        .watch(kube::Api::<k8s_openapi::api::core::v1::Node>::all(client.clone()))
+        .build();
+
+    let mut ctx_builder = Context::builder(client.clone(), config)
+        .capi_installer(capi_installer)
+        .cache(cluster_cache);
     if let Some(servers) = parent_servers {
         ctx_builder = ctx_builder.parent_servers(servers);
     }
@@ -556,17 +562,7 @@ pub fn build_mesh_member_controller(
             };
             let name = member.metadata.name.as_deref().unwrap_or_default();
             let ns = namespace.to_string();
-            let mut affected: Vec<String> = affected_neighbors(&graph, namespace, name);
-
-            // Drain edge diffs to catch neighbors that affected_neighbors misses
-            // (e.g., when A removes its outbound dep on B, B is no longer a neighbor)
-            if let Some(diffs) = graph.drain_edge_diffs(namespace, name) {
-                for (diff_ns, diff_name) in diffs {
-                    if diff_ns == ns && !affected.contains(&diff_name) {
-                        affected.push(diff_name);
-                    }
-                }
-            }
+            let affected: Vec<String> = affected_neighbors(&graph, namespace, name);
 
             let mut refs: Vec<ObjectRef<LatticeMeshMember>> = affected
                 .into_iter()

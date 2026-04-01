@@ -2824,6 +2824,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lattice-agent",
+ "lattice-cache",
  "lattice-capi",
  "lattice-cell",
  "lattice-cert-issuer",

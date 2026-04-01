@@ -575,10 +575,6 @@ pub struct ServiceGraph {
     /// Updated on put_service/delete_service.
     volume_owners: DashMap<(String, String), VolumeOwnership>,
 
-    /// Outbound edge targets added or removed by the most recent `put_node()`.
-    /// Keyed by the service that changed. Consumed by `drain_edge_diffs()`.
-    edge_diffs: DashMap<QualifiedName, HashSet<QualifiedName>>,
-
     /// This cluster's name. Used to filter `allowed_services` entries by cluster
     /// during `put_remote_service()` so that only entries matching the local cluster
     /// are admitted into `allowed_callers`. Without this, a remote service declaring
@@ -595,7 +591,7 @@ impl ServiceGraph {
     /// Dump the graph state as JSON for diagnostic purposes.
     ///
     /// Returns vertices (with node summaries), edges_out, edges_in, and
-    /// depends_all_nodes. Skips internal bookkeeping (volume_owners, edge_diffs).
+    /// depends_all_nodes. Skips internal bookkeeping (volume_owners).
     pub fn dump_json(&self) -> serde_json::Value {
         let mut vertices = serde_json::Map::new();
         for entry in self.vertices.iter() {
@@ -698,7 +694,6 @@ impl ServiceGraph {
             ns_index: DashMap::new(),
             depends_all_nodes: DashSet::new(),
             volume_owners: DashMap::new(),
-            edge_diffs: DashMap::new(),
             cluster_name: None,
             trust_domain: trust_domain.into(),
         }
@@ -934,15 +929,6 @@ impl ServiceGraph {
             self.edges_out.remove(&key);
         } else {
             self.edges_out.insert(key.clone(), dependencies);
-        }
-
-        // Compute edge diff for watcher triggering
-        let diff: HashSet<QualifiedName> = old_targets
-            .symmetric_difference(&new_targets)
-            .cloned()
-            .collect();
-        if !diff.is_empty() {
-            self.edge_diffs.entry(key.clone()).or_default().extend(diff);
         }
 
         // Update namespace index
@@ -1254,16 +1240,6 @@ impl ServiceGraph {
             .get(namespace)
             .map(|index| index.len())
             .unwrap_or(0)
-    }
-
-    /// Drain edge diffs recorded by `put_node()` for a given service.
-    ///
-    /// Returns the set of outbound edge targets that were added or removed
-    /// since the last drain. Returns `None` if no diffs were recorded.
-    /// Consuming the diffs removes them so a second call returns `None`.
-    pub fn drain_edge_diffs(&self, namespace: &str, name: &str) -> Option<HashSet<QualifiedName>> {
-        let key = (namespace.to_string(), name.to_string());
-        self.edge_diffs.remove(&key).map(|(_, diff)| diff)
     }
 
     /// Get the owner of a shared volume by namespace and volume ID.
@@ -2236,86 +2212,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Edge Diff Tracking Tests
-    // =========================================================================
-
-    #[test]
-    fn edge_diffs_tracks_removed_dependency() {
-        let graph = ServiceGraph::new("lattice.test");
-
-        // A depends on [B, C]
-        let spec_bc = make_service_spec(vec!["B", "C"], vec![]);
-        graph.put_service("ns", "A", &spec_bc);
-
-        // Drain initial diffs (first put always has diffs from empty)
-        graph.drain_edge_diffs("ns", "A");
-
-        // A now depends on [C] only (B removed)
-        let spec_c = make_service_spec(vec!["C"], vec![]);
-        graph.put_service("ns", "A", &spec_c);
-
-        let diffs = graph
-            .drain_edge_diffs("ns", "A")
-            .expect("should have diffs");
-        assert!(diffs.contains(&("ns".to_string(), "B".to_string())));
-        assert!(!diffs.contains(&("ns".to_string(), "C".to_string())));
-    }
-
-    #[test]
-    fn edge_diffs_tracks_added_dependency() {
-        let graph = ServiceGraph::new("lattice.test");
-
-        // A depends on [B]
-        let spec_b = make_service_spec(vec!["B"], vec![]);
-        graph.put_service("ns", "A", &spec_b);
-        graph.drain_edge_diffs("ns", "A");
-
-        // A now depends on [B, C] (C added)
-        let spec_bc = make_service_spec(vec!["B", "C"], vec![]);
-        graph.put_service("ns", "A", &spec_bc);
-
-        let diffs = graph
-            .drain_edge_diffs("ns", "A")
-            .expect("should have diffs");
-        assert!(diffs.contains(&("ns".to_string(), "C".to_string())));
-        assert!(!diffs.contains(&("ns".to_string(), "B".to_string())));
-    }
-
-    #[test]
-    fn edge_diffs_empty_when_unchanged() {
-        let graph = ServiceGraph::new("lattice.test");
-
-        // A depends on [B]
-        let spec = make_service_spec(vec!["B"], vec![]);
-        graph.put_service("ns", "A", &spec);
-        graph.drain_edge_diffs("ns", "A");
-
-        // Same deps again
-        graph.put_service("ns", "A", &spec);
-
-        assert!(
-            graph.drain_edge_diffs("ns", "A").is_none(),
-            "no diffs when dependencies unchanged"
-        );
-    }
-
-    #[test]
-    fn edge_diffs_consumed_on_drain() {
-        let graph = ServiceGraph::new("lattice.test");
-
-        let spec_b = make_service_spec(vec!["B"], vec![]);
-        graph.put_service("ns", "A", &spec_b);
-
-        // First drain consumes diffs
-        assert!(graph.drain_edge_diffs("ns", "A").is_some());
-
-        // Second drain returns None
-        assert!(
-            graph.drain_edge_diffs("ns", "A").is_none(),
-            "diffs should be consumed after first drain"
-        );
-    }
-
     #[test]
     fn put_service_preserves_mesh_member_egress_rules() {
         use crate::crd::{

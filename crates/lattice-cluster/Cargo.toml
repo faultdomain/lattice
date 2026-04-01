@@ -19,6 +19,7 @@ lattice-infra = { workspace = true }
 lattice-secret-provider = { workspace = true }
 lattice-move = { workspace = true }
 lattice-proto = { workspace = true }
+lattice-cache = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }
