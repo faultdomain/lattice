@@ -25,8 +25,9 @@ pub struct CsrResponse {
 
 /// Resources distributed from parent cell to child clusters
 ///
-/// Used during pivot to sync InfraProviders, SecretProviders, CedarPolicies,
-/// OIDCProviders, and their referenced secrets from the parent to the child cluster.
+/// Used during pivot to sync InfraProviders, SecretProviders, ImageProviders,
+/// CedarPolicies, OIDCProviders, and their referenced secrets from the parent
+/// to the child cluster.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DistributableResources {
     /// Serialized InfraProvider CRDs (JSON bytes)
@@ -39,6 +40,8 @@ pub struct DistributableResources {
     pub cedar_policies: Vec<Vec<u8>>,
     /// Serialized OIDCProvider CRDs (JSON bytes)
     pub oidc_providers: Vec<Vec<u8>>,
+    /// Serialized ImageProvider CRDs (JSON bytes)
+    pub image_providers: Vec<Vec<u8>>,
 }
 
 impl DistributableResources {
@@ -49,6 +52,7 @@ impl DistributableResources {
             && self.secrets.is_empty()
             && self.cedar_policies.is_empty()
             && self.oidc_providers.is_empty()
+            && self.image_providers.is_empty()
     }
 
     /// Total number of resources across all categories
@@ -58,6 +62,7 @@ impl DistributableResources {
             + self.secrets.len()
             + self.cedar_policies.len()
             + self.oidc_providers.len()
+            + self.image_providers.len()
     }
 
     /// Convert all resources to JSON strings, skipping any that aren't valid UTF-8.
@@ -69,6 +74,7 @@ impl DistributableResources {
             self.secrets,
             self.cloud_providers,
             self.secrets_providers,
+            self.image_providers,
             self.cedar_policies,
             self.oidc_providers,
         ];

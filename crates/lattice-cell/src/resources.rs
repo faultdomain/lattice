@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
-use lattice_common::crd::{CedarPolicy, InfraProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
     INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
@@ -105,6 +105,15 @@ pub async fn fetch_distributable_resources(
         }
     }
 
+    // Fetch ImageProvider CRDs
+    let ip_api: Api<ImageProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let mut image_providers = Vec::new();
+    if let Some(ip_list) = list_crd_optional(&ip_api, &lp, "ImageProvider").await? {
+        for ip in &ip_list.items {
+            image_providers.push(serialize_for_distribution(ip)?);
+        }
+    }
+
     // The root CA must be distributed so children share the same trust root.
     // This enables cross-cluster mTLS via Istio's cacerts intermediate CA chain.
     secret_names.insert(lattice_common::CA_SECRET.to_string());
@@ -158,6 +167,7 @@ pub async fn fetch_distributable_resources(
         secrets_providers = secrets_providers.len(),
         cedar_policies = cedar_policies.len(),
         oidc_providers = oidc_providers.len(),
+        image_providers = image_providers.len(),
         secrets = secrets.len(),
         "fetched distributable resources"
     );
@@ -168,6 +178,7 @@ pub async fn fetch_distributable_resources(
         secrets,
         cedar_policies,
         oidc_providers,
+        image_providers,
     })
 }
 

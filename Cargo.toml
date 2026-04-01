@@ -11,6 +11,7 @@ members = [
     "crates/lattice-cedar",
     "crates/lattice-service",
     "crates/lattice-cloud-provider",
+    "crates/lattice-image-provider",
     "crates/lattice-secret-provider",
     "crates/lattice-operator",
     "crates/lattice-cli",
@@ -48,6 +49,7 @@ lattice-agent = { path = "crates/lattice-agent" }
 lattice-cluster = { path = "crates/lattice-cluster" }
 lattice-service = { path = "crates/lattice-service" }
 lattice-cloud-provider = { path = "crates/lattice-cloud-provider" }
+lattice-image-provider = { path = "crates/lattice-image-provider" }
 lattice-capi = { path = "crates/lattice-capi" }
 lattice-cell = { path = "crates/lattice-cell" }
 lattice-secret-provider = { path = "crates/lattice-secret-provider" }

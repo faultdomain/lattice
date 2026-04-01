@@ -210,6 +210,7 @@ pub fn distributable_resources_from_proto(
         secrets: proto.secrets,
         cedar_policies: proto.cedar_policies,
         oidc_providers: proto.oidc_providers,
+        image_providers: proto.image_providers,
     }
 }
 

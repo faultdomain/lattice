@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     ConfigMap, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, LocalObjectReference,
-    Namespace, ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe, Secret, SecretVolumeSource,
-    ServiceAccount, Toleration, Volume, VolumeMount,
+    Namespace, ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe, Secret, ServiceAccount,
+    Toleration,
 };
 use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -77,11 +77,16 @@ impl DefaultManifestGenerator {
             ..Default::default()
         };
 
-        // 2. Registry credentials secret (if available)
+        // 2. Registry credentials secret (bootstrap seed for initial image pull).
+        // Labeled for distribution so child clusters receive it via fetch_distributable_resources.
         let registry_secret = registry_creds.as_ref().map(|creds| Secret {
             metadata: ObjectMeta {
                 name: Some(REGISTRY_CREDENTIALS_SECRET.to_string()),
                 namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                labels: Some(BTreeMap::from([(
+                    "lattice.dev/distribute".to_string(),
+                    "true".to_string(),
+                )])),
                 ..Default::default()
             },
             type_: Some(SECRET_TYPE_DOCKERCONFIG.to_string()),
@@ -152,19 +157,7 @@ impl DefaultManifestGenerator {
                         } else {
                             None
                         },
-                        // Mount registry credentials so operator can pass them to workload clusters
-                        volumes: if registry_secret.is_some() {
-                            Some(vec![Volume {
-                                name: "registry-creds".to_string(),
-                                secret: Some(SecretVolumeSource {
-                                    secret_name: Some(REGISTRY_CREDENTIALS_SECRET.to_string()),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            }])
-                        } else {
-                            None
-                        },
+                        volumes: None,
                         containers: vec![Container {
                             name: "operator".to_string(),
                             image: Some(image.to_string()),
@@ -217,28 +210,9 @@ impl DefaultManifestGenerator {
                                         ..Default::default()
                                     });
                                 }
-                                if registry_secret.is_some() {
-                                    envs.push(EnvVar {
-                                        name: "REGISTRY_CREDENTIALS_FILE".to_string(),
-                                        value: Some(
-                                            "/etc/lattice/registry/.dockerconfigjson".to_string(),
-                                        ),
-                                        ..Default::default()
-                                    });
-                                }
                                 envs
                             }),
-                            // Mount registry credentials if available
-                            volume_mounts: if registry_secret.is_some() {
-                                Some(vec![VolumeMount {
-                                    name: "registry-creds".to_string(),
-                                    mount_path: "/etc/lattice/registry".to_string(),
-                                    read_only: Some(true),
-                                    ..Default::default()
-                                }])
-                            } else {
-                                None
-                            },
+                            volume_mounts: None,
                             // Expose cell server ports for LoadBalancer Service
                             ports: Some(vec![
                                 ContainerPort {

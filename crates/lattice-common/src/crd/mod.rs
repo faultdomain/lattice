@@ -9,6 +9,7 @@ mod cluster_backup;
 mod cluster_routes;
 mod dns_provider;
 mod external_endpoint;
+mod image_provider;
 mod infra_provider;
 mod issuer;
 mod job;
@@ -50,6 +51,10 @@ pub use dns_provider::{
     Route53Config,
 };
 pub use external_endpoint::{ParsedEndpoint, Resolution};
+pub use image_provider::{
+    EcrConfig, ImageProvider, ImageProviderPhase, ImageProviderSpec, ImageProviderStatus,
+    ImageProviderType,
+};
 pub use infra_provider::{
     AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,
     InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,

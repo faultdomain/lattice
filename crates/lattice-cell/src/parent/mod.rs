@@ -32,7 +32,7 @@ use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::resources::fetch_distributable_resources;
 use crate::server::{AgentServer, SharedSubtreeRegistry};
 use crate::subtree_registry::SubtreeRegistry;
-use lattice_common::crd::{CedarPolicy, InfraProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
     lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_SERVICE_NAME,
@@ -64,8 +64,6 @@ pub struct ParentConfig {
     pub server_sans: Vec<String>,
     /// Lattice image to deploy on child clusters
     pub image: String,
-    /// Registry credentials (optional)
-    pub registry_credentials: Option<String>,
     /// Certificate validity duration in hours for child agent certificates
     pub cert_validity_hours: u32,
 }
@@ -103,32 +101,12 @@ impl ParentConfig {
                 lattice_svc_dns(CELL_SERVICE_NAME),
             ],
             image: config.image.clone(),
-            registry_credentials: load_registry_credentials(),
             cert_validity_hours: lattice_infra::pki::DEFAULT_CERT_VALIDITY_HOURS,
         }
     }
 }
 
-/// Load registry credentials from file specified by REGISTRY_CREDENTIALS_FILE env var.
-/// Logs errors instead of silently returning None.
-fn load_registry_credentials() -> Option<String> {
-    let path = match std::env::var("REGISTRY_CREDENTIALS_FILE") {
-        Ok(p) => p,
-        Err(_) => return None, // Env var not set is expected, not an error
-    };
 
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => Some(contents),
-        Err(e) => {
-            tracing::warn!(
-                path = %path,
-                error = %e,
-                "REGISTRY_CREDENTIALS_FILE is set but file could not be read"
-            );
-            None
-        }
-    }
-}
 
 /// Cell servers handle - manages the lifecycle of gRPC and bootstrap HTTP servers
 ///
@@ -195,6 +173,7 @@ async fn push_resources_to_agents(
                     secrets: resources.secrets.clone(),
                     cedar_policies: resources.cedar_policies.clone(),
                     oidc_providers: resources.oidc_providers.clone(),
+                    image_providers: resources.image_providers.clone(),
                 }),
                 full_sync,
             },
@@ -211,6 +190,7 @@ async fn push_resources_to_agents(
                 secrets_providers = resources.secrets_providers.len(),
                 cedar_policies = resources.cedar_policies.len(),
                 oidc_providers = resources.oidc_providers.len(),
+                image_providers = resources.image_providers.len(),
                 secrets = resources.secrets.len(),
                 "Pushed resources to agent"
             );
@@ -236,12 +216,15 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluste
     let cp_watcher = watcher::watcher(cp_api, watcher_config.clone());
     let sp_watcher = watcher::watcher(sp_api, watcher_config.clone());
     let cedar_watcher = watcher::watcher(cedar_api, watcher_config.clone());
-    let oidc_watcher = watcher::watcher(oidc_api, watcher_config);
+    let oidc_watcher = watcher::watcher(oidc_api, watcher_config.clone());
+    let ip_api: Api<ImageProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let ip_watcher = watcher::watcher(ip_api, watcher_config);
 
     let mut cp_watcher = std::pin::pin!(cp_watcher);
     let mut sp_watcher = std::pin::pin!(sp_watcher);
     let mut cedar_watcher = std::pin::pin!(cedar_watcher);
     let mut oidc_watcher = std::pin::pin!(oidc_watcher);
+    let mut ip_watcher = std::pin::pin!(ip_watcher);
 
     // Periodic sync timer
     let mut sync_interval = tokio::time::interval(SECRET_SYNC_INTERVAL);
@@ -266,6 +249,10 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluste
             // Watch for OIDCProvider changes
             Some(event) = oidc_watcher.next() => {
                 handle_resource_event(&client, &registry, &cluster_name, event, "OIDCProvider").await;
+            }
+            // Watch for ImageProvider changes
+            Some(event) = ip_watcher.next() => {
+                handle_resource_event(&client, &registry, &cluster_name, event, "ImageProvider").await;
             }
             // Periodic full sync
             _ = sync_interval.tick() => {
@@ -673,11 +660,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         &self.config.image
     }
 
-    /// Get registry credentials from config
-    pub fn registry_credentials(&self) -> Option<&str> {
-        self.config.registry_credentials.as_deref()
-    }
-
     /// Check if CA needs rotation (at 80% TTL)
     pub async fn ca_needs_rotation(&self) -> Result<bool, CellServerError> {
         self.ca_bundle
@@ -765,7 +747,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             token_ttl: self.config.token_ttl,
             ca_bundle: self.ca_bundle.clone(),
             image: self.config.image.clone(),
-            registry_credentials: self.config.registry_credentials.clone(),
             cert_validity_hours: self.config.cert_validity_hours,
             kube_client: Some(kube_client.clone()),
             cluster_name: Some(self.config.cluster_name.clone()),
@@ -1128,33 +1109,4 @@ mod tests {
         assert!(servers.bootstrap_state().await.is_none());
     }
 
-    #[test]
-    fn test_load_registry_credentials_no_env_var() {
-        // Ensure env var is not set
-        std::env::remove_var("REGISTRY_CREDENTIALS_FILE");
-        let result = load_registry_credentials();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_load_registry_credentials_file_not_found() {
-        std::env::set_var("REGISTRY_CREDENTIALS_FILE", "/nonexistent/path/to/file");
-        let result = load_registry_credentials();
-        assert!(result.is_none());
-        std::env::remove_var("REGISTRY_CREDENTIALS_FILE");
-    }
-
-    #[test]
-    fn test_load_registry_credentials_file_exists() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("test_creds_{}.txt", std::process::id()));
-        std::fs::write(&temp_file, "test-credentials").expect("write temp file");
-
-        std::env::set_var("REGISTRY_CREDENTIALS_FILE", temp_file.to_str().unwrap());
-        let result = load_registry_credentials();
-        assert_eq!(result, Some("test-credentials".to_string()));
-
-        std::env::remove_var("REGISTRY_CREDENTIALS_FILE");
-        std::fs::remove_file(&temp_file).ok();
-    }
 }

@@ -6,10 +6,11 @@
 
 use crate::crd::{
     BackupStorePhase, BackupStoreStatus, CertIssuerPhase, CertIssuerStatus, ClusterBackupPhase,
-    DNSProviderPhase, DNSProviderStatus, InfraProviderPhase, InfraProviderStatus, JobPhase,
-    LatticeClusterBackupStatus, LatticeJobStatus, LatticeMeshMemberStatus, LatticeModelStatus,
-    LatticeRestoreStatus, LatticeServiceStatus, MeshMemberPhase, ModelServingPhase, RestorePhase,
-    SecretProviderPhase, SecretProviderStatus, ServicePhase,
+    DNSProviderPhase, DNSProviderStatus, ImageProviderPhase, ImageProviderStatus,
+    InfraProviderPhase, InfraProviderStatus, JobPhase, LatticeClusterBackupStatus,
+    LatticeJobStatus, LatticeMeshMemberStatus, LatticeModelStatus, LatticeRestoreStatus,
+    LatticeServiceStatus, MeshMemberPhase, ModelServingPhase, RestorePhase, SecretProviderPhase,
+    SecretProviderStatus, ServicePhase,
 };
 
 /// Trait for CRD status structs that carry phase, message, and observed generation.
@@ -77,6 +78,7 @@ impl_status_fields!(BackupStoreStatus, BackupStorePhase);
 impl_status_fields!(LatticeClusterBackupStatus, ClusterBackupPhase);
 impl_status_fields!(LatticeRestoreStatus, RestorePhase);
 impl_status_fields!(DNSProviderStatus, DNSProviderPhase);
+impl_status_fields!(ImageProviderStatus, ImageProviderPhase);
 impl_status_fields!(CertIssuerStatus, CertIssuerPhase);
 
 #[cfg(test)]

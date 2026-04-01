@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
-use lattice_common::crd::{CedarPolicy, InfraProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
 
@@ -396,6 +396,16 @@ pub async fn apply_distributed_resources(
         &resources.oidc_providers,
         &params,
         "OIDCProvider",
+    )
+    .await?;
+
+    // Apply ImageProviders (registry credentials)
+    let ip_api: Api<ImageProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    apply_resources(
+        &ip_api,
+        &resources.image_providers,
+        &params,
+        "ImageProvider",
     )
     .await?;
 

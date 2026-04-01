@@ -319,6 +319,8 @@ message DistributableResources {
   repeated bytes cedar_policies = 4;
   // OIDCProvider CRDs (JSON) - inherited identity providers from ancestors
   repeated bytes oidc_providers = 5;
+  // ImageProvider CRDs (JSON) - container registry credentials
+  repeated bytes image_providers = 6;
 }
 
 // Sync distributable resources to child cluster

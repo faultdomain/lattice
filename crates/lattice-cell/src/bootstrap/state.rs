@@ -83,8 +83,6 @@ pub struct BootstrapConfig<G: ManifestGenerator> {
     pub ca_bundle: Arc<RwLock<CertificateAuthorityBundle>>,
     /// Lattice image to deploy on child clusters
     pub image: String,
-    /// Registry credentials (optional)
-    pub registry_credentials: Option<String>,
     /// Certificate validity duration in hours
     pub cert_validity_hours: u32,
     /// Kubernetes client for CRD status updates (None in tests)
@@ -101,8 +99,6 @@ pub struct BootstrapState<G: ManifestGenerator = super::generator::DefaultManife
     pub(crate) manifest_generator: G,
     /// Lattice image to deploy
     image: String,
-    /// Registry credentials (optional)
-    registry_credentials: Option<String>,
     /// Token TTL
     token_ttl: Duration,
     /// Certificate authority bundle for signing CSRs (supports rotation)
@@ -122,7 +118,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             clusters: DashMap::new(),
             manifest_generator: config.generator,
             image: config.image,
-            registry_credentials: config.registry_credentials,
             token_ttl: config.token_ttl,
             ca_bundle: config.ca_bundle,
             cert_validity_hours: config.cert_validity_hours,
@@ -144,10 +139,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         &self.image
     }
 
-    /// Get registry credentials
-    pub fn registry_credentials(&self) -> Option<&str> {
-        self.registry_credentials.as_deref()
-    }
 
     /// Register a cluster for bootstrap.
     ///
@@ -401,10 +392,11 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             .and_then(|v| v["spec"]["latticeImage"].as_str().map(String::from));
         let bootstrap_image = child_image.as_deref().unwrap_or(&self.image);
 
-        // Generate the complete bootstrap bundle (operator, CNI, addons, LatticeCluster)
+        // Child clusters receive the lattice-registry Secret via distribution,
+        // not baked into the operator manifests.
         let bundle_config = BootstrapBundleConfig {
             image: bootstrap_image,
-            registry_credentials: self.registry_credentials.as_deref(),
+            registry_credentials: None,
             lb_cidr: info.lb_cidr.as_deref(),
             cluster_name: &info.cluster_id,
             provider: info.provider,
@@ -1243,7 +1235,6 @@ mod tests {
             token_ttl: Duration::from_secs(3600),
             ca_bundle: test_ca_bundle(),
             image: "test:latest".to_string(),
-            registry_credentials: None,
             cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
             kube_client: None,
             cluster_name: None,
@@ -1315,7 +1306,6 @@ mod tests {
             token_ttl: Duration::from_secs(3600),
             ca_bundle: test_ca_bundle(),
             image: "test:latest".to_string(),
-            registry_credentials: None,
             cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
             kube_client: None,
             cluster_name: None,

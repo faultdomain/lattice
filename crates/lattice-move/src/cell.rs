@@ -343,6 +343,8 @@ pub struct MoveCompleteInput {
     pub cedar_policies: Vec<Vec<u8>>,
     /// OIDC providers JSON (inherited from ancestors)
     pub oidc_providers: Vec<Vec<u8>>,
+    /// Image providers JSON (registry credentials)
+    pub image_providers: Vec<Vec<u8>>,
 }
 
 /// Acknowledgment for move complete
@@ -375,6 +377,8 @@ pub struct CellMoverConfig {
     pub secrets: Vec<Vec<u8>>,
     pub cedar_policies: Vec<Vec<u8>>,
     pub oidc_providers: Vec<Vec<u8>>,
+    /// Image providers JSON (registry credentials)
+    pub image_providers: Vec<Vec<u8>>,
     /// Additional manifests to apply (e.g., CiliumNetworkPolicy)
     pub manifests: Vec<Vec<u8>>,
 }
@@ -393,6 +397,7 @@ impl CellMoverConfig {
             secrets: Vec::new(),
             cedar_policies: Vec::new(),
             oidc_providers: Vec::new(),
+            image_providers: Vec::new(),
             manifests: Vec::new(),
         }
     }
@@ -407,6 +412,7 @@ impl CellMoverConfig {
         self.secrets = resources.secrets.clone();
         self.cedar_policies = resources.cedar_policies.clone();
         self.oidc_providers = resources.oidc_providers.clone();
+        self.image_providers = resources.image_providers.clone();
         self
     }
 }
@@ -705,6 +711,7 @@ impl<S: MoveCommandSender> CellMover<S> {
             manifests: self.config.manifests.clone(),
             cedar_policies: self.config.cedar_policies.clone(),
             oidc_providers: self.config.oidc_providers.clone(),
+            image_providers: self.config.image_providers.clone(),
         };
 
         self.sender.send_complete(complete).await

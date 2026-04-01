@@ -2966,6 +2966,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-image-provider"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "kube",
+ "lattice-common",
+ "lattice-secret-provider",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-infra"
 version = "0.1.0"
 dependencies = [
@@ -3123,6 +3136,7 @@ dependencies = [
  "lattice-common",
  "lattice-cost",
  "lattice-dns-provider",
+ "lattice-image-provider",
  "lattice-infra",
  "lattice-job",
  "lattice-mesh-member",

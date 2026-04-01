@@ -457,6 +457,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
     ctx.spawn_provider("dns", lattice_dns_provider::reconcile, "DNSProvider");
     ctx.spawn_provider("cert", lattice_cert_issuer::reconcile, "CertIssuer");
     ctx.spawn_provider("cloud", lattice_cloud_provider::reconcile, "InfraProvider");
+    ctx.spawn_provider("image", lattice_image_provider::reconcile, "ImageProvider");
     ctx.spawn_provider(
         "secret",
         lattice_secret_provider::controller::reconcile,

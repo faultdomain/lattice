@@ -8,9 +8,9 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::{Client, CustomResourceExt};
 
 use lattice_common::crd::{
-    BackupStore, CedarPolicy, CertIssuer, DNSProvider, InfraProvider, LatticeCluster,
-    LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember, LatticeModel,
-    LatticeQuota, LatticeRestore, LatticeService, OIDCProvider, SecretProvider,
+    BackupStore, CedarPolicy, CertIssuer, DNSProvider, ImageProvider, InfraProvider,
+    LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember,
+    LatticeModel, LatticeQuota, LatticeRestore, LatticeService, OIDCProvider, SecretProvider,
 };
 
 /// CRD definition with name and resource
@@ -59,6 +59,10 @@ fn cluster_only_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "oidcproviders.lattice.dev",
             crd: OIDCProvider::crd(),
+        },
+        CrdDef {
+            name: "imageproviders.lattice.dev",
+            crd: ImageProvider::crd(),
         },
         CrdDef {
             name: "latticeclusterroutes.lattice.dev",

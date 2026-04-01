@@ -40,7 +40,7 @@ pub fn test_state() -> BootstrapState<TestManifestGenerator> {
         token_ttl: Duration::from_secs(3600),
         ca_bundle: test_ca_bundle(),
         image: "test:latest".to_string(),
-        registry_credentials: None,
+
         cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
         kube_client: None,
         cluster_name: None,
@@ -53,7 +53,7 @@ pub fn test_state_with_ttl(ttl: Duration) -> BootstrapState<TestManifestGenerato
         token_ttl: ttl,
         ca_bundle: test_ca_bundle(),
         image: "test:latest".to_string(),
-        registry_credentials: None,
+
         cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
         kube_client: None,
         cluster_name: None,

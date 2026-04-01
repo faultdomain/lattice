@@ -17,6 +17,7 @@ pub async fn handle(cmd: &SyncDistributedResourcesCommand, ctx: &CommandContext)
         secrets_providers = resources.secrets_providers.len(),
         cedar_policies = resources.cedar_policies.len(),
         oidc_providers = resources.oidc_providers.len(),
+        image_providers = resources.image_providers.len(),
         secrets = resources.secrets.len(),
         full_sync = cmd.full_sync,
         "Received sync resources command"

@@ -363,6 +363,7 @@ impl Installer {
         info!("[Phase 3/8] Creating InfraProvider and credentials...");
         self.create_cloud_provider_with_credentials(&bootstrap_client)
             .await?;
+        self.create_image_provider(&bootstrap_client).await?;
 
         info!("Waiting for CAPI to be installed...");
         self.wait_for_capi_crds(&bootstrap_client).await?;
@@ -962,6 +963,80 @@ impl Installer {
         .map_err(|e| Error::command_failed(format!("Failed to create InfraProvider: {}", e)))?;
 
         info!("Created InfraProvider '{}'", provider_ref);
+        Ok(())
+    }
+
+    /// Create an ImageProvider CRD with a seed Secret for registry credentials.
+    ///
+    /// The seed Secret goes to `lattice-secrets` (ESO source). The ImageProvider
+    /// CRD references it via the local webhook store. The raw `lattice-registry`
+    /// Secret in `lattice-system` is created by `generate_operator_manifests` as
+    /// a bootstrap seed for the operator's initial image pull (before ESO exists).
+    /// Once ESO is running, the ImageProvider controller takes over.
+    async fn create_image_provider(&self, client: &Client) -> Result<()> {
+        let Some(ref creds) = self.registry_credentials else {
+            return Ok(());
+        };
+
+        use kube::api::{Api, ObjectMeta, Patch, PatchParams};
+        use lattice_common::crd::{
+            ImageProvider, ImageProviderSpec, ImageProviderType, ResourceParams, ResourceType,
+            SecretParams,
+        };
+        use lattice_common::crd::workload::resources::ResourceSpec;
+        use std::collections::BTreeMap;
+
+        // Create seed Secret in lattice-secrets for ESO to serve
+        let seed_secret_name = "image-registry-credentials";
+        let seed_secret = k8s_openapi::api::core::v1::Secret {
+            metadata: ObjectMeta {
+                name: Some(seed_secret_name.to_string()),
+                namespace: Some(lattice_common::LOCAL_SECRETS_NAMESPACE.to_string()),
+                labels: Some(BTreeMap::from([
+                    ("lattice.dev/secret-source".to_string(), "true".to_string()),
+                ])),
+                ..Default::default()
+            },
+            type_: Some(lattice_common::SECRET_TYPE_DOCKERCONFIG.to_string()),
+            data: Some(BTreeMap::from([(
+                ".dockerconfigjson".to_string(),
+                k8s_openapi::ByteString(creds.as_bytes().to_vec()),
+            )])),
+            ..Default::default()
+        };
+        Self::apply_credentials_secret(client, &seed_secret).await?;
+
+        // Create ImageProvider CRD referencing the seed Secret
+        let mut image_provider = ImageProvider::new(
+            "default",
+            ImageProviderSpec {
+                provider_type: ImageProviderType::Generic,
+                registry: "*".to_string(), // default provider for all registries
+                credentials: Some(ResourceSpec {
+                    type_: ResourceType::Secret,
+                    id: Some(seed_secret_name.to_string()),
+                    params: ResourceParams::Secret(SecretParams {
+                        provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                credential_data: None,
+                ecr: None,
+            },
+        );
+        image_provider.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+
+        let api: Api<ImageProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        api.patch(
+            "default",
+            &PatchParams::apply("lattice-cli").force(),
+            &Patch::Apply(&image_provider),
+        )
+        .await
+        .map_err(|e| Error::command_failed(format!("Failed to create ImageProvider: {}", e)))?;
+
+        info!("Created ImageProvider 'default'");
         Ok(())
     }
 

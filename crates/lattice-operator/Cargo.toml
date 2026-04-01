@@ -33,6 +33,7 @@ lattice-cell.workspace = true
 lattice-cluster.workspace = true
 lattice-service.workspace = true
 lattice-cloud-provider.workspace = true
+lattice-image-provider.workspace = true
 lattice-dns-provider.workspace = true
 lattice-cert-issuer.workspace = true
 lattice-secret-provider.workspace = true
