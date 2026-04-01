@@ -45,6 +45,7 @@ lattice-model.workspace = true
 lattice-webhook.workspace = true
 lattice-cost.workspace = true
 lattice-quota.workspace = true
+lattice-cache.workspace = true
 
 kube.workspace = true
 k8s-openapi.workspace = true

@@ -3,7 +3,7 @@
 //! Owns the `LatticeQuota` CRD lifecycle:
 //!
 //! - Validates quota specs and tracks per-principal resource usage in status
-//! - Workload compilers read quotas from the K8s API at compile time
+//! - Workload compilers resolve budgets from cached quota/namespace data
 //!
 //! Quotas are a budget system, not an infrastructure scaling system.
 //! Pool `spec.min`/`spec.max` control autoscaler bounds directly.

@@ -241,6 +241,18 @@ async fn resolve_workload_params(
     let metrics_scraper = Arc::new(
         crate::metrics::VmMetricsScraper::new(cluster.monitoring.ha).expect("metrics scraper"),
     );
+    // Build per-controller resource cache with the types needed during compilation.
+    // Each controller gets its own watch connections — no cross-pod state sharing.
+    let cache = lattice_cache::ResourceCache::builder()
+        .watch(kube::Api::<lattice_common::crd::LatticeQuota>::namespaced(
+            client.clone(),
+            lattice_common::LATTICE_SYSTEM_NAMESPACE,
+        ))
+        .watch(kube::Api::<k8s_openapi::api::core::v1::Namespace>::all(
+            client.clone(),
+        ))
+        .build();
+
     WorkloadControllerParams {
         client: client.clone(),
         cluster,
@@ -249,6 +261,7 @@ async fn resolve_workload_params(
         registry,
         metrics_scraper,
         cost_provider,
+        cache,
     }
 }
 
@@ -316,6 +329,7 @@ pub struct WorkloadControllerParams {
     pub registry: Arc<CrdRegistry>,
     pub metrics_scraper: Arc<crate::metrics::VmMetricsScraper>,
     pub cost_provider: Option<Arc<dyn CostProvider>>,
+    pub cache: lattice_cache::ResourceCache,
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +417,7 @@ pub fn build_service_controller(
         registry,
         metrics_scraper,
         cost_provider,
+        cache,
     } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
@@ -425,7 +440,7 @@ pub fn build_service_controller(
     );
     service_ctx.extension_phases = vec![Arc::new(VMServiceScrapePhase::new(registry))];
     service_ctx.cost_provider = cost_provider;
-    service_ctx.client = Some(client.clone());
+    service_ctx.cache = cache;
 
     let service_ctx = Arc::new(service_ctx);
 
@@ -638,6 +653,7 @@ pub fn build_job_controller(
         registry,
         metrics_scraper,
         cost_provider,
+        cache,
     } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
@@ -659,7 +675,7 @@ pub fn build_job_controller(
         metrics_scraper,
     );
     job_ctx.cost_provider = cost_provider;
-    job_ctx.client = Some(client.clone());
+    job_ctx.cache = cache;
     let ctx = Arc::new(job_ctx);
 
     let jobs: Api<LatticeJob> = Api::all(client);
@@ -695,6 +711,7 @@ pub fn build_model_controller(
         registry,
         metrics_scraper,
         cost_provider,
+        cache,
     } = params;
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
@@ -716,7 +733,7 @@ pub fn build_model_controller(
         metrics_scraper,
     );
     model_ctx.cost_provider = cost_provider;
-    model_ctx.client = Some(client.clone());
+    model_ctx.cache = cache;
     let ctx = Arc::new(model_ctx);
 
     let models: Api<LatticeModel> = Api::all(client);

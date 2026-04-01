@@ -673,8 +673,8 @@ pub struct ServiceContext {
     pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
-    /// Kubernetes client for quota resolution (reads LatticeQuota CRDs directly)
-    pub client: Option<kube::Client>,
+    /// Resource cache for quota resolution (reflector-backed, no API calls at point of use)
+    pub cache: lattice_cache::ResourceCache,
 }
 
 impl ServiceContext {
@@ -698,7 +698,7 @@ impl ServiceContext {
             extension_phases: Vec::new(),
             metrics_scraper,
             cost_provider: None,
-            client: None,
+            cache: lattice_cache::ResourceCache::empty(),
         }
     }
 
@@ -719,7 +719,7 @@ impl ServiceContext {
             extension_phases: Vec::new(),
             metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
-            client: None,
+            cache: lattice_cache::ResourceCache::empty(),
         }
     }
 }
@@ -863,11 +863,19 @@ async fn compile_and_apply(
         .as_ref()
         .cloned()
         .unwrap_or_default();
-    let quota_budget = if let Some(ref client) = ctx.client {
-        lattice_quota::resolve_budget(client, namespace, name, &annotations).await
-    } else {
-        lattice_quota::QuotaBudget::default()
-    };
+    let ns_labels = ctx
+        .cache
+        .get::<k8s_openapi::api::core::v1::Namespace>(namespace)
+        .map(|ns| ns.metadata.labels.clone().unwrap_or_default())
+        .unwrap_or_default();
+    let quotas: Vec<_> = ctx
+        .cache
+        .list::<lattice_common::crd::LatticeQuota>()
+        .iter()
+        .map(|q| (**q).clone())
+        .collect();
+    let quota_budget =
+        lattice_quota::resolve_budget(&quotas, namespace, name, &ns_labels, &annotations);
 
     let compiler = ServiceCompiler::new(
         &ctx.graph,

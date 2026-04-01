@@ -230,8 +230,8 @@ pub struct JobContext {
     pub metrics_scraper: Arc<dyn MetricsScraper>,
     /// Cost provider for estimating workload costs (None = cost estimation disabled)
     pub cost_provider: Option<Arc<dyn CostProvider>>,
-    /// Kubernetes client for quota resolution
-    pub client: Option<kube::Client>,
+    /// Resource cache for quota resolution
+    pub cache: lattice_cache::ResourceCache,
 }
 
 impl JobContext {
@@ -254,7 +254,7 @@ impl JobContext {
             events,
             metrics_scraper,
             cost_provider: None,
-            client: None,
+            cache: lattice_cache::ResourceCache::empty(),
         }
     }
 
@@ -276,7 +276,7 @@ impl JobContext {
             events: Arc::new(lattice_common::NoopEventPublisher),
             metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
             cost_provider: None,
-            client: None,
+            cache: lattice_cache::ResourceCache::empty(),
         }
     }
 }
@@ -531,11 +531,19 @@ async fn submit_job(
         .cloned()
         .unwrap_or_default();
     let job_name = job.metadata.name.as_deref().unwrap_or_default();
-    let quota_budget = if let Some(ref client) = ctx.client {
-        lattice_quota::resolve_budget(client, namespace, job_name, &annotations).await
-    } else {
-        lattice_quota::QuotaBudget::default()
-    };
+    let ns_labels = ctx
+        .cache
+        .get::<k8s_openapi::api::core::v1::Namespace>(namespace)
+        .map(|ns| ns.metadata.labels.clone().unwrap_or_default())
+        .unwrap_or_default();
+    let quotas: Vec<_> = ctx
+        .cache
+        .list::<lattice_common::crd::LatticeQuota>()
+        .iter()
+        .map(|q| (**q).clone())
+        .collect();
+    let quota_budget =
+        lattice_quota::resolve_budget(&quotas, namespace, job_name, &ns_labels, &annotations);
 
     let compiled = match compile_job(
         job,

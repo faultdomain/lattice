@@ -2654,6 +2654,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-cache"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-capi"
 version = "0.1.0"
 dependencies = [
@@ -2988,6 +3000,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "lattice-cache",
  "lattice-cedar",
  "lattice-common",
  "lattice-cost",
@@ -3032,6 +3045,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "lattice-cache",
  "lattice-cedar",
  "lattice-common",
  "lattice-cost",
@@ -3096,6 +3110,7 @@ dependencies = [
  "lattice-agent",
  "lattice-api",
  "lattice-backup",
+ "lattice-cache",
  "lattice-capi",
  "lattice-cedar",
  "lattice-cell",
@@ -3209,6 +3224,7 @@ dependencies = [
  "jsonptr 0.6.3",
  "k8s-openapi",
  "kube",
+ "lattice-cache",
  "lattice-cedar",
  "lattice-common",
  "lattice-cost",
