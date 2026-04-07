@@ -32,6 +32,7 @@ use super::super::helpers::{
 };
 
 const ROUTE_TEST_NS: &str = "route-discovery-test";
+const RESTRICTED_TEST_NS: &str = "route-restricted-test";
 
 // =============================================================================
 // Service Builders
@@ -40,6 +41,7 @@ const ROUTE_TEST_NS: &str = "route-discovery-test";
 /// Build a simple nginx service with an advertised ingress route
 fn build_advertised_service(
     name: &str,
+    namespace: &str,
     hostname: &str,
     allowed_services: Vec<String>,
 ) -> LatticeService {
@@ -99,7 +101,7 @@ fn build_advertised_service(
     LatticeService {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
-            namespace: Some(ROUTE_TEST_NS.to_string()),
+            namespace: Some(namespace.to_string()),
             ..Default::default()
         },
         spec: LatticeServiceSpec {
@@ -844,6 +846,7 @@ pub async fn run_route_discovery_tests(
     // Deploy an advertised service on the workload cluster (open to all)
     let svc = build_advertised_service(
         "route-target",
+        ROUTE_TEST_NS,
         "route-target.test.local",
         vec!["*".to_string()],
     );
@@ -931,21 +934,22 @@ pub async fn run_route_discovery_tests(
 pub async fn run_restricted_advertise_tests(workload_kubeconfig: &str) -> Result<(), String> {
     info!("[RouteDiscovery] Starting restricted advertise tests...");
 
-    ensure_fresh_namespace(workload_kubeconfig, ROUTE_TEST_NS).await?;
+    ensure_fresh_namespace(workload_kubeconfig, RESTRICTED_TEST_NS).await?;
 
     // Deploy service restricted to a specific caller identity
     let svc = build_advertised_service(
         "restricted-svc",
+        RESTRICTED_TEST_NS,
         "restricted.test.local",
         vec!["edge/edge/haproxy-fw".to_string()],
     );
 
     let client = client_from_kubeconfig(workload_kubeconfig).await?;
-    let api: Api<LatticeService> = Api::namespaced(client, ROUTE_TEST_NS);
+    let api: Api<LatticeService> = Api::namespaced(client, RESTRICTED_TEST_NS);
     create_with_retry(&api, &svc, "restricted-svc").await?;
     wait_for_service_phase(
         workload_kubeconfig,
-        ROUTE_TEST_NS,
+        RESTRICTED_TEST_NS,
         "restricted-svc",
         "Ready",
         None,
@@ -954,10 +958,11 @@ pub async fn run_restricted_advertise_tests(workload_kubeconfig: &str) -> Result
     .await?;
 
     // Verify AuthorizationPolicy with SPIFFE principal was generated
-    verify_cross_cluster_auth_policy(workload_kubeconfig, ROUTE_TEST_NS, "restricted-svc").await?;
+    verify_cross_cluster_auth_policy(workload_kubeconfig, RESTRICTED_TEST_NS, "restricted-svc")
+        .await?;
 
     // Cleanup
-    delete_namespace(workload_kubeconfig, ROUTE_TEST_NS).await;
+    delete_namespace(workload_kubeconfig, RESTRICTED_TEST_NS).await;
     info!("[RouteDiscovery] Restricted advertise tests passed!");
     Ok(())
 }
