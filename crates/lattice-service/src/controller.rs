@@ -565,7 +565,8 @@ fn hash_secrets_from_cache(
     cache: &lattice_cache::ResourceCache,
     service_name: &str,
     namespace: &str,
-) -> String {
+    spec: &LatticeServiceSpec,
+) -> Option<String> {
     use k8s_openapi::api::core::v1::Secret as K8sSecret;
 
     let all_secrets = cache.list::<K8sSecret>();
@@ -582,8 +583,20 @@ fn hash_secrets_from_cache(
         })
         .collect();
 
+    let expects_secrets = spec
+        .workload
+        .resources
+        .values()
+        .any(|r| r.type_.is_secret());
+
     if secrets.is_empty() {
-        return String::new();
+        if expects_secrets {
+            // Service declares secrets but none are in the cache yet (e.g.
+            // ESO pod restarted during chaos). Return None so the caller
+            // preserves the existing config-hash and avoids a spurious rollout.
+            return None;
+        }
+        return Some(String::new());
     }
 
     // Sort secrets by name for deterministic ordering
@@ -609,7 +622,7 @@ fn hash_secrets_from_cache(
         }
     }
 
-    lattice_common::kube_utils::deterministic_hash(&data)
+    Some(lattice_common::kube_utils::deterministic_hash(&data))
 }
 
 // =============================================================================
@@ -768,7 +781,18 @@ pub async fn reconcile(
 
     // Hash ESO-managed secret content so rotated secrets trigger rollouts.
     // Same content = same hash = no spurious rollout (content-addressable).
-    let eso_hash = hash_secrets_from_cache(&ctx.cache, &name, namespace);
+    // Returns None when the service declares secrets but the cache has none —
+    // if the service was already Ready, this means secrets vanished from cache
+    // (e.g. ESO pod restarted during chaos), so requeue instead of computing
+    // an empty hash that would trigger a spurious rollout.
+    let eso_hash = match hash_secrets_from_cache(&ctx.cache, &name, namespace, &service.spec) {
+        Some(hash) => hash,
+        None if current_phase == ServicePhase::Ready => {
+            debug!("secrets expected but missing from cache while Ready, requeueing");
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+        None => String::new(),
+    };
 
     let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
     if !missing_deps.is_empty() {

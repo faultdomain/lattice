@@ -154,6 +154,9 @@ pub async fn run_secret_rollout_tests(kubeconfig: &str) -> Result<(), String> {
             info!("[SecretRollout] Waiting for pods to roll...");
             wait_for_new_pods(kubeconfig, TEST_NAMESPACE, "rollout-svc", &initial_pods).await?;
 
+            // Wait for the rollout to fully complete before capturing baseline for Test 2
+            wait_for_deployment_ready(kubeconfig, TEST_NAMESPACE, "rollout-svc").await?;
+
             info!("[SecretRollout] Test 1 PASSED: Secret rotation triggered pod rollout");
 
             // ── Test 2: Re-syncing same content does NOT trigger rollout ──

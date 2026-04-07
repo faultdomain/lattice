@@ -56,20 +56,48 @@ async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
 async fn test_vcjob_created(kubeconfig: &str) -> Result<(), String> {
     info!("[Job] Verifying VCJob creation...");
 
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "jobs.batch.volcano.sh",
-        JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.tasks[*].name}",
-    ])
+    // Fetch the full VCJob JSON with retry — during chaos the API server may
+    // transiently return NotFound or connection errors.
+    let kc = kubeconfig.to_string();
+    let vcjob_json = wait_for_condition(
+        "VCJob to be readable",
+        DEFAULT_TIMEOUT,
+        POLL_INTERVAL,
+        || {
+            let kc = kc.clone();
+            async move {
+                match run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "jobs.batch.volcano.sh",
+                    JOB_NAME,
+                    "-n",
+                    JOB_NAMESPACE,
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
+                    Ok(output) if !output.trim().is_empty() => Ok(Some(output)),
+                    _ => Ok(None),
+                }
+            }
+        },
+    )
     .await?;
 
-    let task_names: Vec<&str> = output.split_whitespace().collect();
+    let vcjob: serde_json::Value = serde_json::from_str(&vcjob_json)
+        .map_err(|e| format!("Failed to parse VCJob JSON: {e}"))?;
+
+    // Verify tasks
+    let tasks = vcjob["spec"]["tasks"]
+        .as_array()
+        .ok_or("VCJob spec.tasks is not an array")?;
+    let task_names: Vec<&str> = tasks
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
     if !task_names.contains(&"master") || !task_names.contains(&"worker") {
         return Err(format!(
             "Expected VCJob tasks 'master' and 'worker', got: {:?}",
@@ -77,61 +105,23 @@ async fn test_vcjob_created(kubeconfig: &str) -> Result<(), String> {
         ));
     }
 
-    // Verify replicas
-    let replicas = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "jobs.batch.volcano.sh",
-        JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.tasks[*].replicas}",
-    ])
-    .await?;
-
-    info!("[Job] VCJob task replicas: {}", replicas.trim());
-
     // Verify scheduler is volcano
-    let scheduler = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "jobs.batch.volcano.sh",
-        JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.schedulerName}",
-    ])
-    .await?;
-
-    if scheduler.trim() != "volcano" {
+    let scheduler = vcjob["spec"]["schedulerName"]
+        .as_str()
+        .unwrap_or("unset");
+    if scheduler != "volcano" {
         return Err(format!(
-            "Expected schedulerName 'volcano', got: '{}'",
-            scheduler.trim()
+            "Expected schedulerName 'volcano', got: '{scheduler}'"
         ));
     }
 
     // Verify owner reference points to LatticeJob
-    let owner_kind = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "jobs.batch.volcano.sh",
-        JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.metadata.ownerReferences[0].kind}",
-    ])
-    .await?;
-
-    if owner_kind.trim() != "LatticeJob" {
+    let owner_kind = vcjob["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or("unset");
+    if owner_kind != "LatticeJob" {
         return Err(format!(
-            "Expected ownerReference kind 'LatticeJob', got: '{}'",
-            owner_kind.trim()
+            "Expected ownerReference kind 'LatticeJob', got: '{owner_kind}'"
         ));
     }
 
@@ -194,18 +184,34 @@ async fn test_tracing_policies_created(kubeconfig: &str) -> Result<(), String> {
 async fn test_vcjob_pod_template(kubeconfig: &str) -> Result<(), String> {
     info!("[Job] Verifying VCJob pod template...");
 
-    // Check the worker task template has the correct image
-    let output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "jobs.batch.volcano.sh",
-        JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "json",
-    ])
+    // Fetch with retry — during chaos the API server may transiently fail
+    let kc = kubeconfig.to_string();
+    let output = wait_for_condition(
+        "VCJob pod template to be readable",
+        DEFAULT_TIMEOUT,
+        POLL_INTERVAL,
+        || {
+            let kc = kc.clone();
+            async move {
+                match run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "jobs.batch.volcano.sh",
+                    JOB_NAME,
+                    "-n",
+                    JOB_NAMESPACE,
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
+                    Ok(output) if !output.trim().is_empty() => Ok(Some(output)),
+                    _ => Ok(None),
+                }
+            }
+        },
+    )
     .await?;
 
     let vcjob: serde_json::Value =
@@ -326,86 +332,78 @@ async fn test_cron_job_deployment(kubeconfig: &str) -> Result<(), String> {
 async fn test_vccronjob_created(kubeconfig: &str) -> Result<(), String> {
     info!("[CronJob] Verifying VCCronJob creation...");
 
-    let schedule = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "cronjobs.batch.volcano.sh",
-        CRON_JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.schedule}",
-    ])
+    // Fetch full VCCronJob JSON with retry for chaos resilience
+    let kc = kubeconfig.to_string();
+    let cronjob_json = wait_for_condition(
+        "VCCronJob to be readable",
+        DEFAULT_TIMEOUT,
+        POLL_INTERVAL,
+        || {
+            let kc = kc.clone();
+            async move {
+                match run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "cronjobs.batch.volcano.sh",
+                    CRON_JOB_NAME,
+                    "-n",
+                    JOB_NAMESPACE,
+                    "-o",
+                    "json",
+                ])
+                .await
+                {
+                    Ok(output) if !output.trim().is_empty() => Ok(Some(output)),
+                    _ => Ok(None),
+                }
+            }
+        },
+    )
     .await?;
 
-    if schedule.trim() != "*/5 * * * *" {
+    let cronjob: serde_json::Value = serde_json::from_str(&cronjob_json)
+        .map_err(|e| format!("Failed to parse VCCronJob JSON: {e}"))?;
+
+    let schedule = cronjob["spec"]["schedule"]
+        .as_str()
+        .unwrap_or("unset");
+    if schedule != "*/5 * * * *" {
         return Err(format!(
-            "Expected schedule '*/5 * * * *', got: '{}'",
-            schedule.trim()
+            "Expected schedule '*/5 * * * *', got: '{schedule}'"
         ));
     }
 
-    // Verify concurrencyPolicy
-    let concurrency = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "cronjobs.batch.volcano.sh",
-        CRON_JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.concurrencyPolicy}",
-    ])
-    .await?;
-
-    if concurrency.trim() != "Forbid" {
+    let concurrency = cronjob["spec"]["concurrencyPolicy"]
+        .as_str()
+        .unwrap_or("unset");
+    if concurrency != "Forbid" {
         return Err(format!(
-            "Expected concurrencyPolicy 'Forbid', got: '{}'",
-            concurrency.trim()
+            "Expected concurrencyPolicy 'Forbid', got: '{concurrency}'"
         ));
     }
 
     // Verify jobTemplate has tasks
-    let task_names = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "cronjobs.batch.volcano.sh",
-        CRON_JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.spec.jobTemplate.spec.tasks[*].name}",
-    ])
-    .await?;
-
-    if !task_names.contains("worker") {
+    let tasks = cronjob["spec"]["jobTemplate"]["spec"]["tasks"]
+        .as_array()
+        .ok_or("VCCronJob jobTemplate.spec.tasks is not an array")?;
+    let task_names: Vec<&str> = tasks
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    if !task_names.contains(&"worker") {
         return Err(format!(
-            "Expected VCCronJob jobTemplate task 'worker', got: '{}'",
-            task_names.trim()
+            "Expected VCCronJob jobTemplate task 'worker', got: {task_names:?}"
         ));
     }
 
     // Verify owner reference
-    let owner_kind = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "cronjobs.batch.volcano.sh",
-        CRON_JOB_NAME,
-        "-n",
-        JOB_NAMESPACE,
-        "-o",
-        "jsonpath={.metadata.ownerReferences[0].kind}",
-    ])
-    .await?;
-
-    if owner_kind.trim() != "LatticeJob" {
+    let owner_kind = cronjob["metadata"]["ownerReferences"][0]["kind"]
+        .as_str()
+        .unwrap_or("unset");
+    if owner_kind != "LatticeJob" {
         return Err(format!(
-            "Expected ownerReference kind 'LatticeJob', got: '{}'",
-            owner_kind.trim()
+            "Expected ownerReference kind 'LatticeJob', got: '{owner_kind}'"
         ));
     }
 
