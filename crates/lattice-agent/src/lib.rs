@@ -211,6 +211,7 @@ pub fn distributable_resources_from_proto(
         cedar_policies: proto.cedar_policies,
         oidc_providers: proto.oidc_providers,
         image_providers: proto.image_providers,
+        packages: proto.packages,
     }
 }
 

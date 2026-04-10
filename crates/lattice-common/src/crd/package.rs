@@ -113,6 +113,12 @@ pub struct LatticePackageSpec {
     /// Helm template timeout (e.g., "5m", "10m"). Defaults to "5m".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
+
+    /// Whether this package should be distributed to child clusters.
+    /// When true, the parent cell includes this package in `DistributableResources`
+    /// sent during pivot and ongoing sync.
+    #[serde(default)]
+    pub propagate: bool,
 }
 
 /// Helm chart reference
@@ -283,6 +289,7 @@ mod tests {
             create_namespace: false,
             skip_crds: false,
             timeout: None,
+            propagate: false,
         }
     }
 

@@ -11,9 +11,7 @@ use tracing::{debug, info, warn};
 use lattice_move::{
     BatchAck, CompleteAck, MoveBatch, MoveCommandSender, MoveCompleteInput, MoveError,
 };
-use lattice_proto::{
-    cell_command::Command, CellCommand, DistributableResources, MoveComplete, MoveObjectBatch,
-};
+use lattice_proto::{cell_command::Command, CellCommand, MoveComplete, MoveObjectBatch};
 
 use crate::SharedAgentRegistry;
 
@@ -101,14 +99,9 @@ impl MoveCommandSender for GrpcMoveCommandSender {
                 move_id: complete.move_id,
                 cluster_name: complete.cluster_name,
                 target_namespace: complete.target_namespace,
-                resources: Some(DistributableResources {
-                    cloud_providers: complete.cloud_providers,
-                    secrets_providers: complete.secrets_providers,
-                    secrets: complete.secrets,
-                    cedar_policies: complete.cedar_policies,
-                    oidc_providers: complete.oidc_providers,
-                    image_providers: complete.image_providers,
-                }),
+                resources: Some(crate::distributable_resources_to_proto(
+                    &complete.resources,
+                )),
                 manifests: complete.manifests,
             })),
         };

@@ -465,9 +465,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         {
             let client = client.clone();
             let cedar = cedar.clone();
+            let cluster_name = config.cluster_name.clone();
             move || {
                 let client = client.clone();
                 let cedar = cedar.clone();
+                let cluster_name = cluster_name.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticePackage>(&client).await;
                     let registry = Arc::new(CrdRegistry::new(client.clone()).await);
@@ -477,6 +479,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         registry,
                         chart_cache_dir: std::env::var("LATTICE_CHART_CACHE_DIR")
                             .unwrap_or_else(|_| "/tmp/lattice-charts".to_string()),
+                        cluster_name,
                     });
                     controller_runner::simple_controller(
                         Api::<LatticePackage>::all(client),

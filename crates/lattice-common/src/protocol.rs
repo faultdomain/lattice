@@ -42,6 +42,8 @@ pub struct DistributableResources {
     pub oidc_providers: Vec<Vec<u8>>,
     /// Serialized ImageProvider CRDs (JSON bytes)
     pub image_providers: Vec<Vec<u8>>,
+    /// Serialized LatticePackage CRDs (JSON bytes)
+    pub packages: Vec<Vec<u8>>,
 }
 
 impl DistributableResources {
@@ -53,6 +55,7 @@ impl DistributableResources {
             && self.cedar_policies.is_empty()
             && self.oidc_providers.is_empty()
             && self.image_providers.is_empty()
+            && self.packages.is_empty()
     }
 
     /// Total number of resources across all categories
@@ -63,6 +66,7 @@ impl DistributableResources {
             + self.cedar_policies.len()
             + self.oidc_providers.len()
             + self.image_providers.len()
+            + self.packages.len()
     }
 
     /// Convert all resources to JSON strings, skipping any that aren't valid UTF-8.
@@ -77,6 +81,7 @@ impl DistributableResources {
             self.image_providers,
             self.cedar_policies,
             self.oidc_providers,
+            self.packages,
         ];
         all_bytes
             .into_iter()

@@ -323,6 +323,8 @@ message DistributableResources {
   repeated bytes oidc_providers = 5;
   // ImageProvider CRDs (JSON) - container registry credentials
   repeated bytes image_providers = 6;
+  // LatticePackage CRDs (JSON) - packages with propagate=true
+  repeated bytes packages = 7;
 }
 
 // Sync distributable resources to child cluster

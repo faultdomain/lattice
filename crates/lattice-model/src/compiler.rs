@@ -23,6 +23,19 @@ use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::error::ModelError;
 
+/// Environment context for model compilation.
+///
+/// Groups the cluster-level parameters that don't change per-model.
+pub struct CompileContext<'a> {
+    pub graph: &'a ServiceGraph,
+    pub cluster_name: &'a str,
+    pub provider_type: ProviderType,
+    pub cedar: &'a PolicyEngine,
+    pub role_suffix: &'a str,
+    pub quota_budget: Option<&'a lattice_quota::QuotaBudget>,
+    pub image_providers: BTreeMap<String, lattice_common::crd::CredentialSpec>,
+}
+
 const DEFAULT_DOWNLOADER_IMAGE: &str = "ghcr.io/volcano-sh/downloader:latest";
 const DEFAULT_MOUNT_PATH: &str = "/models";
 const VOLUME_NAME: &str = "model-cache";
@@ -108,13 +121,7 @@ pub struct CompiledModel {
 /// and cleanup on failure.
 pub async fn compile_model(
     model: &LatticeModel,
-    graph: &ServiceGraph,
-    cluster_name: &str,
-    provider_type: ProviderType,
-    cedar: &PolicyEngine,
-    role_suffix: &str,
-    quota_budget: Option<&lattice_quota::QuotaBudget>,
-    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
+    ctx: &CompileContext<'_>,
 ) -> Result<CompiledModel, ModelError> {
     let name = model
         .metadata
@@ -129,18 +136,18 @@ pub async fn compile_model(
 
     let roles = prepare_roles(model)?;
 
-    let ctx = CompilationCtx {
+    let comp = CompilationCtx {
         namespace,
-        provider_type,
-        cedar,
-        cluster_name,
-        graph,
+        provider_type: ctx.provider_type,
+        cedar: ctx.cedar,
+        cluster_name: ctx.cluster_name,
+        graph: ctx.graph,
         has_topology: model.spec.topology.is_some(),
-        quota_budget,
-        image_providers,
+        quota_budget: ctx.quota_budget,
+        image_providers: ctx.image_providers.clone(),
     };
 
-    let mut compiled = compile_roles(name, &roles, &ctx).await?;
+    let mut compiled = compile_roles(name, &roles, &comp).await?;
 
     inject_model_download(
         model.spec.model_source.as_ref(),
@@ -149,7 +156,7 @@ pub async fn compile_model(
 
     inject_model_labels(name, &mut compiled.role_templates);
 
-    let assembled = assemble_serving(model, &compiled.role_templates, role_suffix)?;
+    let assembled = assemble_serving(model, &compiled.role_templates, ctx.role_suffix)?;
 
     let peer_services =
         compile_peer_services(name, namespace, &roles, model.spec.routing.as_ref())?;
@@ -872,8 +879,8 @@ mod tests {
     use lattice_common::crd::{
         AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, KvConnectorType,
         LatticeModelSpec, ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
-        ModelRoutingSpec, ModelSourceSpec, PortSpec, ResourceParams, ResourceSpec, ResourceType,
-        RuntimeSpec, SecretParams, ServicePortsSpec, TargetModel, WorkloadSpec,
+        ModelRoutingSpec, ModelSourceSpec, PortSpec,
+        RuntimeSpec, ServicePortsSpec, TargetModel, WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {
@@ -968,6 +975,18 @@ mod tests {
         }
     }
 
+    fn test_ctx<'a>(graph: &'a ServiceGraph, cedar: &'a PolicyEngine) -> CompileContext<'a> {
+        CompileContext {
+            graph,
+            cluster_name: "test-cluster",
+            provider_type: ProviderType::Docker,
+            cedar,
+            role_suffix: "test",
+            quota_budget: None,
+            image_providers: BTreeMap::new(),
+        }
+    }
+
     #[tokio::test]
     async fn compile_single_role_model() {
         let mut roles = BTreeMap::new();
@@ -977,18 +996,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 1);
         assert_eq!(compiled.model_serving.spec.template.roles[0].name, "decode");
@@ -1007,18 +1017,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 2);
         assert!(compiled.routing.is_none());
@@ -1030,17 +1031,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
-        let result = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await;
+        let result = compile_model(&model, &test_ctx(&graph, &cedar)).await;
         assert!(matches!(result, Err(ModelError::NoRoles)));
     }
 
@@ -1058,17 +1049,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
-        let result = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await;
+        let result = compile_model(&model, &test_ctx(&graph, &cedar)).await;
         assert!(matches!(result, Err(ModelError::MissingNamespace)));
     }
 
@@ -1089,18 +1070,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         let routing = compiled.routing.as_ref().expect("routing should be Some");
         assert_eq!(routing.model_server.metadata.name, "test-model");
@@ -1126,18 +1098,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         // Mesh member created for the decode role with router as allowed caller
         let mm = compiled
@@ -1183,18 +1146,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         // Both roles should have allow_peer_traffic=true for KV cache transfer
         for role_name in &["prefill", "decode"] {
@@ -1238,18 +1192,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         // PD roles should have peer traffic
         for role_name in &["prefill", "decode"] {
@@ -1287,18 +1232,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         assert!(compiled.routing.is_none());
     }
@@ -1328,18 +1264,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         // Verify init container + volume injected into pod templates
         let role = &compiled.model_serving.spec.template.roles[0];
@@ -1410,18 +1337,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         // Verify no init container on pod templates
         let role = &compiled.model_serving.spec.template.roles[0];
@@ -1475,18 +1393,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         // Autoscaling resources should be compiled
         assert!(compiled.autoscaling.is_some());
@@ -1572,18 +1481,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .expect("worker with separate workload should compile");
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .expect("worker with separate workload should compile");
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 1);
     }
@@ -1606,18 +1506,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         assert!(compiled.autoscaling.is_none());
 
@@ -1674,17 +1565,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
 
-        let result = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await;
+        let result = compile_model(&model, &test_ctx(&graph, &cedar)).await;
         assert!(matches!(result, Err(ModelError::MissingName)));
     }
 
@@ -1708,17 +1589,7 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let result = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await;
+        let result = compile_model(&model, &test_ctx(&graph, &cedar)).await;
         assert!(matches!(result, Err(ModelError::MissingInferencePort)));
     }
 
@@ -1747,18 +1618,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         assert_eq!(
             compiled.peer_services.len(),
@@ -1831,18 +1693,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         for svc in &compiled.peer_services {
             let ports = svc["spec"]["ports"].as_array().expect("ports should exist");
@@ -1873,18 +1726,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         assert!(
             compiled.peer_services.is_empty(),
@@ -1935,18 +1779,9 @@ mod tests {
         register_model_roles(&model, &graph);
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         // Prefill role should have a mesh member with inference port injected
         let prefill_mm = compiled
@@ -2156,18 +1991,9 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        let compiled = compile_model(
-            &model,
-            &graph,
-            "test-cluster",
-            ProviderType::Docker,
-            &cedar,
-            "test",
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        .unwrap();
+        let compiled = compile_model(&model, &test_ctx(&graph, &cedar))
+            .await
+            .unwrap();
 
         let role = &compiled.model_serving.spec.template.roles[0];
         let volumes = role.entry_template["spec"]["volumes"]

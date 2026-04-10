@@ -14,7 +14,7 @@ use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
 use lattice_common::crd::{
-    CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider,
+    CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;
 use lattice_common::{kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
@@ -407,6 +407,16 @@ pub async fn apply_distributed_resources(
         &resources.image_providers,
         &params,
         "ImageProvider",
+    )
+    .await?;
+
+    // Apply LatticePackages (propagated from parent)
+    let pkg_api: Api<LatticePackage> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    apply_resources(
+        &pkg_api,
+        &resources.packages,
+        &params,
+        "LatticePackage",
     )
     .await?;
 

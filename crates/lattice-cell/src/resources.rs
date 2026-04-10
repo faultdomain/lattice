@@ -12,12 +12,29 @@ use thiserror::Error;
 use tracing::debug;
 
 use lattice_common::crd::{
-    CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider,
+    CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;
 use lattice_common::{
     INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
 };
+
+/// Convert domain `DistributableResources` to the proto wire type.
+///
+/// Standalone function due to Rust orphan rules — both types are in other crates.
+pub fn distributable_resources_to_proto(
+    resources: &DistributableResources,
+) -> lattice_proto::DistributableResources {
+    lattice_proto::DistributableResources {
+        cloud_providers: resources.cloud_providers.clone(),
+        secrets_providers: resources.secrets_providers.clone(),
+        secrets: resources.secrets.clone(),
+        cedar_policies: resources.cedar_policies.clone(),
+        oidc_providers: resources.oidc_providers.clone(),
+        image_providers: resources.image_providers.clone(),
+        packages: resources.packages.clone(),
+    }
+}
 
 /// Error type for resource distribution
 #[derive(Debug, Error)]
@@ -116,6 +133,15 @@ pub async fn fetch_distributable_resources(
         }
     }
 
+    // Fetch LatticePackage CRDs (skip non-propagating)
+    let pkg_api: Api<LatticePackage> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let mut packages = Vec::new();
+    if let Some(pkg_list) = list_crd_optional(&pkg_api, &lp, "LatticePackage").await? {
+        for pkg in pkg_list.items.iter().filter(|p| p.spec.propagate) {
+            packages.push(serialize_for_distribution(pkg)?);
+        }
+    }
+
     // The root CA must be distributed so children share the same trust root.
     // This enables cross-cluster mTLS via Istio's cacerts intermediate CA chain.
     secret_names.insert(lattice_common::CA_SECRET.to_string());
@@ -170,6 +196,7 @@ pub async fn fetch_distributable_resources(
         cedar_policies = cedar_policies.len(),
         oidc_providers = oidc_providers.len(),
         image_providers = image_providers.len(),
+        packages = packages.len(),
         secrets = secrets.len(),
         "fetched distributable resources"
     );
@@ -181,6 +208,7 @@ pub async fn fetch_distributable_resources(
         cedar_policies,
         oidc_providers,
         image_providers,
+        packages,
     })
 }
 

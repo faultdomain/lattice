@@ -41,7 +41,7 @@ use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
 use lattice_cost::CostProvider;
 
-use crate::compiler::{compile_model, role_key_suffix, CompiledModel};
+use crate::compiler::{compile_model, role_key_suffix, CompileContext, CompiledModel};
 use crate::error::ModelError;
 
 const FIELD_MANAGER: &str = "lattice-model-controller";
@@ -399,19 +399,19 @@ pub async fn reconcile(
 
     let image_providers = resolve_model_image_providers(&model, &ctx.cache);
 
+    let compile_ctx = CompileContext {
+        graph: &ctx.graph,
+        cluster_name: &ctx.cluster_name,
+        provider_type: ctx.provider_type,
+        cedar: &ctx.cedar,
+        role_suffix: &suffix,
+        quota_budget: Some(&quota_budget),
+        image_providers,
+    };
+
     match phase {
         ModelServingPhase::Pending => {
-            let compiled = compile_model(
-                &model,
-                &ctx.graph,
-                &ctx.cluster_name,
-                ctx.provider_type,
-                &ctx.cedar,
-                &suffix,
-                Some(&quota_budget),
-                image_providers,
-            )
-            .await;
+            let compiled = compile_model(&model, &compile_ctx).await;
 
             let compiled = match compiled {
                 Ok(c) => c,
@@ -587,17 +587,7 @@ pub async fn reconcile(
                 let old_role_keys = pre_applied_roles.clone();
                 let new_role_keys = spec_role_keys(&name, &model.spec.roles);
 
-                let compiled = match compile_model(
-                    &model,
-                    &ctx.graph,
-                    &ctx.cluster_name,
-                    ctx.provider_type,
-                    &ctx.cedar,
-                    &suffix,
-                    Some(&quota_budget),
-                    image_providers,
-                )
-                .await
+                let compiled = match compile_model(&model, &compile_ctx).await
                 {
                     Ok(c) => c,
                     Err(e) => {

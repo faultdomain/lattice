@@ -29,10 +29,10 @@ use crate::bootstrap::{
 };
 use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
-use crate::resources::fetch_distributable_resources;
+use crate::resources::{distributable_resources_to_proto, fetch_distributable_resources};
 use crate::server::AgentServer;
 use lattice_common::crd::{
-    CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider,
+    CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;
 use lattice_common::{
@@ -41,10 +41,7 @@ use lattice_common::{
 };
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_infra::ServerMtlsConfig;
-use lattice_proto::{
-    cell_command, CellCommand, DistributableResources as ProtoDistributableResources,
-    SyncDistributedResourcesCommand,
-};
+use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
 
 /// Configuration for cell servers
 #[derive(Debug, Clone)]
@@ -166,14 +163,7 @@ async fn push_resources_to_agents(
         command_id: uuid::Uuid::new_v4().to_string(),
         command: Some(cell_command::Command::SyncResources(
             SyncDistributedResourcesCommand {
-                resources: Some(ProtoDistributableResources {
-                    cloud_providers: resources.cloud_providers.clone(),
-                    secrets_providers: resources.secrets_providers.clone(),
-                    secrets: resources.secrets.clone(),
-                    cedar_policies: resources.cedar_policies.clone(),
-                    oidc_providers: resources.oidc_providers.clone(),
-                    image_providers: resources.image_providers.clone(),
-                }),
+                resources: Some(distributable_resources_to_proto(&resources)),
                 full_sync,
             },
         )),
@@ -190,6 +180,7 @@ async fn push_resources_to_agents(
                 cedar_policies = resources.cedar_policies.len(),
                 oidc_providers = resources.oidc_providers.len(),
                 image_providers = resources.image_providers.len(),
+                packages = resources.packages.len(),
                 secrets = resources.secrets.len(),
                 "Pushed resources to agent"
             );
@@ -217,13 +208,16 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluste
     let cedar_watcher = watcher::watcher(cedar_api, watcher_config.clone());
     let oidc_watcher = watcher::watcher(oidc_api, watcher_config.clone());
     let ip_api: Api<ImageProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let ip_watcher = watcher::watcher(ip_api, watcher_config);
+    let ip_watcher = watcher::watcher(ip_api, watcher_config.clone());
+    let pkg_api: Api<LatticePackage> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let pkg_watcher = watcher::watcher(pkg_api, watcher_config);
 
     let mut cp_watcher = std::pin::pin!(cp_watcher);
     let mut sp_watcher = std::pin::pin!(sp_watcher);
     let mut cedar_watcher = std::pin::pin!(cedar_watcher);
     let mut oidc_watcher = std::pin::pin!(oidc_watcher);
     let mut ip_watcher = std::pin::pin!(ip_watcher);
+    let mut pkg_watcher = std::pin::pin!(pkg_watcher);
 
     // Periodic sync timer
     let mut sync_interval = tokio::time::interval(SECRET_SYNC_INTERVAL);
@@ -252,6 +246,10 @@ async fn run_resource_sync(client: Client, registry: SharedAgentRegistry, cluste
             // Watch for ImageProvider changes
             Some(event) = ip_watcher.next() => {
                 handle_resource_event(&client, &registry, &cluster_name, event, "ImageProvider").await;
+            }
+            // Watch for LatticePackage changes
+            Some(event) = pkg_watcher.next() => {
+                handle_resource_event(&client, &registry, &cluster_name, event, "LatticePackage").await;
             }
             // Periodic full sync
             _ = sync_interval.tick() => {

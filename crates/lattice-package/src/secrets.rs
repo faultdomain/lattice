@@ -14,13 +14,6 @@ use lattice_template::SecretDirective;
 
 use crate::error::PackageError;
 
-/// A generated ExternalSecret from a $secret directive.
-#[derive(Debug)]
-pub struct ResolvedDirective {
-    /// ExternalSecret to apply
-    pub external_secret: ExternalSecret,
-}
-
 /// Validate directive key mappings against the resources block.
 ///
 /// Returns the set of resource names that are actually referenced.
@@ -117,7 +110,7 @@ pub fn generate_external_secrets(
     namespace: &str,
     directives: &[SecretDirective],
     resources: &BTreeMap<String, ResourceSpec>,
-) -> Result<Vec<ResolvedDirective>, PackageError> {
+) -> Result<Vec<ExternalSecret>, PackageError> {
     let mut result = Vec::with_capacity(directives.len());
 
     for directive in directives {
@@ -190,9 +183,7 @@ pub fn generate_external_secrets(
             package_name.to_string(),
         );
 
-        result.push(ResolvedDirective {
-            external_secret: es,
-        });
+        result.push(es);
     }
 
     Ok(result)
@@ -303,8 +294,8 @@ mod tests {
         let result =
             generate_external_secrets("myapp", "default", &directives, &resources).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].secret_name, "myapp-auth");
-        assert_eq!(result[0].external_secret.spec.data.len(), 2);
+        assert_eq!(result[0].metadata.name.as_str(), "myapp-auth");
+        assert_eq!(result[0].spec.data.len(), 2);
     }
 
     #[test]

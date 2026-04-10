@@ -47,5 +47,7 @@ pub use kubeconfig::patch_kubeconfig_for_proxy;
 pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{create_ca, load_ca, CellServerError, ParentConfig, ParentServers};
 pub use resilient_tunnel::tunnel_request;
-pub use resources::{fetch_distributable_resources, ResourceError};
+pub use resources::{
+    distributable_resources_to_proto, fetch_distributable_resources, ResourceError,
+};
 pub use server::{AgentServer, GrpcServerConfig, PeerRouteConfig, SharedPeerRouteConfig};

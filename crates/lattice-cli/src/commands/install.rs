@@ -40,7 +40,7 @@ use lattice_cell::bootstrap::{
 };
 use lattice_common::crd::{
     BootstrapProvider, InfraProvider, InfraProviderSpec, InfraProviderType, LatticeCluster,
-    ProviderType,
+    LatticePackage, ProviderType,
 };
 use lattice_common::credentials::{
     AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
@@ -145,6 +145,8 @@ pub struct Installer {
     config_dir: PathBuf,
     /// Run ID for this install session (used for kind cluster name and temp files)
     run_id: String,
+    /// LatticePackage resources from the config file to apply after bootstrap
+    packages: Vec<String>,
 }
 
 impl Installer {
@@ -167,8 +169,46 @@ impl Installer {
         config_dir: PathBuf,
         run_id: Option<String>,
     ) -> Result<Self> {
-        let value = lattice_common::yaml::parse_yaml(&cluster_yaml)
+        let docs = lattice_common::yaml::parse_yaml_multi(&cluster_yaml)
             .map_err(|e| Error::validation(format!("Invalid YAML: {}", e)))?;
+
+        // Find the LatticeCluster document and collect LatticePackage documents
+        let mut cluster_value = None;
+        let mut packages = Vec::new();
+
+        for doc in docs {
+            let kind = doc.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+            match kind {
+                "LatticeCluster" => {
+                    if cluster_value.is_some() {
+                        return Err(Error::validation(
+                            "Config file must contain exactly one LatticeCluster",
+                        ));
+                    }
+                    cluster_value = Some(doc);
+                }
+                "LatticePackage" => {
+                    // Validate it deserializes, then store as JSON string for apply
+                    let _: LatticePackage = serde_json::from_value(doc.clone()).map_err(|e| {
+                        Error::validation(format!("Invalid LatticePackage: {}", e))
+                    })?;
+                    let json = serde_json::to_string(&doc).map_err(|e| {
+                        Error::validation(format!("Failed to serialize LatticePackage: {}", e))
+                    })?;
+                    packages.push(json);
+                }
+                _ => {
+                    return Err(Error::validation(format!(
+                        "Unsupported resource kind '{}' in config file. \
+                         Only LatticeCluster and LatticePackage are supported.",
+                        kind
+                    )));
+                }
+            }
+        }
+
+        let value = cluster_value
+            .ok_or_else(|| Error::validation("Config file must contain a LatticeCluster"))?;
         let mut cluster: LatticeCluster = serde_json::from_value(value)
             .map_err(|e| Error::validation(format!("Invalid LatticeCluster: {}", e)))?;
 
@@ -201,6 +241,7 @@ impl Installer {
             registry_credentials,
             config_dir,
             run_id: run_id.unwrap_or_else(generate_run_id),
+            packages,
         })
     }
 
@@ -294,6 +335,11 @@ impl Installer {
 
         bootstrap_result?;
 
+        // Apply LatticePackages from config file (e.g., Flux, flux-bootstrap)
+        if !self.packages.is_empty() {
+            self.apply_packages().await?;
+        }
+
         info!("Creating lattice-admin service account and fetching proxy kubeconfig...");
         self.setup_admin_access().await?;
 
@@ -302,6 +348,30 @@ impl Installer {
             "Management cluster '{}' is now self-managing.",
             self.cluster_name()
         );
+
+        Ok(())
+    }
+
+    /// Apply LatticePackage resources from the config file to the management cluster.
+    async fn apply_packages(&self) -> Result<()> {
+        let mgmt_client = self.management_client().await?;
+
+        // Wait for LatticePackage CRD to be registered by the operator
+        kube_utils::wait_for_crd(
+            &mgmt_client,
+            "latticepackages.lattice.dev",
+            CRD_APPLY_TIMEOUT,
+        )
+        .await
+        .cmd_err()?;
+
+        info!(
+            "Applying {} LatticePackage(s) from config file...",
+            self.packages.len()
+        );
+        apply_with_retry(&mgmt_client, &self.packages, "LatticePackages")
+            .await
+            .cmd_err()?;
 
         Ok(())
     }

@@ -11,7 +11,6 @@
 #![cfg(feature = "provider-e2e")]
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use tracing::info;
 
@@ -397,7 +396,7 @@ async fn test_delete(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     wait_for_condition(
         "podinfo Deployment to be deleted",
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();
@@ -427,25 +426,35 @@ async fn test_delete(kubeconfig: &str) -> Result<(), String> {
     info!("[Package] Helm release uninstalled — Deployment gone");
 
     // Verify ExternalSecrets were cleaned up
-    let es_output = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "externalsecret",
-        "-n",
-        PACKAGE_NAMESPACE,
-        "-o",
-        "jsonpath={.items[*].metadata.name}",
-    ])
-    .await
-    .unwrap_or_default();
-
-    if !es_output.trim().is_empty() {
-        return Err(format!(
-            "ExternalSecrets should be cleaned up after delete, found: {}",
-            es_output
-        ));
-    }
+    let kc = kubeconfig.to_string();
+    wait_for_condition(
+        "ExternalSecrets to be cleaned up",
+        DEFAULT_TIMEOUT,
+        POLL_INTERVAL,
+        || {
+            let kc = kc.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "externalsecret",
+                    "-n",
+                    PACKAGE_NAMESPACE,
+                    "-o",
+                    "jsonpath={.items[*].metadata.name}",
+                ])
+                .await
+                .unwrap_or_default();
+                if output.trim().is_empty() {
+                    Ok(Some(()))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
 
     info!("[Package] ExternalSecrets cleaned up");
     info!("[Package] Delete lifecycle verified");

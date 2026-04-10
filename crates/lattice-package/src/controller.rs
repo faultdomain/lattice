@@ -25,6 +25,8 @@ pub struct PackageContext {
     pub cedar: Arc<PolicyEngine>,
     pub registry: Arc<CrdRegistry>,
     pub chart_cache_dir: String,
+    /// Cluster name from LATTICE_CLUSTER_NAME, exposed as `${cluster.name}` in templates.
+    pub cluster_name: Option<String>,
 }
 
 /// Reconcile a LatticePackage.
@@ -67,45 +69,36 @@ pub async fn reconcile(
 
     // Validate
     if let Err(e) = package.spec.validate() {
-        update_status(
-            &ctx.client,
-            &name,
-            &namespace,
+        let status = build_status(
             PackagePhase::Failed,
             Some(format!("Validation failed: {}", e)),
             package.metadata.generation,
-        )
-        .await?;
+        );
+        patch_status(&ctx.client, &name, &namespace, &status).await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
     }
 
     match compile_and_install(&package, &name, &namespace, &ctx).await {
         Ok(version) => {
             info!(version = %version, "package installed/upgraded");
-            let mut status = LatticePackageStatus::with_phase(PackagePhase::Ready);
-            status.chart_version = Some(version.clone());
-            status.observed_generation = package.metadata.generation;
-            status.message = Some(format!("{} {} installed", package.spec.chart.name, version,));
-            status.set_condition(
-                "Ready",
-                ConditionStatus::True,
-                "Installed",
-                "Helm release installed",
+            let mut status = build_status(
+                PackagePhase::Ready,
+                Some(format!("{} {} installed", package.spec.chart.name, version)),
+                package.metadata.generation,
             );
+            status.chart_version = Some(version);
+            status.set_condition("Ready", ConditionStatus::True, "Installed", "Helm release installed");
             patch_status(&ctx.client, &name, &namespace, &status).await?;
             Ok(Action::requeue(REQUEUE_READY))
         }
         Err(e) => {
             error!(error = %e, "package reconciliation failed");
-            update_status(
-                &ctx.client,
-                &name,
-                &namespace,
+            let status = build_status(
                 PackagePhase::Failed,
                 Some(e.to_string()),
                 package.metadata.generation,
-            )
-            .await?;
+            );
+            patch_status(&ctx.client, &name, &namespace, &status).await?;
             let requeue = if e.is_retryable() {
                 Duration::from_secs(30)
             } else {
@@ -130,10 +123,13 @@ async fn compile_and_install(
         .values
         .clone()
         .unwrap_or(serde_json::Value::Object(Default::default()));
-    let template_ctx = lattice_template::TemplateContext::builder()
+    let mut ctx_builder = lattice_template::TemplateContext::builder()
         .set("metadata.name", name)
-        .set("metadata.namespace", namespace)
-        .build();
+        .set("metadata.namespace", namespace);
+    if let Some(ref cluster_name) = ctx.cluster_name {
+        ctx_builder = ctx_builder.set("cluster.name", cluster_name);
+    }
+    let template_ctx = ctx_builder.build();
     let opts = lattice_template::ExpandOptions {
         secret_mode: lattice_template::SecretMode::Collect,
         name_prefix: name.to_string(),
@@ -171,24 +167,15 @@ async fn compile_and_install(
         )?;
 
         if !resolved.is_empty() {
-            let es_ar = ctx
-                .registry
-                .resolve(CrdKind::ExternalSecret)
-                .await
-                .map_err(|e| {
-                    PackageError::Compilation(format!("resolve ExternalSecret CRD: {}", e))
-                })?
-                .ok_or_else(|| {
-                    PackageError::Compilation("ExternalSecret CRD not installed".to_string())
-                })?;
+            let es_ar = resolve_crd(&ctx.registry, CrdKind::ExternalSecret).await?;
             let params = PatchParams::apply(FIELD_MANAGER).force();
-            for r in &resolved {
-                let es_json = serde_json::to_value(&r.external_secret).map_err(|e| {
+            let api: Api<kube::api::DynamicObject> =
+                Api::namespaced_with(ctx.client.clone(), namespace, &es_ar);
+            for es in &resolved {
+                let es_json = serde_json::to_value(es).map_err(|e| {
                     PackageError::Compilation(format!("serialize ExternalSecret: {}", e))
                 })?;
-                let api: Api<kube::api::DynamicObject> =
-                    Api::namespaced_with(ctx.client.clone(), namespace, &es_ar);
-                let es_name = r.external_secret.metadata.name.as_str();
+                let es_name = es.metadata.name.as_str();
                 api.patch(es_name, &params, &Patch::Apply(&es_json))
                     .await
                     .map_err(PackageError::Kube)?;
@@ -223,14 +210,7 @@ async fn compile_and_install(
 
     // Step 7: Apply MeshMember if mesh config is set
     if let Some(ref mesh) = spec.mesh {
-        let mm_ar = ctx
-            .registry
-            .resolve(CrdKind::MeshMember)
-            .await
-            .map_err(|e| PackageError::Compilation(format!("resolve MeshMember CRD: {}", e)))?
-            .ok_or_else(|| {
-                PackageError::Compilation("LatticeMeshMember CRD not installed".to_string())
-            })?;
+        let mm_ar = resolve_crd(&ctx.registry, CrdKind::MeshMember).await?;
         let member = crate::mesh::build_mesh_member(name, target_ns, mesh);
         let member_json = serde_json::to_value(&member)
             .map_err(|e| PackageError::Compilation(format!("serialize MeshMember: {}", e)))?;
@@ -371,22 +351,8 @@ async fn remove_finalizer(
 }
 
 // =============================================================================
-// Status helpers
+// Helpers
 // =============================================================================
-
-async fn update_status(
-    client: &Client,
-    name: &str,
-    namespace: &str,
-    phase: PackagePhase,
-    message: Option<String>,
-    observed_generation: Option<i64>,
-) -> Result<(), ReconcileError> {
-    let mut status = LatticePackageStatus::with_phase(phase);
-    status.message = message;
-    status.observed_generation = observed_generation;
-    patch_status(client, name, namespace, &status).await
-}
 
 async fn patch_status(
     client: &Client,
@@ -395,12 +361,31 @@ async fn patch_status(
     status: &LatticePackageStatus,
 ) -> Result<(), ReconcileError> {
     lattice_common::kube_utils::patch_resource_status::<LatticePackage>(
-        client,
-        name,
-        namespace,
-        status,
-        FIELD_MANAGER,
+        client, name, namespace, status, FIELD_MANAGER,
     )
     .await?;
     Ok(())
+}
+
+fn build_status(
+    phase: PackagePhase,
+    message: Option<String>,
+    observed_generation: Option<i64>,
+) -> LatticePackageStatus {
+    let mut status = LatticePackageStatus::with_phase(phase);
+    status.message = message;
+    status.observed_generation = observed_generation;
+    status
+}
+
+/// Resolve a CRD kind from the registry, returning a compilation error if missing.
+async fn resolve_crd(
+    registry: &CrdRegistry,
+    kind: CrdKind,
+) -> Result<kube::discovery::ApiResource, PackageError> {
+    registry
+        .resolve(kind)
+        .await
+        .map_err(|e| PackageError::Compilation(format!("resolve {:?} CRD: {}", kind, e)))?
+        .ok_or_else(|| PackageError::Compilation(format!("{:?} CRD not installed", kind)))
 }

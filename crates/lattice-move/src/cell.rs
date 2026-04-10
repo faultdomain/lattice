@@ -335,20 +335,10 @@ pub struct MoveCompleteInput {
     pub cluster_name: String,
     /// Target namespace
     pub target_namespace: String,
-    /// Cloud providers JSON
-    pub cloud_providers: Vec<Vec<u8>>,
-    /// Secrets providers JSON
-    pub secrets_providers: Vec<Vec<u8>>,
-    /// Secrets JSON
-    pub secrets: Vec<Vec<u8>>,
+    /// Resources to distribute to the child cluster
+    pub resources: lattice_common::DistributableResources,
     /// Additional manifests to apply (e.g., CiliumNetworkPolicy)
     pub manifests: Vec<Vec<u8>>,
-    /// Cedar policies JSON (inherited from ancestors)
-    pub cedar_policies: Vec<Vec<u8>>,
-    /// OIDC providers JSON (inherited from ancestors)
-    pub oidc_providers: Vec<Vec<u8>>,
-    /// Image providers JSON (registry credentials)
-    pub image_providers: Vec<Vec<u8>>,
 }
 
 /// Acknowledgment for move complete
@@ -375,14 +365,8 @@ pub struct CellMoverConfig {
     pub move_id: String,
     /// Timeout for batch operations
     pub batch_timeout: Duration,
-    /// Distributable resources
-    pub cloud_providers: Vec<Vec<u8>>,
-    pub secrets_providers: Vec<Vec<u8>>,
-    pub secrets: Vec<Vec<u8>>,
-    pub cedar_policies: Vec<Vec<u8>>,
-    pub oidc_providers: Vec<Vec<u8>>,
-    /// Image providers JSON (registry credentials)
-    pub image_providers: Vec<Vec<u8>>,
+    /// Resources to distribute to the child cluster
+    pub resources: lattice_common::DistributableResources,
     /// Additional manifests to apply (e.g., CiliumNetworkPolicy)
     pub manifests: Vec<Vec<u8>>,
 }
@@ -396,27 +380,14 @@ impl CellMoverConfig {
             cluster_name: cluster_name.to_string(),
             move_id: uuid::Uuid::new_v4().to_string(),
             batch_timeout: Duration::from_secs(60),
-            cloud_providers: Vec::new(),
-            secrets_providers: Vec::new(),
-            secrets: Vec::new(),
-            cedar_policies: Vec::new(),
-            oidc_providers: Vec::new(),
-            image_providers: Vec::new(),
+            resources: Default::default(),
             manifests: Vec::new(),
         }
     }
 
-    /// Set distributable resources from DistributableResources struct
-    pub fn with_distributable_resources(
-        mut self,
-        resources: &lattice_common::DistributableResources,
-    ) -> Self {
-        self.cloud_providers = resources.cloud_providers.clone();
-        self.secrets_providers = resources.secrets_providers.clone();
-        self.secrets = resources.secrets.clone();
-        self.cedar_policies = resources.cedar_policies.clone();
-        self.oidc_providers = resources.oidc_providers.clone();
-        self.image_providers = resources.image_providers.clone();
+    /// Set distributable resources
+    pub fn with_resources(mut self, resources: lattice_common::DistributableResources) -> Self {
+        self.resources = resources;
         self
     }
 }
@@ -709,13 +680,8 @@ impl<S: MoveCommandSender> CellMover<S> {
             move_id: self.config.move_id.clone(),
             cluster_name: self.config.cluster_name.clone(),
             target_namespace: self.config.target_namespace.clone(),
-            cloud_providers: self.config.cloud_providers.clone(),
-            secrets_providers: self.config.secrets_providers.clone(),
-            secrets: self.config.secrets.clone(),
+            resources: self.config.resources.clone(),
             manifests: self.config.manifests.clone(),
-            cedar_policies: self.config.cedar_policies.clone(),
-            oidc_providers: self.config.oidc_providers.clone(),
-            image_providers: self.config.image_providers.clone(),
         };
 
         self.sender.send_complete(complete).await

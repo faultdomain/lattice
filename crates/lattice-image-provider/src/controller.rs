@@ -72,7 +72,7 @@ pub async fn reconcile(
         let credential_data = match ip.spec.credential_data.as_ref() {
             Some(data) => {
                 interpolated = interpolate_registry(data, &ip.spec.registry)
-                    .map_err(|e| ReconcileError::Validation(e))?;
+                    .map_err(ReconcileError::Validation)?;
                 Some(&interpolated)
             }
             None => None,

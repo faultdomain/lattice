@@ -96,7 +96,7 @@ impl PivotOperations for PivotOperationsImpl {
         // Note: Infrastructure manifests (network policies, etc.) are reconciled
         // continuously by the child cluster's controller after pivot
         let config = CellMoverConfig::new(source_namespace, target_namespace, cluster_name)
-            .with_distributable_resources(&resources);
+            .with_resources(resources);
 
         // Create the gRPC command sender
         let sender = Arc::new(lattice_cell::GrpcMoveCommandSender::new(
