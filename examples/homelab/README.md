@@ -193,4 +193,4 @@ curl http://sonarr.home.arpa
 - **VPN egress**: Edit the wireguard sidecar config in `backend/media/nzbget.yaml` with your WireGuard credentials
 - **Storage sizes**: Adjust `size` in volume resources
 - **VM sizing**: Edit `instanceType` in cluster YAMLs
-- **Restrict access**: Change `allowedServices: ["*"]` to specific callers like `["edge/edge/haproxy-fw"]`
+- **Restrict access**: Change `allowedServices: ["*"]` to specific callers like `["edge/haproxy-fw"]`

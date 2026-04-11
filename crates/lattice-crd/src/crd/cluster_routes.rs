@@ -231,7 +231,7 @@ mod tests {
             address: "10.0.0.217".to_string(),
             port: 8096,
             protocol: "HTTP".to_string(),
-            allowed_services: vec!["edge/edge/haproxy-fw".to_string()],
+            allowed_services: vec!["edge/haproxy-fw".to_string()],
             service_ports: BTreeMap::from([("http".to_string(), 8096)]),
         };
 

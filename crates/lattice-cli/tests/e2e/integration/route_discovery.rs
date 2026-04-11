@@ -941,7 +941,7 @@ pub async fn run_restricted_advertise_tests(workload_kubeconfig: &str) -> Result
         "restricted-svc",
         RESTRICTED_TEST_NS,
         "restricted.test.local",
-        vec!["edge/edge/haproxy-fw".to_string()],
+        vec!["edge/haproxy-fw".to_string()],
     );
 
     let client = client_from_kubeconfig(workload_kubeconfig).await?;
