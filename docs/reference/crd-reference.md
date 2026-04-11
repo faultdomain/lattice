@@ -341,3 +341,139 @@ Restore from a Velero backup.
 | `spec.restoreVolumes` | bool | Restore persistent volumes (default: `true`) |
 
 **Status Phases:** `Pending` → `InProgress` → `Completed` / `Failed`
+
+---
+
+## Package Management
+
+### LatticePackage
+
+Declarative Helm chart lifecycle management with secret injection and optional mesh integration. The controller renders the chart with `helm template` and applies via server-side apply.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.chart.repository` | string | Chart repository URL (OCI or HTTPS) |
+| `spec.chart.name` | string | Chart name |
+| `spec.chart.version` | string | Chart version (SemVer, required) |
+| `spec.values` | object | Helm values with `$secret` directive support |
+| `spec.resources` | map | Secret resources referenced by `$secret` directives (same format as LatticeService resources) |
+| `spec.mesh.selector` | map | Label selector for mesh integration |
+| `spec.mesh.ports` | []MeshPort | Exposed ports for mesh policy |
+| `spec.mesh.allowedCallers` | []ServiceRef | Inbound bilateral agreements |
+| `spec.mesh.dependencies` | []ServiceRef | Outbound bilateral agreements |
+| `spec.mesh.egress` | []EgressRule | Non-mesh egress rules |
+| `spec.targetNamespace` | string | Render namespace (defaults to metadata.namespace) |
+| `spec.createNamespace` | bool | Create target namespace if missing |
+| `spec.skipCrds` | bool | Skip CRD installation from chart |
+| `spec.propagate` | bool | Distribute to child clusters |
+
+**Status Phases:** `Pending` → `Ready` / `Failed`
+
+**Status Fields:** `phase`, `chartVersion`, `conditions`, `message`, `observedGeneration`
+
+---
+
+## Infrastructure Providers
+
+### ImageProvider
+
+Container image registry credentials. Compiles into a `kubernetes.io/dockerconfigjson` Secret for `imagePullSecrets`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.type` | enum | `ghcr`, `dockerhub`, `ecr`, `gar`, `acr`, `harbor`, `generic` |
+| `spec.registry` | string | Registry hostname (e.g., `ghcr.io`) |
+| `spec.credentials` | CredentialSpec | ESO-managed credential source (optional) |
+| `spec.credentialData` | map | Template data for shaping credentials with `${secret.*}` syntax |
+| `spec.ecr.region` | string | AWS region (ECR only) |
+| `spec.ecr.accountId` | string | AWS account ID (ECR only, optional) |
+
+**Status Phases:** `Pending` → `Ready` / `Failed`
+
+---
+
+### CertIssuer
+
+Certificate issuer configuration. Compiles to cert-manager ClusterIssuer resources. Referenced by `ingress.routes.<name>.tls.issuerRef`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.type` | enum | `acme`, `ca`, `selfSigned`, `vault` |
+| `spec.acme.email` | string | ACME registration email |
+| `spec.acme.server` | string | ACME server URL |
+| `spec.acme.dnsProviderRef` | string | DNSProvider reference for DNS-01 challenges (optional; HTTP-01 if absent) |
+| `spec.ca.credentials` | CredentialSpec | ESO-managed CA cert and key |
+| `spec.vault.server` | string | Vault server URL |
+| `spec.vault.path` | string | PKI mount path |
+| `spec.vault.authCredentials` | CredentialSpec | ESO-managed Vault auth credentials |
+
+**Status Phases:** `Pending` → `Ready` / `Failed`
+
+---
+
+### DNSProvider
+
+DNS provider credentials for external-dns and cert-manager ACME DNS-01 challenges.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.type` | enum | `pihole`, `route53`, `cloudflare`, `google`, `azure`, `designate` |
+| `spec.zone` | string | DNS zone to manage (e.g., `example.com`) |
+| `spec.resolver` | string | DNS resolver for private zone forwarding (optional) |
+| `spec.credentials` | CredentialSpec | ESO-managed credential source (optional) |
+| `spec.credentialData` | map | Template data for shaping credentials with `${secret.*}` syntax |
+| `spec.pihole.url` | string | Pi-hole server URL |
+| `spec.route53.region` | string | AWS region (optional) |
+| `spec.route53.hostedZoneId` | string | Hosted zone ID (optional) |
+| `spec.cloudflare.proxied` | bool | Enable Cloudflare proxy on records |
+| `spec.google.project` | string | GCP project ID |
+| `spec.azure.subscriptionId` | string | Azure subscription ID |
+| `spec.azure.resourceGroup` | string | Azure resource group |
+| `spec.designate.zoneId` | string | Designate zone ID (optional) |
+| `spec.designate.region` | string | OpenStack region (optional) |
+
+**Status Phases:** `Pending` → `Ready` / `Failed`
+
+**Status Fields:** `phase`, `message`, `clusterCount`, `observedGeneration`
+
+---
+
+## Resource Quotas
+
+### LatticeQuota
+
+Per-principal resource consumption limits. The quota controller tracks usage and the workload compiler rejects deployments that would exceed limits.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.principal` | string | Cedar principal (e.g., `Lattice::Group::"ml-team"`, `Lattice::Service::"ns/name"`) |
+| `spec.limits` | map | Resource limits: `cpu`, `memory`, `nvidia.com/gpu` (Kubernetes quantity strings) |
+| `spec.maxPerWorkload` | map | Optional per-workload caps (any single workload exceeding these is rejected) |
+| `spec.enabled` | bool | Enable/disable enforcement (default: `true`) |
+
+**Status Phases:** `Pending` → `Active` → `Exceeded` / `Invalid`
+
+**Status Fields:** `phase`, `used`, `workloadCount`, `message`, `observedGeneration`
+
+---
+
+## Internal CRDs
+
+### LatticeClusterRoutes
+
+Cluster-scoped. One per child cluster, reconciled by the cell from agent heartbeats. Contains service routes advertised by the child for cross-cluster discovery and DMZ proxy.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.routes[].serviceName` | string | LatticeService name |
+| `spec.routes[].serviceNamespace` | string | LatticeService namespace |
+| `spec.routes[].hostname` | string | Ingress hostname |
+| `spec.routes[].address` | string | Gateway LoadBalancer IP |
+| `spec.routes[].port` | u16 | Gateway port |
+| `spec.routes[].protocol` | string | HTTP, HTTPS, TCP, or GRPC |
+| `spec.routes[].allowedServices` | []string | Callers allowed to reach this route (`cluster/namespace/name` or `*`) |
+| `spec.routes[].servicePorts` | map | Backend service ports (name → port) for Service stub creation |
+
+**Status Phases:** `Pending` → `Ready`
+
+**Status Fields:** `phase`, `routeCount`, `lastUpdated`, `observedGeneration`

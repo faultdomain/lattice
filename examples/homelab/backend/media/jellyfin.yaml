@@ -34,7 +34,6 @@ spec:
         image: docker.io/jellyfin/jellyfin:latest
         security:
           runAsUser: 0
-          readOnlyRootFilesystem: false
           apparmorProfile: Unconfined
           allowedBinaries: ["*"]
         variables:

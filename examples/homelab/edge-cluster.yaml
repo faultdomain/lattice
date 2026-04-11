@@ -1,5 +1,5 @@
 # Edge cluster - HAProxy firewall/DMZ layer (Parent)
-# Uses the same Proxmox config as E2E fixtures
+# Install with: lattice install -f edge-cluster.yaml
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeCluster
 metadata:
@@ -47,16 +47,16 @@ spec:
     controlPlane:
       replicas: 1
       instanceType:
-        cores: 4
-        memoryGib: 8
+        cores: 8
+        memoryGib: 16
         diskGib: 50
     workerPools:
       default:
         replicas: 2
         instanceType:
-          cores: 4
-          memoryGib: 16
-          diskGib: 50
+          cores: 8
+          memoryGib: 32
+          diskGib: 100
   services: true
   parentConfig:
     grpcPort: 50051

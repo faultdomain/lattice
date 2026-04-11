@@ -537,6 +537,12 @@ struct MessageContext {
     connection_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Auth proxy base URL + HTTP client for proxy-path validation.
     proxy_health: Option<ProxyHealthCheck>,
+    /// Certificate blocklist for revoking agent certs on cluster deletion.
+    blocklist: crate::blocklist::CertificateBlocklist,
+    /// SHA-256 fingerprint of the connecting agent's mTLS certificate.
+    cert_fingerprint: String,
+    /// Certificate expiry (Unix timestamp) for blocklist TTL.
+    cert_expires_at: i64,
 }
 
 struct ProxyHealthCheck {
@@ -598,12 +604,14 @@ async fn process_agent_message(
                 "Agent connected"
             );
 
-            let conn = AgentConnection::new(
+            let mut conn = AgentConnection::new(
                 cluster_name.clone(),
                 ready.agent_version.clone(),
                 ready.kubernetes_version.clone(),
                 command_tx.clone(),
             );
+            conn.cert_fingerprint = Some(ctx.cert_fingerprint.clone());
+            conn.cert_expires_at = Some(ctx.cert_expires_at);
             let gen = registry.register(conn);
             connection_generation.store(gen, std::sync::atomic::Ordering::Relaxed);
             registry.update_state(cluster_name, ready.state());
@@ -778,6 +786,20 @@ async fn process_agent_message(
                     "Teardown already in progress, ignoring duplicate ClusterDeleting"
                 );
                 return true;
+            }
+
+            // Block this agent's certificate to prevent reconnection after deletion.
+            // The fingerprint was stored during registration from the mTLS handshake.
+            if let Some(agent) = registry.get(cluster_name) {
+                if let Some(ref fp) = agent.cert_fingerprint {
+                    let expires_at = agent.cert_expires_at.unwrap_or(i64::MAX);
+                    ctx.blocklist.add(fp.clone(), expires_at);
+                    info!(
+                        cluster = %cluster_name,
+                        fingerprint = %fp,
+                        "Blocklisted agent certificate on cluster deletion"
+                    );
+                }
             }
 
             info!(
@@ -1197,11 +1219,18 @@ fn extract_cert_der_from_request<T>(request: &Request<T>) -> Result<Vec<u8>, Mtl
     Ok(cert.to_vec())
 }
 
+/// Result of mTLS authentication: cluster identity, certificate fingerprint, and expiry.
+struct AuthResult {
+    cluster_id: String,
+    cert_fingerprint: String,
+    cert_expires_at: i64,
+}
+
 /// Extract the cluster ID and check the blocklist in a single pass.
 fn authenticate_request<T>(
     request: &Request<T>,
     blocklist: &crate::blocklist::CertificateBlocklist,
-) -> Result<String, MtlsAuthError> {
+) -> Result<AuthResult, MtlsAuthError> {
     let cert_der = extract_cert_der_from_request(request)?;
 
     // Check blocklist before extracting identity
@@ -1211,7 +1240,19 @@ fn authenticate_request<T>(
         return Err(MtlsAuthError::CertificateBlocked(fingerprint));
     }
 
-    extract_cluster_id_from_cert(&cert_der).map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))
+    let cluster_id = extract_cluster_id_from_cert(&cert_der)
+        .map_err(|e| MtlsAuthError::InvalidCert(e.to_string()))?;
+
+    // Extract certificate expiry for blocklist TTL
+    let cert_expires_at = lattice_infra::pki::CertificateInfo::from_der(&cert_der)
+        .map(|info| info.not_after)
+        .unwrap_or(i64::MAX);
+
+    Ok(AuthResult {
+        cluster_id,
+        cert_fingerprint: fingerprint,
+        cert_expires_at,
+    })
 }
 
 #[tonic::async_trait]
@@ -1229,7 +1270,10 @@ impl LatticeAgent for AgentServer {
         // Extract cluster ID from mTLS client certificate CN and check blocklist.
         // This is the cryptographic identity — message-level cluster_name
         // is validated against this to prevent impersonation.
-        let cert_cluster_id = authenticate_request(&request, &self.blocklist)?;
+        let auth = authenticate_request(&request, &self.blocklist)?;
+        let cert_cluster_id = auth.cluster_id;
+        let cert_fingerprint = auth.cert_fingerprint;
+        let cert_expires_at = auth.cert_expires_at;
 
         info!(
             ?remote_addr,
@@ -1274,6 +1318,9 @@ impl LatticeAgent for AgentServer {
             route_update_tx,
             connection_generation,
             proxy_health,
+            blocklist: self.blocklist.clone(),
+            cert_fingerprint: cert_fingerprint.clone(),
+            cert_expires_at,
         };
 
         // Spawn task to handle incoming messages

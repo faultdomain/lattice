@@ -42,8 +42,8 @@ spec:
     controlPlane:
       replicas: 1
       instanceType:
-        cores: 4
-        memoryGib: 16
+        cores: 8
+        memoryGib: 32
         diskGib: 50
     workerPools:
       default:

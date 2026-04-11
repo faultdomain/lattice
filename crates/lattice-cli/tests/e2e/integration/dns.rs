@@ -117,12 +117,17 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
             let kc = kc.clone();
             async move {
                 let result = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "get", "deployment",
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "deployment",
                     &format!("external-dns-{PIHOLE_DNS_PROVIDER}"),
-                    "-n", "external-dns",
-                    "-o", "jsonpath={.status.availableReplicas}",
-                ]).await;
+                    "-n",
+                    "external-dns",
+                    "-o",
+                    "jsonpath={.status.availableReplicas}",
+                ])
+                .await;
                 Ok(result.map(|s| s.trim() == "1").unwrap_or(false))
             }
         },
@@ -131,12 +136,17 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
 
     // Verify correct provider args
     let args = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "deployment",
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployment",
         &format!("external-dns-{PIHOLE_DNS_PROVIDER}"),
-        "-n", "external-dns",
-        "-o", "jsonpath={.spec.template.spec.containers[0].args}",
-    ]).await?;
+        "-n",
+        "external-dns",
+        "-o",
+        "jsonpath={.spec.template.spec.containers[0].args}",
+    ])
+    .await?;
 
     if !args.contains("--provider=pihole") {
         return Err(format!("external-dns missing --provider=pihole: {args}"));
@@ -145,7 +155,9 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
         return Err(format!("external-dns missing pihole-server: {args}"));
     }
     if !args.contains("--source=gateway-httproute") {
-        return Err(format!("external-dns missing gateway-httproute source: {args}"));
+        return Err(format!(
+            "external-dns missing gateway-httproute source: {args}"
+        ));
     }
 
     info!("[DNS] external-dns is running with correct config");
@@ -163,17 +175,25 @@ async fn test_dns_end_to_end(kubeconfig: &str) -> Result<(), String> {
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() % 100_000;
+        .as_millis()
+        % 100_000;
     let svc_name = format!("dns-{suffix}");
     let dns_hostname = format!("{svc_name}.{TEST_ZONE}");
 
     // Verify CoreDNS Corefile has the forward block
     let corefile = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "get", "configmap", "-n", "kube-system",
-        "-l", "k8s-app=kube-dns",
-        "-o", "jsonpath={.items[0].data.Corefile}",
-    ]).await?;
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "configmap",
+        "-n",
+        "kube-system",
+        "-l",
+        "k8s-app=kube-dns",
+        "-o",
+        "jsonpath={.items[0].data.Corefile}",
+    ])
+    .await?;
 
     if !corefile.contains(TEST_ZONE) || !corefile.contains(&resolver) {
         return Err(format!(
@@ -222,7 +242,8 @@ spec:
         &svc_name,
         "Ready",
         DEFAULT_TIMEOUT,
-    ).await?;
+    )
+    .await?;
     info!("[DNS] LatticeService is Ready");
 
     // Wait for external-dns to sync the HTTPRoute → PiHole record,
@@ -237,18 +258,33 @@ spec:
             let hostname = dns_hostname.clone();
             async move {
                 let _ = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "delete", "pod", "-n", "kube-system",
-                    "dns-resolve-test", "--ignore-not-found",
-                ]).await;
+                    "--kubeconfig",
+                    &kc,
+                    "delete",
+                    "pod",
+                    "-n",
+                    "kube-system",
+                    "dns-resolve-test",
+                    "--ignore-not-found",
+                ])
+                .await;
 
                 let result = run_kubectl(&[
-                    "--kubeconfig", &kc,
-                    "run", "dns-resolve-test", "-n", "kube-system",
-                    "--rm", "-i", "--restart=Never",
+                    "--kubeconfig",
+                    &kc,
+                    "run",
+                    "dns-resolve-test",
+                    "-n",
+                    "kube-system",
+                    "--rm",
+                    "-i",
+                    "--restart=Never",
                     "--image=busybox:1.36",
-                    "--", "nslookup", &hostname,
-                ]).await;
+                    "--",
+                    "nslookup",
+                    &hostname,
+                ])
+                .await;
 
                 match result {
                     Ok(output) if output.contains("Address") && !output.contains("NXDOMAIN") => {
@@ -259,7 +295,9 @@ spec:
                 }
             }
         },
-    ).await.map_err(|e| {
+    )
+    .await
+    .map_err(|e| {
         format!("DNS resolution failed for {dns_hostname} (external-dns may not have synced): {e}")
     })?;
 
@@ -275,31 +313,52 @@ async fn cleanup(kubeconfig: &str) {
     info!("[DNS/Cleanup] Cleaning up DNS test resources...");
 
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "pod", "-n", "kube-system",
-        "dns-resolve-test", "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "pod",
+        "-n",
+        "kube-system",
+        "dns-resolve-test",
+        "--ignore-not-found",
+    ])
+    .await;
 
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "namespace", DNS_TEST_NAMESPACE, "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "namespace",
+        DNS_TEST_NAMESPACE,
+        "--ignore-not-found",
+    ])
+    .await;
 
-    for (kind, name) in [
-        ("dnsprovider", PIHOLE_DNS_PROVIDER),
-    ] {
+    for (kind, name) in [("dnsprovider", PIHOLE_DNS_PROVIDER)] {
         let _ = run_kubectl(&[
-            "--kubeconfig", kubeconfig,
-            "delete", kind, name,
-            "-n", LATTICE_NS, "--ignore-not-found",
-        ]).await;
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            kind,
+            name,
+            "-n",
+            LATTICE_NS,
+            "--ignore-not-found",
+        ])
+        .await;
     }
 
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "secret", PIHOLE_SECRET_REMOTE_KEY,
-        "-n", SECRETS_NS, "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "secret",
+        PIHOLE_SECRET_REMOTE_KEY,
+        "-n",
+        SECRETS_NS,
+        "--ignore-not-found",
+    ])
+    .await;
 
     info!("[DNS/Cleanup] Done");
 }

@@ -241,7 +241,6 @@ impl CertIssuerSpec {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

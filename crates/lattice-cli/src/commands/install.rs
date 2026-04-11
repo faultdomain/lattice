@@ -1173,7 +1173,7 @@ impl Installer {
     /// Checks for `{name}.yaml` then `{name}.yml`.
     async fn find_secret_file(&self, name: &str) -> Result<PathBuf> {
         // Validate name to prevent path traversal (e.g., "../../etc/passwd")
-        lattice_crd::crd::validate_dns_label(name, "credentials secret name")
+        lattice_core::validate_dns_label(name, "credentials secret name")
             .map_err(Error::validation)?;
 
         for ext in &["yaml", "yml"] {

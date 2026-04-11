@@ -247,6 +247,21 @@ pub fn sanitize_dns_label(s: &str) -> Option<String> {
     }
 }
 
+/// Validate that a string is already a valid DNS label.
+///
+/// Sanitizes the input via [`sanitize_dns_label`] and checks that the result
+/// matches the original. `field` is used in error messages to identify
+/// what kind of name failed (e.g. "container name", "port name").
+pub fn validate_dns_label(name: &str, field: &str) -> Result<(), String> {
+    match sanitize_dns_label(name) {
+        Some(ref sanitized) if sanitized == name => Ok(()),
+        _ => Err(format!(
+            "{} '{}' is not a valid DNS label (must be lowercase alphanumeric with hyphens, max 63 chars)",
+            field, name
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

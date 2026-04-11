@@ -503,15 +503,27 @@ async fn cleanup_test_resources(kubeconfig: &str) {
 
     // Clean up DNS test resources
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "latticeservice", "dns-test-svc",
-        "-n", CERT_TEST_NAMESPACE, "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "latticeservice",
+        "dns-test-svc",
+        "-n",
+        CERT_TEST_NAMESPACE,
+        "--ignore-not-found",
+    ])
+    .await;
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "pod", "-n", "kube-system",
-        "dns-resolve-test", "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "pod",
+        "-n",
+        "kube-system",
+        "dns-resolve-test",
+        "--ignore-not-found",
+    ])
+    .await;
 
     info!("[Cleanup] Done");
 }

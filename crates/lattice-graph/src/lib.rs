@@ -756,13 +756,32 @@ impl ServiceGraph {
         let namespace = &route.service_namespace;
         let name = &route.service_name;
 
-        // Don't overwrite local or mesh-member nodes — local takes precedence
+        // Don't overwrite local or mesh-member nodes — local takes precedence.
+        // For Remote nodes from a different cluster with the same hostname,
+        // use first-writer-wins to keep the existing working route stable.
         if let Some(existing) = self
             .vertices
             .get(&(namespace.to_string(), name.to_string()))
         {
             if existing.type_.is_local() || existing.type_.is_mesh_member() {
                 return;
+            }
+            if let ServiceType::Remote {
+                source_cluster: ref existing_source,
+                hostname: ref existing_host,
+                ..
+            } = existing.type_
+            {
+                if existing_source != source_cluster && *existing_host == route.hostname {
+                    warn!(
+                        hostname = %route.hostname,
+                        existing_cluster = %existing_source,
+                        new_cluster = %source_cluster,
+                        service = %format!("{}/{}", namespace, name),
+                        "Route conflict: hostname advertised by multiple clusters, keeping existing route"
+                    );
+                    return;
+                }
             }
         }
 

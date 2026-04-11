@@ -18,7 +18,7 @@ use crate::k8s_forwarder::route_to_cluster;
 use crate::routing::{parse_cluster_path, strip_cluster_prefix};
 use crate::server::AppState;
 use lattice_cedar::ClusterAttributes;
-use lattice_crd::crd::validate_dns_label;
+use lattice_core::validate_dns_label;
 use lattice_proto::is_exec_path;
 
 /// Validate a path parameter as a K8s DNS label (max 63 chars, RFC 1123).

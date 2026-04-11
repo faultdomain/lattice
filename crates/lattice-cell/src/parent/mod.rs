@@ -813,6 +813,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
                 ))
             })?;
 
+        let cleanup_blocklist = blocklist.clone();
         info!(addr = %grpc_addr, "Starting gRPC server");
         let peer_config = self.peer_config.clone();
         let grpc_shutdown = tokio_util::sync::CancellationToken::new();
@@ -878,6 +879,12 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
                 if !stale.is_empty() {
                     warn!(agents = ?stale, "Disconnected agents with stale heartbeats");
                 }
+                // Sweep pending response entries where the receiver has been
+                // dropped (proxy handler timed out). Prevents dead senders from
+                // accumulating when agents are connected but requests go stale.
+                cleanup_registry.sweep_closed_pending();
+                // Prune blocklist entries for expired certificates
+                cleanup_blocklist.prune_expired();
                 let removed = cleanup_registry.cleanup_stale_disconnected(DISCONNECTED_AGENT_TTL);
                 if removed > 0 {
                     info!(removed, "Cleaned up stale disconnected agents");

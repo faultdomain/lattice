@@ -1818,8 +1818,7 @@ mod tests {
                 .expect("intermediate CA loading should succeed");
 
         // Create agent cert signed by intermediate
-        let request =
-            AgentCertRequest::new("chain-test").expect("CSR generation should succeed");
+        let request = AgentCertRequest::new("chain-test").expect("CSR generation should succeed");
         let agent_cert_pem = intermediate_ca
             .sign_csr(request.csr_pem(), "chain-test", DEFAULT_CERT_VALIDITY_HOURS)
             .expect("signing should succeed");

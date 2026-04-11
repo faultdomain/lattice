@@ -404,7 +404,7 @@ pub fn build_service_schedule(
 
 /// Wrap `validate_dns_label` into a `ReconcileError`.
 fn validate_dns_label_field(value: &str, field: &str) -> Result<(), ReconcileError> {
-    lattice_crd::crd::validate_dns_label(value, field).map_err(|e| {
+    lattice_core::validate_dns_label(value, field).map_err(|e| {
         ReconcileError::Validation(format!("invalid {field} for backup schedule: {e}"))
     })
 }

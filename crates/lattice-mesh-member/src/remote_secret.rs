@@ -22,7 +22,8 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, warn};
 
 use lattice_common::Error;
-use lattice_crd::crd::{validate_dns_label, ClusterRoute, LatticeClusterRoutes};
+use lattice_core::validate_dns_label;
+use lattice_crd::crd::{ClusterRoute, LatticeClusterRoutes};
 
 const FIELD_MANAGER: &str = "lattice-remote-secret";
 const ISTIO_MULTICLUSTER_LABEL: &str = "istio/multiCluster";

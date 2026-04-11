@@ -77,11 +77,11 @@ pub async fn handle(sync: &PeerRouteSync, ctx: &CommandContext) {
     // Group peer routes by source cluster, validating names to prevent injection
     let mut by_cluster: HashMap<String, Vec<ClusterRoute>> = HashMap::new();
     for svc in &sync.peer_routes {
-        if let Err(e) = lattice_crd::crd::validate_dns_label(&svc.cluster, "cluster") {
+        if let Err(e) = lattice_core::validate_dns_label(&svc.cluster, "cluster") {
             warn!(error = %e, "Skipping peer route with invalid cluster name");
             continue;
         }
-        if let Err(e) = lattice_crd::crd::validate_dns_label(&svc.name, "service name") {
+        if let Err(e) = lattice_core::validate_dns_label(&svc.name, "service name") {
             warn!(error = %e, "Skipping peer route with invalid service name");
             continue;
         }

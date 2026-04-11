@@ -690,7 +690,7 @@ impl NodeSpec {
 
         // Validate pool identifiers and autoscaling config
         for (pool_id, pool_spec) in &self.worker_pools {
-            if let Err(e) = super::validate_dns_label(pool_id, "worker pool id") {
+            if let Err(e) = lattice_core::validate_dns_label(pool_id, "worker pool id") {
                 return Err(crate::ValidationError::new(e));
             }
             if let Err(e) = pool_spec.validate() {
@@ -2023,21 +2023,21 @@ mod tests {
         #[test]
         fn valid_simple() {
             for s in ["default", "general", "gpu"] {
-                assert!(crate::crd::validate_dns_label(s, "test").is_ok(), "{s}");
+                assert!(lattice_core::validate_dns_label(s, "test").is_ok(), "{s}");
             }
         }
 
         #[test]
         fn valid_with_numbers() {
             for s in ["gpu1", "pool123", "a1b2c3"] {
-                assert!(crate::crd::validate_dns_label(s, "test").is_ok(), "{s}");
+                assert!(lattice_core::validate_dns_label(s, "test").is_ok(), "{s}");
             }
         }
 
         #[test]
         fn valid_with_hyphens() {
             for s in ["high-memory", "general-purpose", "gpu-large-v2"] {
-                assert!(crate::crd::validate_dns_label(s, "test").is_ok(), "{s}");
+                assert!(lattice_core::validate_dns_label(s, "test").is_ok(), "{s}");
             }
         }
 
@@ -2057,7 +2057,7 @@ mod tests {
                 "pool.name",  // dot
                 "pool@name",  // special char
             ] {
-                assert!(crate::crd::validate_dns_label(s, "test").is_err(), "{s}");
+                assert!(lattice_core::validate_dns_label(s, "test").is_err(), "{s}");
             }
         }
     }

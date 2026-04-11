@@ -173,7 +173,7 @@ impl ClusterRoute {
             if port == 0 {
                 return Err(format!("service_ports['{name}']: port is 0"));
             }
-            crate::crd::validate_dns_label(name, "service_ports name")?;
+            lattice_core::validate_dns_label(name, "service_ports name")?;
         }
         Ok(())
     }

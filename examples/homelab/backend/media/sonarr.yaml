@@ -44,7 +44,6 @@ spec:
         image: docker.io/linuxserver/sonarr:latest
         security:
           runAsUser: 0
-          readOnlyRootFilesystem: false
           apparmorProfile: Unconfined
           capabilities: [SETUID, SETGID]
           allowedBinaries: ["*"]

@@ -9,7 +9,6 @@ use super::dev_service_url;
 /// Used by the DNSProvider credential secret so external-dns can authenticate.
 pub const PIHOLE_PASSWORD: &str = "lattice";
 
-
 /// PiHole URL (web admin + API).
 pub fn pihole_url() -> String {
     dev_service_url("LATTICE_PIHOLE_URL")

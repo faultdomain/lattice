@@ -36,7 +36,7 @@ impl ServicePortsSpec {
 
         for (name, port_spec) in &self.ports {
             // Validate port name is a valid DNS label (max 15 chars for IANA compliance)
-            super::super::validate_dns_label(name, "port name")
+            lattice_core::validate_dns_label(name, "port name")
                 .map_err(crate::ValidationError::new)?;
             if name.len() > 15 {
                 return Err(crate::ValidationError::new(format!(

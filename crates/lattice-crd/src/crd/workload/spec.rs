@@ -79,7 +79,7 @@ impl RuntimeSpec {
     /// Validate the runtime specification (sidecar names and specs)
     pub fn validate(&self) -> Result<(), crate::ValidationError> {
         for (name, sidecar) in &self.sidecars {
-            super::super::validate_dns_label(name, "sidecar name")
+            lattice_core::validate_dns_label(name, "sidecar name")
                 .map_err(crate::ValidationError::new)?;
             sidecar.validate(name)?;
         }
@@ -193,13 +193,13 @@ impl WorkloadSpec {
 
         // Validate container names are valid DNS labels
         for name in self.containers.keys() {
-            super::super::validate_dns_label(name, "container name")
+            lattice_core::validate_dns_label(name, "container name")
                 .map_err(crate::ValidationError::new)?;
         }
 
         // Validate resource names are valid DNS labels
         for name in self.resources.keys() {
-            super::super::validate_dns_label(name, "resource name")
+            lattice_core::validate_dns_label(name, "resource name")
                 .map_err(crate::ValidationError::new)?;
         }
 
@@ -227,7 +227,7 @@ impl WorkloadSpec {
                             name, id
                         )));
                     }
-                    super::super::validate_dns_label(id, "resource id").map_err(|e| {
+                    lattice_core::validate_dns_label(id, "resource id").map_err(|e| {
                         crate::ValidationError::new(format!("resource '{}': {}", name, e))
                     })?;
                 }

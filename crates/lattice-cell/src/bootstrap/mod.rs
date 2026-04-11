@@ -55,7 +55,7 @@ use axum::Json;
 use tracing::{debug, info, warn};
 
 use lattice_common::CsrRequest;
-use lattice_crd::crd::validate_dns_label;
+use lattice_core::validate_dns_label;
 
 use crate::resources::fetch_distributable_resources;
 

@@ -26,9 +26,15 @@ Lattice is a Kubernetes operator for multi-cluster lifecycle management. It prov
 | **LatticeService** | Stateless/stateful services with mesh, secrets, ingress, autoscaling |
 | **LatticeJob** | Distributed jobs with Volcano scheduling and training framework support |
 | **LatticeModel** | Model serving with inference routing and autoscaling |
+| **LatticePackage** | Declarative Helm chart management with secret injection and mesh integration |
+| **LatticeMeshMember** | Mesh policy for workloads (auto-generated or manual) |
+| **LatticeQuota** | Per-principal resource consumption limits (CPU, memory, GPU) |
 | **InfraProvider** | Cloud credentials (AWS, Proxmox, OpenStack, Docker) |
+| **ImageProvider** | Container registry credentials (GHCR, ECR, DockerHub, Harbor, etc.) |
 | **SecretProvider** | External secret backends (Vault, AWS Secrets Manager, webhook) |
-| **CedarPolicy** | Authorization policies for secret access |
+| **CedarPolicy** | Authorization policies (secrets, mesh wildcards, security overrides) |
+| **CertIssuer** | Certificate issuers (ACME, CA, Vault, self-signed) → cert-manager |
+| **DNSProvider** | DNS provider credentials (Route53, Cloudflare, Pi-hole, etc.) |
 | **OIDCProvider** | Cluster-wide OIDC authentication |
 | **LatticeClusterBackup** / **LatticeRestore** | Backup and restore via Velero |
 | **BackupStore** | Backup storage targets (S3, GCS, Azure) |

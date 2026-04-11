@@ -4,6 +4,8 @@ Two-cluster Proxmox setup. The edge cluster runs HAProxy as a DMZ/firewall.
 The backend cluster runs the media stack (jellyfin, sonarr, nzbget + VPN).
 Routes are discovered automatically via heartbeats — no manual IP management.
 
+See [lattice-homelab](https://github.com/evan-hines-js/lattice-homelab) for a live implementation of this setup.
+
 ## Architecture
 
 ```mermaid

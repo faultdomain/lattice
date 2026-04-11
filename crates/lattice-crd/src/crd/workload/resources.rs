@@ -156,7 +156,7 @@ impl<'de> Deserialize<'de> for ResourceType {
             "secret" => Ok(Self::Secret),
             "gpu" => Ok(Self::Gpu),
             _ => {
-                crate::crd::validate_dns_label(&s, "resource type")
+                lattice_core::validate_dns_label(&s, "resource type")
                     .map_err(serde::de::Error::custom)?;
                 Ok(Self::Custom(s))
             }

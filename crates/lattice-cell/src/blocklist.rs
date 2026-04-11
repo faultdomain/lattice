@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use dashmap::DashSet;
+use dashmap::DashMap;
 use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use tracing::{info, warn};
@@ -21,45 +21,70 @@ const FIELD_MANAGER: &str = "lattice-cert-blocklist";
 
 /// Thread-safe certificate blocklist using SHA-256 fingerprints.
 ///
+/// Each entry stores the certificate's expiry timestamp (Unix seconds).
+/// Entries are automatically pruned after the certificate has expired,
+/// since expired certs are already rejected by the validity check.
+///
 /// Checked during mTLS authentication to reject compromised certificates
 /// without waiting for them to expire.
 #[derive(Clone)]
 pub struct CertificateBlocklist {
-    fingerprints: Arc<DashSet<String>>,
+    /// Maps fingerprint → certificate expiry (Unix timestamp, seconds)
+    entries: Arc<DashMap<String, i64>>,
 }
 
 impl CertificateBlocklist {
     /// Create an empty blocklist.
     pub fn new() -> Self {
         Self {
-            fingerprints: Arc::new(DashSet::new()),
+            entries: Arc::new(DashMap::new()),
         }
     }
 
     /// Check if a certificate fingerprint is blocked.
     pub fn is_blocked(&self, fingerprint: &str) -> bool {
-        self.fingerprints.contains(fingerprint)
+        self.entries.contains_key(fingerprint)
     }
 
-    /// Add a certificate fingerprint to the blocklist.
-    pub fn add(&self, fingerprint: String) {
-        info!(fingerprint = %fingerprint, "Blocking certificate");
-        self.fingerprints.insert(fingerprint);
+    /// Add a certificate fingerprint with its expiry timestamp.
+    pub fn add(&self, fingerprint: String, expires_at: i64) {
+        info!(fingerprint = %fingerprint, expires_at, "Blocking certificate");
+        self.entries.insert(fingerprint, expires_at);
     }
 
     /// Remove a certificate fingerprint from the blocklist.
     pub fn remove(&self, fingerprint: &str) -> bool {
-        self.fingerprints.remove(fingerprint).is_some()
+        self.entries.remove(fingerprint).is_some()
     }
 
     /// Number of blocked certificates.
     pub fn len(&self) -> usize {
-        self.fingerprints.len()
+        self.entries.len()
     }
 
     /// Whether the blocklist is empty.
     pub fn is_empty(&self) -> bool {
-        self.fingerprints.is_empty()
+        self.entries.is_empty()
+    }
+
+    /// Remove entries whose certificates have expired.
+    /// Returns the number of entries pruned.
+    pub fn prune_expired(&self) -> usize {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let before = self.entries.len();
+        self.entries.retain(|_, expires_at| *expires_at > now);
+        let pruned = before - self.entries.len();
+        if pruned > 0 {
+            info!(
+                pruned,
+                remaining = self.entries.len(),
+                "Pruned expired blocklist entries"
+            );
+        }
+        pruned
     }
 
     /// Compute the SHA-256 fingerprint of a DER-encoded certificate.
@@ -92,11 +117,13 @@ impl CertificateBlocklist {
     }
 
     /// Persist the current blocklist to a ConfigMap.
+    ///
+    /// Each line is stored as `fingerprint:expiry_timestamp`.
     pub async fn persist_to_configmap(&self, client: &Client) -> Result<(), kube::Error> {
         let fingerprints: Vec<String> = self
-            .fingerprints
+            .entries
             .iter()
-            .map(|fp| fp.key().clone())
+            .map(|entry| format!("{}:{}", entry.key(), entry.value()))
             .collect();
 
         let cm = serde_json::json!({
@@ -147,6 +174,9 @@ impl CertificateBlocklist {
     }
 
     /// Parse fingerprints from a ConfigMap and insert them. Returns count of newly added entries.
+    ///
+    /// Supports both legacy format (fingerprint only) and new format (fingerprint:expiry).
+    /// Legacy entries get `i64::MAX` expiry so they're never auto-pruned.
     fn ingest_configmap_data(&self, cm: &k8s_openapi::api::core::v1::ConfigMap) -> usize {
         let raw = cm
             .data
@@ -157,8 +187,17 @@ impl CertificateBlocklist {
 
         let mut added = 0usize;
         for line in raw.lines() {
-            let fp = line.trim();
-            if !fp.is_empty() && self.fingerprints.insert(fp.to_string()) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (fp, expiry) = if let Some((f, e)) = line.rsplit_once(':') {
+                (f, e.parse::<i64>().unwrap_or(i64::MAX))
+            } else {
+                (line, i64::MAX)
+            };
+            if !self.entries.contains_key(fp) {
+                self.entries.insert(fp.to_string(), expiry);
                 added += 1;
             }
         }
@@ -181,6 +220,8 @@ impl Default for CertificateBlocklist {
 mod tests {
     use super::*;
 
+    const FAR_FUTURE: i64 = 4_000_000_000; // ~2096
+
     #[test]
     fn empty_blocklist_blocks_nothing() {
         let blocklist = CertificateBlocklist::new();
@@ -192,7 +233,7 @@ mod tests {
     #[test]
     fn add_and_check_fingerprint() {
         let blocklist = CertificateBlocklist::new();
-        blocklist.add("deadbeef".to_string());
+        blocklist.add("deadbeef".to_string(), FAR_FUTURE);
 
         assert!(blocklist.is_blocked("deadbeef"));
         assert!(!blocklist.is_blocked("other"));
@@ -202,7 +243,7 @@ mod tests {
     #[test]
     fn remove_fingerprint() {
         let blocklist = CertificateBlocklist::new();
-        blocklist.add("deadbeef".to_string());
+        blocklist.add("deadbeef".to_string(), FAR_FUTURE);
         assert!(blocklist.is_blocked("deadbeef"));
 
         assert!(blocklist.remove("deadbeef"));
@@ -237,15 +278,40 @@ mod tests {
         let blocklist = CertificateBlocklist::new();
         let clone = blocklist.clone();
 
-        blocklist.add("shared".to_string());
+        blocklist.add("shared".to_string(), FAR_FUTURE);
         assert!(clone.is_blocked("shared"));
     }
 
     #[test]
     fn duplicate_add_is_idempotent() {
         let blocklist = CertificateBlocklist::new();
-        blocklist.add("dup".to_string());
-        blocklist.add("dup".to_string());
+        blocklist.add("dup".to_string(), FAR_FUTURE);
+        blocklist.add("dup".to_string(), FAR_FUTURE);
         assert_eq!(blocklist.len(), 1);
+    }
+
+    #[test]
+    fn prune_expired_removes_old_entries() {
+        let blocklist = CertificateBlocklist::new();
+        blocklist.add("expired".to_string(), 0); // epoch = already expired
+        blocklist.add("valid".to_string(), FAR_FUTURE);
+        assert_eq!(blocklist.len(), 2);
+
+        let pruned = blocklist.prune_expired();
+        assert_eq!(pruned, 1);
+        assert!(!blocklist.is_blocked("expired"));
+        assert!(blocklist.is_blocked("valid"));
+        assert_eq!(blocklist.len(), 1);
+    }
+
+    #[test]
+    fn prune_expired_no_op_when_all_valid() {
+        let blocklist = CertificateBlocklist::new();
+        blocklist.add("a".to_string(), FAR_FUTURE);
+        blocklist.add("b".to_string(), FAR_FUTURE);
+
+        let pruned = blocklist.prune_expired();
+        assert_eq!(pruned, 0);
+        assert_eq!(blocklist.len(), 2);
     }
 }

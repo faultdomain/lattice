@@ -135,6 +135,12 @@ pub struct AgentConnection {
     /// When the last PeerRouteSync was sent to this child.
     /// Used to force periodic token refresh even when route hashes match.
     pub last_peer_sync: Option<Instant>,
+    /// SHA-256 fingerprint of the agent's mTLS certificate.
+    /// Used to blocklist the certificate on cluster deletion.
+    pub cert_fingerprint: Option<String>,
+    /// Certificate expiry (Unix timestamp, seconds).
+    /// Used for blocklist entries so expired certs can be auto-pruned.
+    pub cert_expires_at: Option<i64>,
 }
 
 impl AgentConnection {
@@ -162,6 +168,8 @@ impl AgentConnection {
             disconnected_at: None,
             generation: 0,
             last_peer_sync: None,
+            cert_fingerprint: None,
+            cert_expires_at: None,
         }
     }
 
@@ -993,6 +1001,53 @@ impl AgentRegistry {
         }
 
         stale
+    }
+
+    /// Sweep pending response maps and remove entries where the receiver has
+    /// been dropped (proxy handler timed out or client disconnected). This
+    /// prevents dead senders from accumulating when agents are connected but
+    /// individual requests go unanswered.
+    ///
+    /// Returns the total number of stale entries removed.
+    pub fn sweep_closed_pending(&self) -> usize {
+        let mut removed = 0usize;
+
+        // oneshot senders: is_closed() means receiver was dropped
+        self.pending_batch_acks.retain(|_, sender| {
+            let keep = !sender.is_closed();
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+        self.pending_complete_acks.retain(|_, sender| {
+            let keep = !sender.is_closed();
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        // mpsc senders: is_closed() means all receivers were dropped
+        self.pending_k8s_responses.retain(|_, sender| {
+            let keep = !sender.is_closed();
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+        self.pending_exec_data.retain(|_, sender| {
+            let keep = !sender.is_closed();
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        if removed > 0 {
+            debug!(removed, "Swept closed pending response entries");
+        }
+        removed
     }
 
     /// Remove agents that have been disconnected longer than `max_age`.

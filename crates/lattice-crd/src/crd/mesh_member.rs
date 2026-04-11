@@ -317,7 +317,7 @@ impl LatticeMeshMemberSpec {
     /// Validate the spec
     pub fn validate(&self) -> Result<(), crate::ValidationError> {
         for port in &self.ports {
-            super::validate_dns_label(&port.name, "port name")
+            lattice_core::validate_dns_label(&port.name, "port name")
                 .map_err(crate::ValidationError::new)?;
         }
 

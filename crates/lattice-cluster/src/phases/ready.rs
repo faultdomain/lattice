@@ -374,9 +374,7 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             if let Err(e) = reconcile_dns_forwarding(client).await {
                 warn!(error = %e, "failed to reconcile DNS forwarding, will retry");
             }
-            if let Err(e) =
-                super::external_dns::reconcile_external_dns(client, cluster).await
-            {
+            if let Err(e) = super::external_dns::reconcile_external_dns(client, cluster).await {
                 warn!(error = %e, "failed to reconcile external-dns, will retry");
             }
             if let Err(e) = reconcile_cluster_autoscaler(client, cluster).await {
@@ -654,9 +652,7 @@ async fn reconcile_issuers(
 ///
 /// Cloud providers (Route53, Cloudflare, etc.) don't need CoreDNS forwarding —
 /// they're authoritative DNS managed by external-dns, resolved via public DNS.
-async fn reconcile_dns_forwarding(
-    client: &Client,
-) -> Result<(), Error> {
+async fn reconcile_dns_forwarding(client: &Client) -> Result<(), Error> {
     let dns_api: Api<DNSProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let providers = dns_api
         .list(&Default::default())
@@ -689,15 +685,12 @@ async fn reconcile_dns_forwarding(
     let cms = cm_api
         .list(&kube::api::ListParams::default().labels(label_selector))
         .await
-        .map_err(|e| {
-            Error::internal(format!("failed to list CoreDNS ConfigMaps: {e}"))
-        })?;
+        .map_err(|e| Error::internal(format!("failed to list CoreDNS ConfigMaps: {e}")))?;
 
-    let coredns_cm = cms.items.iter().find(|cm| {
-        cm.data
-            .as_ref()
-            .is_some_and(|d| d.contains_key("Corefile"))
-    });
+    let coredns_cm = cms
+        .items
+        .iter()
+        .find(|cm| cm.data.as_ref().is_some_and(|d| d.contains_key("Corefile")));
 
     let Some(coredns_cm) = coredns_cm else {
         return Err(Error::internal(
@@ -753,10 +746,16 @@ async fn reconcile_dns_forwarding(
     });
 
     cm_api
-        .patch(cm_name, &PatchParams::apply("lattice-dns"), &Patch::Merge(&patch))
+        .patch(
+            cm_name,
+            &PatchParams::apply("lattice-dns"),
+            &Patch::Merge(&patch),
+        )
         .await
         .map_err(|e| {
-            Error::internal(format!("failed to patch CoreDNS ConfigMap '{cm_name}': {e}"))
+            Error::internal(format!(
+                "failed to patch CoreDNS ConfigMap '{cm_name}': {e}"
+            ))
         })?;
 
     // Delete CoreDNS pods so they restart with the updated ConfigMap.

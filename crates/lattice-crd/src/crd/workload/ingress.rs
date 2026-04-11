@@ -321,7 +321,7 @@ impl IngressSpec {
         }
 
         for (route_name, route) in &self.routes {
-            super::super::validate_dns_label(route_name, "route name")?;
+            lattice_core::validate_dns_label(route_name, "route name")?;
             route.validate(route_name, ports)?;
         }
 
