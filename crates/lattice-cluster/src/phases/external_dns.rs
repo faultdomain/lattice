@@ -214,7 +214,7 @@ fn build_cluster_role(name: &str) -> Value {
         "rules": [
             {
                 "apiGroups": [""],
-                "resources": ["services", "endpoints", "nodes", "namespaces"],
+                "resources": ["services", "endpoints", "pods", "nodes", "namespaces"],
                 "verbs": ["get", "list", "watch"]
             },
             {
