@@ -427,11 +427,7 @@ impl WorkloadCompiler {
 
         // Generate Service if ports are defined
         if workload.service.is_some() {
-            let has_advertise = spec
-                .ingress
-                .as_ref()
-                .map(|i| i.routes.values().any(|r| r.advertise.is_some()))
-                .unwrap_or(false);
+            let has_advertise = spec.advertise.is_some();
             output.service = Some(Self::compile_service(
                 name,
                 namespace,

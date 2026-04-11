@@ -353,7 +353,7 @@ mod tests {
                     ingress: None,
                     service_account: None,
                     depends_all: false,
-                    ambient: true,
+                    ambient: true, advertise: None,
                 },
                 status: None,
             }),

@@ -67,7 +67,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: Some("keda-metrics-server".to_string()),
                 depends_all: false,
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ),
         // keda-admission-webhooks — webhook called by kube-apiserver
@@ -92,7 +92,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ),
         // keda-operator — receives gRPC from metrics-apiserver, scales workloads
@@ -120,7 +120,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ),
     ]

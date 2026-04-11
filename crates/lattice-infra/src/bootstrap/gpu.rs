@@ -62,7 +62,7 @@ pub fn generate_gpu_mesh_members() -> Vec<LatticeMeshMember> {
             ingress: None,
             service_account: Some("gpu-operator".to_string()),
             depends_all: false,
-            ambient: true,
+            ambient: true, advertise: None,
         },
     )]
 }
@@ -184,7 +184,7 @@ pub fn generate_gpu_monitor_mesh_member() -> LatticeMeshMember {
             ingress: None,
             service_account: Some("lattice-gpu-monitor".to_string()),
             depends_all: false,
-            ambient: true,
+            ambient: true, advertise: None,
         },
     )
 }

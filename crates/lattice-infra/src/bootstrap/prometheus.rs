@@ -163,7 +163,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ));
 
@@ -185,7 +185,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ));
     } else {
@@ -208,7 +208,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ));
     }
@@ -237,7 +237,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             ingress: None,
             service_account: Some(VMAGENT_SA_NAME.to_string()),
             depends_all: true,
-            ambient: true,
+            ambient: true, advertise: None,
         },
     ));
 
@@ -271,7 +271,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             ingress: None,
             service_account: Some("vm-victoria-metrics-operator".to_string()),
             depends_all: false,
-            ambient: true,
+            ambient: true, advertise: None,
         },
     ));
 
@@ -297,7 +297,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             ingress: None,
             service_account: Some("vm-kube-state-metrics".to_string()),
             depends_all: false,
-            ambient: true,
+            ambient: true, advertise: None,
         },
     ));
 

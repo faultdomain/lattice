@@ -47,7 +47,7 @@ pub fn generate_velero_mesh_members() -> Vec<LatticeMeshMember> {
             ingress: None,
             service_account: Some("velero-server".to_string()),
             depends_all: false,
-            ambient: true,
+            ambient: true, advertise: None,
         },
     )]
 }

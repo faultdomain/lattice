@@ -155,7 +155,7 @@ async fn ensure_oidc_egress_lmm(
             depends_all: false,
             ingress: None,
             service_account: Some(OPERATOR_NAME.to_string()),
-            ambient: true,
+            ambient: true, advertise: None,
         },
     );
     lmm.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());

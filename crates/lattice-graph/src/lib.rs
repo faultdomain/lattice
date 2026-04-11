@@ -162,9 +162,9 @@ impl ServiceNode {
         }
 
         node.advertised_open = spec
-            .ingress
+            .advertise
             .as_ref()
-            .is_some_and(|i| i.has_open_advertise());
+            .is_some_and(|a| a.is_open());
 
         node
     }
@@ -304,9 +304,9 @@ impl ServiceNode {
             service_account: spec.service_account.clone(),
             ambient: spec.ambient,
             advertised_open: spec
-                .ingress
+                .advertise
                 .as_ref()
-                .is_some_and(|i| i.has_open_advertise()),
+                .is_some_and(|a| a.is_open()),
         }
     }
 
@@ -1801,7 +1801,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true,
+            ambient: true, advertise: None,
         }
     }
 
@@ -1933,7 +1933,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true,
+            ambient: true, advertise: None,
         };
 
         graph.put_mesh_member("default", "kube-api-access", &spec);
@@ -2264,7 +2264,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: Some("custom-sa".to_string()),
-            ambient: true,
+            ambient: true, advertise: None,
         };
         graph.put_mesh_member("ns", "frontend", &mm_spec);
 
@@ -2328,7 +2328,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true,
+            ambient: true, advertise: None,
         };
         graph.put_mesh_member("ns", "frontend", &mm_spec);
 

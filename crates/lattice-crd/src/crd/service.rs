@@ -113,7 +113,7 @@ pub struct LatticeServiceSpec {
     /// When set, the service is reachable from other clusters via the mesh.
     /// This is independent of `ingress` — a service can be advertised without
     /// external Gateway resources, or have external access without being
-    /// advertised, or both.
+    /// advertised, or both. Passed through to the compiled LatticeMeshMember.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise: Option<super::workload::ingress::AdvertiseConfig>,
 
@@ -141,6 +141,7 @@ impl Default for LatticeServiceSpec {
             backup: None,
             deploy: DeploySpec::default(),
             ingress: None,
+            advertise: None,
             topology: None,
             observability: None,
         }

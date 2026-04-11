@@ -20,9 +20,10 @@ use lattice_common::policy::tetragon::{
     TracingPolicySpec,
 };
 use lattice_crd::crd::{
-    derived_name, IngressSpec, IngressTls, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
-    PathMatchType, RouteKind,
+    derived_name, IngressSpec, IngressTls, LatticeMeshMemberSpec, MeshMemberPort,
+    MeshMemberTarget, PathMatchType, RouteKind,
 };
+use lattice_crd::crd::workload::ingress::AdvertiseConfig;
 
 use crate::policy::cilium::{
     build_port_rules, dns_egress_rule, hbone_egress_rule, hbone_ingress_rule,
@@ -394,7 +395,7 @@ impl IngressCompiler {
                     depends_all: true,
                     ingress: None,
                     service_account: Some(mesh::ingress_gateway_sa_name(namespace)),
-                    ambient: true,
+                    ambient: true, advertise: None,
                 },
             });
         }

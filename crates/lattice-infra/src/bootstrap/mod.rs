@@ -932,7 +932,7 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true,
+            ambient: true, advertise: None,
         },
     )
 }

@@ -223,6 +223,7 @@ pub async fn reconcile(
             ingress_spec,
             &member.spec.ports,
             ctx.graph.trust_domain(),
+            member.spec.advertise.as_ref(),
         ) {
             Ok(ingress) => {
                 if let Some(reg) = &ingress.gateway_graph_registration {
@@ -338,14 +339,9 @@ async fn check_cedar_wildcards(
 ) -> Option<String> {
     let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
     let has_wildcard_advertise = spec
-        .ingress
+        .advertise
         .as_ref()
-        .map(|i| {
-            i.routes
-                .values()
-                .any(|r| r.advertise.as_ref().map(|a| a.is_open()).unwrap_or(false))
-        })
-        .unwrap_or(false);
+        .is_some_and(|a| a.is_open());
     let checks = [
         (allows_all, WildcardDirection::Inbound),
         (spec.depends_all, WildcardDirection::Outbound),
@@ -422,6 +418,7 @@ async fn do_reconcile(
                 ingress_spec,
                 &member.spec.ports,
                 &trust_domain,
+                member.spec.advertise.as_ref(),
             )
         })
         .transpose()
@@ -1160,7 +1157,7 @@ mod tests {
                 depends_all: false,
                 ingress: None,
                 service_account: None,
-                ambient: true,
+                ambient: true, advertise: None,
             },
         )
     }

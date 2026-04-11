@@ -76,7 +76,7 @@ pub fn generate_kthena_mesh_members() -> Vec<LatticeMeshMember> {
                 depends_all: true,
                 ingress: None,
                 service_account: Some(KTHENA_ROUTER_SA.to_string()),
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ),
         lmm(
@@ -100,7 +100,7 @@ pub fn generate_kthena_mesh_members() -> Vec<LatticeMeshMember> {
                 depends_all: false,
                 ingress: None,
                 service_account: Some(KTHENA_CONTROLLER_MANAGER_SA.to_string()),
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ),
         lmm(
@@ -119,7 +119,7 @@ pub fn generate_kthena_mesh_members() -> Vec<LatticeMeshMember> {
                 depends_all: true,
                 ingress: None,
                 service_account: Some(KTHENA_AUTOSCALER_SA.to_string()),
-                ambient: true,
+                ambient: true, advertise: None,
             },
         ),
     ]

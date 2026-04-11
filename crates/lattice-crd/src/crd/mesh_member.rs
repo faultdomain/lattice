@@ -74,6 +74,13 @@ pub struct LatticeMeshMemberSpec {
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub ambient: bool,
+
+    /// Advertise this member for cross-cluster discovery via Istio multi-cluster.
+    ///
+    /// When set, the service is reachable from other clusters via the mesh.
+    /// Use `allowedServices` to restrict which remote services can depend on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<super::workload::ingress::AdvertiseConfig>,
 }
 
 fn default_true() -> bool {
@@ -405,7 +412,7 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true,
+            ambient: true, advertise: None,
         }
     }
 

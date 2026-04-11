@@ -22,17 +22,6 @@ pub struct IngressSpec {
     pub routes: BTreeMap<String, RouteSpec>,
 }
 
-impl IngressSpec {
-    /// Whether any route is advertised with open (wildcard) callers.
-    ///
-    /// Used to generate inbound AuthorizationPolicy that allows any
-    /// authenticated principal for cross-cluster traffic.
-    pub fn has_open_advertise(&self) -> bool {
-        self.routes
-            .values()
-            .any(|r| r.advertise.as_ref().is_some_and(|a| a.is_open()))
-    }
-}
 
 /// Route kind — which Gateway API route resource to generate.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -422,12 +411,6 @@ impl RouteSpec {
                     }
                 }
             }
-        }
-
-        // Validate advertise config if present
-        if let Some(ref adv) = self.advertise {
-            adv.validate()
-                .map_err(|e| format!("route '{}': {}", route_name, e))?;
         }
 
         Ok(())
