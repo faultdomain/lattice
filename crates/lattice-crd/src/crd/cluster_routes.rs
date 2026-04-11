@@ -57,8 +57,9 @@ pub struct ClusterRoute {
     #[serde(default = "default_protocol")]
     pub protocol: String,
 
-    /// Allowed callers (cluster/namespace/name) from the advertise config.
+    /// Allowed callers (namespace/name) from the advertise config.
     /// Empty = fail-closed (nobody allowed). Use ["*"] for open access.
+    /// Fine-grained enforcement is via SPIFFE AuthorizationPolicy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_services: Vec<String>,
 

@@ -136,21 +136,15 @@ async fn handle_service_lookup(
                     if route.service_name == req.service_name
                         && route.service_namespace == req.service_namespace
                     {
-                        // Check that the requesting cluster is authorized to
-                        // discover this route (bilateral agreement check).
-                        let allowed = route.allowed_services.iter().any(|s| {
-                            s == "*"
-                                || s.split('/')
-                                    .next()
-                                    .map(|cluster| cluster == requesting_cluster)
-                                    .unwrap_or(false)
-                        });
-                        if !allowed {
+                        // Route-level access control: empty allowed_services = fail-closed.
+                        // Wildcard or any non-empty list = allow discovery. Fine-grained
+                        // enforcement (which specific service can connect) is handled by
+                        // Istio AuthorizationPolicy via SPIFFE principals.
+                        if route.allowed_services.is_empty() {
                             debug!(
                                 service = %req.service_name,
                                 namespace = %req.service_namespace,
-                                requesting_cluster = %requesting_cluster,
-                                "service lookup denied: requesting cluster not in allowed_services"
+                                "service lookup denied: no allowed_services configured"
                             );
                             continue;
                         }
