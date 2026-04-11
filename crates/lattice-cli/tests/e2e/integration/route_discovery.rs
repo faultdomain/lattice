@@ -94,7 +94,6 @@ fn build_advertised_service(
             listen_port: None,
             rules: None,
             tls: None,
-            advertise: Some(AdvertiseConfig { allowed_services }),
         },
     );
 
@@ -114,6 +113,7 @@ fn build_advertised_service(
                 gateway_class: None,
                 routes,
             }),
+            advertise: Some(AdvertiseConfig { allowed_services }),
             ..Default::default()
         },
         status: None,
