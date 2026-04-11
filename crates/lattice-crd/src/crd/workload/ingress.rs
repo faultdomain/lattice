@@ -75,6 +75,15 @@ pub struct RouteSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<IngressTls>,
 
+    /// Create a Gateway API Gateway + Route resource for external traffic.
+    ///
+    /// Defaults to `true`. Set to `false` when the service is only reachable
+    /// via multi-cluster mesh (e.g., backend services behind an edge HAProxy).
+    /// The route is still advertised for cross-cluster discovery when
+    /// `advertise` is set, even without an external gateway.
+    #[serde(default = "default_true")]
+    pub external_gateway: bool,
+
     /// Advertise this route for multi-cluster discovery.
     ///
     /// When enabled, the route's hostname and gateway address are included in
@@ -83,6 +92,10 @@ pub struct RouteSpec {
     /// services can depend on this route (cross-cluster bilateral agreement).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise: Option<AdvertiseConfig>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Configuration for advertising a route across clusters.

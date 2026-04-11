@@ -252,6 +252,13 @@ impl IngressCompiler {
         let gateway_name = mesh::ingress_gateway_name(namespace);
 
         for (route_name, route_spec) in &ingress.routes {
+            // Skip Gateway/Route creation when external_gateway is disabled.
+            // The route is still advertised for cross-cluster discovery via
+            // the route reconciler, which reads ingress.routes directly.
+            if !route_spec.external_gateway {
+                continue;
+            }
+
             let backend_port = route_spec.resolve_port(ports).map_err(|e| {
                 format!(
                     "route '{}' for service '{}': {}",

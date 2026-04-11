@@ -287,15 +287,24 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 continue;
             }
 
-            let (address, port) = resolve_gateway_address(svc_ns, &gateways);
-            if address.is_empty() {
-                warn!(
-                    service = svc_name,
-                    namespace = svc_ns,
-                    "advertised route has no Gateway address — route will not be discoverable until Gateway gets an IP"
-                );
-                continue;
-            }
+            // Resolve the gateway address for routes with external access.
+            // Advertise-only routes (no external gateway) don't need an address —
+            // consumers reach the service via Istio multi-cluster using the
+            // service FQDN, not a gateway IP.
+            let (address, port) = if route.external_gateway {
+                let result = resolve_gateway_address(svc_ns, &gateways);
+                if result.0.is_empty() {
+                    warn!(
+                        service = svc_name,
+                        namespace = svc_ns,
+                        "advertised route has no Gateway address — route will not be discoverable until Gateway gets an IP"
+                    );
+                    continue;
+                }
+                result
+            } else {
+                (String::new(), 0)
+            };
 
             let allowed_services = route
                 .advertise

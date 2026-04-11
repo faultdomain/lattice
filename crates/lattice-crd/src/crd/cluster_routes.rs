@@ -110,11 +110,18 @@ impl ClusterRoute {
     /// the heartbeat ingestion path (server.rs) and the local discovery path
     /// (route_reconciler.rs) to ensure identical validation regardless of source.
     pub fn validate(&self) -> Result<(), String> {
-        if self.port == 0 {
-            return Err("port is 0".to_string());
-        }
-        if self.address.is_empty() {
-            return Err("empty address".to_string());
+        // Address and port are required for externally routable routes but
+        // optional for mesh-internal routes (advertise-only, no external gateway).
+        // Consumers of mesh-internal routes use the service FQDN via Istio
+        // multi-cluster, not the gateway address.
+        let has_gateway = !self.address.is_empty() || self.port > 0;
+        if has_gateway {
+            if self.port == 0 {
+                return Err("port is 0".to_string());
+            }
+            if self.address.is_empty() {
+                return Err("empty address".to_string());
+            }
         }
         if self.hostname.is_empty() {
             return Err("empty hostname".to_string());
