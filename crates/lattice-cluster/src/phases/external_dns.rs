@@ -214,7 +214,12 @@ fn build_cluster_role(name: &str) -> Value {
         "rules": [
             {
                 "apiGroups": [""],
-                "resources": ["services", "endpoints", "nodes"],
+                "resources": ["services", "endpoints", "nodes", "namespaces"],
+                "verbs": ["get", "list", "watch"]
+            },
+            {
+                "apiGroups": ["gateway.networking.k8s.io"],
+                "resources": ["gateways", "httproutes", "grpcroutes", "tcproutes"],
                 "verbs": ["get", "list", "watch"]
             },
             {
@@ -258,8 +263,10 @@ fn common_args(cluster_name: &str) -> Vec<String> {
         "--registry=txt".to_string(),
         format!("--txt-owner-id=lattice-{cluster_name}"),
         "--interval=30s".to_string(),
+        "--source=gateway-httproute".to_string(),
+        "--source=gateway-grpcroute".to_string(),
+        "--source=gateway-tcproute".to_string(),
         "--source=service".to_string(),
-        "--source=ingress".to_string(),
     ]
 }
 
@@ -619,8 +626,10 @@ mod tests {
         assert!(args.contains(&"--pihole-password=$(EXTERNAL_DNS_PIHOLE_PASSWORD)"));
         assert!(args.contains(&"--policy=upsert-only"));
         assert!(args.contains(&"--txt-owner-id=lattice-test-cluster"));
+        assert!(args.contains(&"--source=gateway-httproute"));
+        assert!(args.contains(&"--source=gateway-grpcroute"));
+        assert!(args.contains(&"--source=gateway-tcproute"));
         assert!(args.contains(&"--source=service"));
-        assert!(args.contains(&"--source=ingress"));
 
         let env_names = deployment_env(dep);
         assert!(env_names.contains(&"EXTERNAL_DNS_PIHOLE_PASSWORD"));
@@ -807,7 +816,7 @@ mod tests {
 
         let cr = &manifests[1];
         let rules = cr["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.len(), 3);
 
         let core_resources: Vec<&str> = rules[0]["resources"]
             .as_array()
@@ -818,8 +827,20 @@ mod tests {
         assert!(core_resources.contains(&"services"));
         assert!(core_resources.contains(&"endpoints"));
         assert!(core_resources.contains(&"nodes"));
+        assert!(core_resources.contains(&"namespaces"));
 
-        let ingress_resources: Vec<&str> = rules[1]["resources"]
+        let gateway_resources: Vec<&str> = rules[1]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(gateway_resources.contains(&"gateways"));
+        assert!(gateway_resources.contains(&"httproutes"));
+        assert!(gateway_resources.contains(&"grpcroutes"));
+        assert!(gateway_resources.contains(&"tcproutes"));
+
+        let ingress_resources: Vec<&str> = rules[2]["resources"]
             .as_array()
             .unwrap()
             .iter()
