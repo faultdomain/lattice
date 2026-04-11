@@ -39,6 +39,7 @@ pub mod dns;
 pub mod ecommerce;
 pub mod gateway;
 pub mod gpu_health;
+pub mod image_signature;
 pub mod image_provider;
 pub mod job;
 pub mod kubeconfig;
