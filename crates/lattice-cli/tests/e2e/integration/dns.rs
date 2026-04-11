@@ -56,6 +56,9 @@ kind: Secret
 metadata:
   name: {PIHOLE_SECRET_REMOTE_KEY}
   namespace: {SECRETS_NS}
+  labels:
+    lattice.dev/secret-source: "true"
+type: Opaque
 stringData:
   EXTERNAL_DNS_PIHOLE_PASSWORD: "{PIHOLE_PASSWORD}""#
     );
@@ -72,8 +75,8 @@ spec:
   zone: {TEST_ZONE}
   resolver: "{resolver}"
   credentials:
-    provider: local
-    remoteKey: {PIHOLE_SECRET_REMOTE_KEY}
+    id: {PIHOLE_SECRET_REMOTE_KEY}
+    provider: lattice-local
     keys:
       - EXTERNAL_DNS_PIHOLE_PASSWORD
   pihole:
