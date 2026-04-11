@@ -259,7 +259,6 @@ fn common_args(cluster_name: &str) -> Vec<String> {
         format!("--txt-owner-id=lattice-{cluster_name}"),
         "--request-timeout=120s".to_string(),
         "--interval=30s".to_string(),
-        "--log-level=debug".to_string(),
         "--source=gateway-httproute".to_string(),
         "--source=gateway-grpcroute".to_string(),
     ]
