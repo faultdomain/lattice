@@ -534,7 +534,7 @@ impl<'a> WorkloadCompiler<'a> {
             let secret_type = creds
                 .secret_type
                 .as_deref()
-                .unwrap_or(lattice_common::SECRET_TYPE_DOCKERCONFIG);
+                .unwrap_or(lattice_core::SECRET_TYPE_DOCKERCONFIG);
             es.spec.target.template = Some(lattice_secret_provider::eso::ExternalSecretTemplate {
                 engine_version: "v2".to_string(),
                 type_: Some(secret_type.to_string()),

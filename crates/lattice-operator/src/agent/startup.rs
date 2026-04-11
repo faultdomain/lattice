@@ -15,9 +15,10 @@ use lattice_agent::{
     AgentClient, AgentClientConfig, AgentCredentials, SharedExecForwarder, SharedK8sForwarder,
 };
 use lattice_common::{
-    ParentConnectionConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY, LATTICE_SYSTEM_NAMESPACE,
-    SECRET_TYPE_TLS, TLS_CERT_KEY, TLS_KEY_KEY,
+    ParentConnectionConfig, AGENT_CREDENTIALS_SECRET, CA_CERT_KEY,
+    TLS_CERT_KEY, TLS_KEY_KEY,
 };
+use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_TLS};
 
 /// Supervise agent connection with automatic reconnection.
 /// If a parent cell is configured, maintains connection indefinitely with retries.

@@ -13,6 +13,7 @@ fips = ["lattice-common/fips"]
 lattice-cache = { workspace = true }
 lattice-cedar = { workspace = true }
 lattice-common = { workspace = true }
+lattice-core = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

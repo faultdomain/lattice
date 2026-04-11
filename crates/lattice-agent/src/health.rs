@@ -18,7 +18,7 @@ pub async fn get_operator_image(kube_provider: &dyn KubeClientProvider) -> Optio
     let client = kube_provider.create().await.ok()?;
 
     let deploy_api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
-        kube::Api::namespaced(client, lattice_common::LATTICE_SYSTEM_NAMESPACE);
+        kube::Api::namespaced(client, lattice_core::LATTICE_SYSTEM_NAMESPACE);
 
     let deploy = deploy_api.get(OPERATOR_NAME).await.ok()?;
     deploy

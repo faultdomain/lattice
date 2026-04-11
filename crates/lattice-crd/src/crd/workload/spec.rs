@@ -77,10 +77,10 @@ pub struct RuntimeSpec {
 
 impl RuntimeSpec {
     /// Validate the runtime specification (sidecar names and specs)
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         for (name, sidecar) in &self.sidecars {
             super::super::validate_dns_label(name, "sidecar name")
-                .map_err(crate::Error::validation)?;
+                .map_err(crate::ValidationError::new)?;
             sidecar.validate(name)?;
         }
         Ok(())
@@ -184,9 +184,9 @@ impl WorkloadSpec {
     }
 
     /// Validate the workload specification
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.containers.is_empty() {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "service must have at least one container",
             ));
         }
@@ -194,13 +194,13 @@ impl WorkloadSpec {
         // Validate container names are valid DNS labels
         for name in self.containers.keys() {
             super::super::validate_dns_label(name, "container name")
-                .map_err(crate::Error::validation)?;
+                .map_err(crate::ValidationError::new)?;
         }
 
         // Validate resource names are valid DNS labels
         for name in self.resources.keys() {
             super::super::validate_dns_label(name, "resource name")
-                .map_err(crate::Error::validation)?;
+                .map_err(crate::ValidationError::new)?;
         }
 
         // Validate containers
@@ -221,21 +221,21 @@ impl WorkloadSpec {
             if let Some(ref id) = resource.id {
                 if id != "*" && resource.type_.is_volume() {
                     if id.len() > 50 {
-                        return Err(crate::Error::validation(format!(
+                        return Err(crate::ValidationError::new(format!(
                             "resource '{}': id '{}' exceeds 50 character limit \
                              (used in label name with 13-char prefix)",
                             name, id
                         )));
                     }
                     super::super::validate_dns_label(id, "resource id").map_err(|e| {
-                        crate::Error::validation(format!("resource '{}': {}", name, e))
+                        crate::ValidationError::new(format!("resource '{}': {}", name, e))
                     })?;
                 }
             }
 
             if let Some(gpu) = resource.params.as_gpu() {
                 gpu.validate()
-                    .map_err(|e| crate::Error::validation(format!("resource '{}': {}", name, e)))?;
+                    .map_err(|e| crate::ValidationError::new(format!("resource '{}': {}", name, e)))?;
             }
         }
 

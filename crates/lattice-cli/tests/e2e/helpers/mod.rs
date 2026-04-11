@@ -253,7 +253,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Standard poll interval for `wait_for_condition` loops.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-pub use lattice_common::VELERO_NAMESPACE;
+pub use lattice_core::system_namespaces::VELERO_NAMESPACE;
 
 /// Cycle markers emitted by traffic generators to indicate test progress.
 /// Used by both mesh and gateway traffic generators.

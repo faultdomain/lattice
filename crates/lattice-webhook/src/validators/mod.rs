@@ -9,7 +9,7 @@ mod service;
 
 use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
-use lattice_common::system_namespaces;
+use lattice_core::system_namespaces;
 use serde::de::DeserializeOwned;
 
 /// Reject workload CRDs deployed in system namespaces.

@@ -372,16 +372,16 @@ impl LatticeJobSpec {
     /// - Missing coordinator task
     /// - Training containers without explicit command
     /// - Training tasks with restart_policy != Never
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.tasks.is_empty() {
-            return Err(crate::Error::validation("job has no tasks"));
+            return Err(crate::ValidationError::new("job has no tasks"));
         }
 
         let tasks = self.merged_tasks();
 
         if let Some(ref training) = self.training {
             if !tasks.contains_key(&training.coordinator_task) {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "training coordinator task '{}' not found in job tasks",
                     training.coordinator_task
                 )));
@@ -392,7 +392,7 @@ impl LatticeJobSpec {
             for (task_name, task_spec) in &tasks {
                 for (container_name, container) in &task_spec.workload.containers {
                     if container.command.is_none() {
-                        return Err(crate::Error::validation(format!(
+                        return Err(crate::ValidationError::new(format!(
                             "training task '{}' container '{}' must specify a command",
                             task_name, container_name
                         )));
@@ -406,7 +406,7 @@ impl LatticeJobSpec {
             for (task_name, task_spec) in &tasks {
                 if let Some(ref policy) = task_spec.restart_policy {
                     if *policy != RestartPolicy::Never {
-                        return Err(crate::Error::validation(format!(
+                        return Err(crate::ValidationError::new(format!(
                             "training task '{}' has restart_policy '{}', \
                              but training jobs require 'Never' so Volcano \
                              can manage gang restarts",
@@ -421,7 +421,7 @@ impl LatticeJobSpec {
         for (task_name, task_spec) in &tasks {
             for (container_name, container) in &task_spec.workload.containers {
                 container.validate(container_name).map_err(|e| {
-                    crate::Error::validation(format!("task '{}': {}", task_name, e))
+                    crate::ValidationError::new(format!("task '{}': {}", task_name, e))
                 })?;
             }
             task_spec.runtime.validate()?;

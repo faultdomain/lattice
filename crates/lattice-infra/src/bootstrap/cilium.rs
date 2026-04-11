@@ -14,7 +14,7 @@ use lattice_common::policy::cilium::{
 };
 
 use super::split_yaml_documents;
-use lattice_common::system_namespaces;
+use lattice_core::system_namespaces;
 
 /// Pre-rendered Cilium manifests, split into individual YAML documents.
 static CILIUM_MANIFESTS: LazyLock<Vec<String>> =

@@ -7,6 +7,7 @@ description = "InfraProvider controller for Lattice - manages cloud account vali
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-core = { workspace = true }
 lattice-secret-provider = { workspace = true }
 
 # Kubernetes

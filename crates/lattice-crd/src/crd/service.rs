@@ -140,14 +140,14 @@ impl Default for LatticeServiceSpec {
 
 impl LatticeServiceSpec {
     /// Validate the service specification (workload + replicas + autoscaling)
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         self.workload.validate()?;
         self.runtime.validate()?;
 
         // Validate autoscaling
         if let Some(ref autoscaling) = self.autoscaling {
             if self.replicas > autoscaling.max {
-                return Err(crate::Error::validation(
+                return Err(crate::ValidationError::new(
                     "replicas cannot exceed autoscaling max",
                 ));
             }
@@ -271,7 +271,7 @@ mod tests {
         DependencyDirection, ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec,
         ResourceType, SecretParams, VolumeAccessMode,
     };
-    use crate::template::TemplateString;
+    use lattice_template::TemplateString;
 
     // =========================================================================
     // Test Fixtures

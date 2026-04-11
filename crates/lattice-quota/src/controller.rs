@@ -20,7 +20,8 @@ use lattice_common::crd::{
 use lattice_common::resources::{
     compute_workload_demand, parse_resource_by_key, WorkloadResourceDemand,
 };
-use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS};
+use lattice_common::{ReconcileError, REQUEUE_ERROR_SECS};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 const FIELD_MANAGER: &str = "lattice-quota-controller";
 const REQUEUE_SECS: u64 = 30;

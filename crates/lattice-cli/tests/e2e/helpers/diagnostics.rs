@@ -14,7 +14,7 @@ use futures::FutureExt;
 use tracing::{info, warn};
 
 use super::docker::run_kubectl;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Extract a human-readable message from a panic payload.
 pub fn panic_message(payload: &dyn Any) -> String {

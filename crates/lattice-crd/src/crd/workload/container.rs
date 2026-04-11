@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::template::TemplateString;
+use lattice_template::TemplateString;
 
 use super::resources::ResourceRequirements;
 
@@ -305,7 +305,7 @@ pub struct SidecarSpec {
 
 impl SidecarSpec {
     /// Validate sidecar specification
-    pub fn validate(&self, sidecar_name: &str) -> Result<(), crate::Error> {
+    pub fn validate(&self, sidecar_name: &str) -> Result<(), crate::ValidationError> {
         validate_image(&self.image, sidecar_name)?;
         validate_command_path(&self.command, sidecar_name)?;
 
@@ -313,7 +313,7 @@ impl SidecarSpec {
         // returns true and disables Tetragon binary enforcement for the entire pod.
         // Init containers are explicit setup tasks — they always know their entrypoint.
         if self.init == Some(true) && self.command.is_none() {
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "sidecar '{}': init containers must specify a command",
                 sidecar_name
             )));
@@ -398,7 +398,7 @@ pub struct ContainerSpec {
 
 impl ContainerSpec {
     /// Validate container specification
-    pub fn validate(&self, container_name: &str) -> Result<(), crate::Error> {
+    pub fn validate(&self, container_name: &str) -> Result<(), crate::ValidationError> {
         // Validate image format
         validate_image(&self.image, container_name)?;
 
@@ -407,13 +407,13 @@ impl ContainerSpec {
 
         // Resource limits are required for every container
         let resources = self.resources.as_ref().ok_or_else(|| {
-            crate::Error::validation(format!(
+            crate::ValidationError::new(format!(
                 "container '{}' must have resource limits",
                 container_name
             ))
         })?;
         if resources.limits.is_none() {
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "container '{}' must have resource limits",
                 container_name
             )));
@@ -433,7 +433,7 @@ impl ContainerSpec {
 
 impl FileMount {
     /// Validate file mount specification
-    pub fn validate(&self, container_name: &str, path: &str) -> Result<(), crate::Error> {
+    pub fn validate(&self, container_name: &str, path: &str) -> Result<(), crate::ValidationError> {
         // Validate mode is valid octal
         if let Some(ref mode) = self.mode {
             validate_file_mode(mode, container_name, path)?;
@@ -443,7 +443,7 @@ impl FileMount {
         let has_content =
             self.content.is_some() || self.binary_content.is_some() || self.source.is_some();
         if !has_content {
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "container '{}' file '{}': must specify content, binary_content, or source",
                 container_name, path
             )));
@@ -465,9 +465,9 @@ impl FileMount {
 ///
 /// Note: Per Score spec, `${...}` placeholders are NOT supported in image field.
 /// Use "." for runtime-supplied images instead.
-pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), crate::Error> {
+pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), crate::ValidationError> {
     if image.is_empty() {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}': image cannot be empty",
             container_name
         )));
@@ -480,7 +480,7 @@ pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), cr
 
     // Basic validation: image must not contain whitespace or control characters
     if image.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}': image '{}' contains invalid characters",
             container_name, image
         )));
@@ -489,7 +489,7 @@ pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), cr
     // Reject shell metacharacters that could enable injection
     const SHELL_METACHARS: &[char] = &['`', '|', ';', '&', '$', '>', '<', '(', ')', '{', '}'];
     if image.chars().any(|c| SHELL_METACHARS.contains(&c)) {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}': image '{}' contains shell metacharacters",
             container_name, image
         )));
@@ -506,7 +506,7 @@ pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), cr
 pub(crate) fn validate_command_path(
     command: &Option<Vec<String>>,
     container_name: &str,
-) -> Result<(), crate::Error> {
+) -> Result<(), crate::ValidationError> {
     if let Some(cmd) = command {
         validate_absolute_command(cmd, container_name)?;
     }
@@ -519,10 +519,10 @@ pub(crate) fn validate_command_path(
 pub fn validate_absolute_command(
     command: &[String],
     context_name: &str,
-) -> Result<(), crate::Error> {
+) -> Result<(), crate::ValidationError> {
     if let Some(binary) = command.first() {
         if !binary.starts_with('/') {
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "'{}': command[0] '{}' must be an absolute path (start with '/')",
                 context_name, binary
             )));
@@ -536,19 +536,19 @@ pub(crate) fn validate_file_mode(
     mode: &str,
     container_name: &str,
     path: &str,
-) -> Result<(), crate::Error> {
+) -> Result<(), crate::ValidationError> {
     // Mode should be 3-4 octal digits, optionally prefixed with 0
     let mode_str = mode.strip_prefix('0').unwrap_or(mode);
 
     if mode_str.len() < 3 || mode_str.len() > 4 {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}' file '{}': mode '{}' must be 3-4 octal digits (e.g., '0644')",
             container_name, path, mode
         )));
     }
 
     if !mode_str.chars().all(|c| ('0'..='7').contains(&c)) {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}' file '{}': mode '{}' contains non-octal digits",
             container_name, path, mode
         )));
@@ -560,7 +560,7 @@ pub(crate) fn validate_file_mode(
 
     // Reject setuid (04000), setgid (02000), and sticky (01000) bits
     if mode_val & 0o7000 != 0 {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}' file '{}': mode '{}' sets special bits (setuid/setgid/sticky) which are not allowed",
             container_name, path, mode
         )));
@@ -568,7 +568,7 @@ pub(crate) fn validate_file_mode(
 
     // Reject world-writable files (other-write bit)
     if mode_val & 0o002 != 0 {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}' file '{}': mode '{}' is world-writable which is not allowed",
             container_name, path, mode
         )));
@@ -587,7 +587,7 @@ mod tests {
     use crate::crd::workload::resources::{
         validate_cpu_quantity, validate_memory_quantity, ResourceQuantity, ResourceRequirements,
     };
-    use crate::template::TemplateString;
+    use lattice_template::TemplateString;
 
     #[test]
     fn test_valid_cpu_quantities() {

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use kube::config::Kubeconfig;
 use tracing::{debug, info, warn};
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::{Error, Result};
 

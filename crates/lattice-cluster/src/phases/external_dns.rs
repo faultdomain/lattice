@@ -12,10 +12,8 @@ use tracing::{debug, info, warn};
 use lattice_common::crd::{
     DNSProvider, DNSProviderSpec, DNSProviderType, LatticeCluster, SecretRef,
 };
-use lattice_common::{
-    Error, EXTERNAL_DNS_NAMESPACE, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE,
-    LATTICE_SYSTEM_NAMESPACE,
-};
+use lattice_common::{Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE};
+use lattice_core::{EXTERNAL_DNS_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
 
 /// Container image for external-dns deployments.
 const EXTERNAL_DNS_IMAGE: &str = "registry.k8s.io/external-dns/external-dns:v0.15.1";

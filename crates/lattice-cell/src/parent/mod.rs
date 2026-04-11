@@ -37,8 +37,8 @@ use lattice_common::crd::{
 use lattice_common::DistributableResources;
 use lattice_common::{
     lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_SERVICE_NAME,
-    LATTICE_SYSTEM_NAMESPACE,
 };
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_infra::ServerMtlsConfig;
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};
@@ -74,13 +74,13 @@ impl ParentConfig {
                 .cluster_name
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
-            bootstrap_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_BOOTSTRAP_PORT)
+            bootstrap_addr: format!("0.0.0.0:{}", lattice_core::DEFAULT_BOOTSTRAP_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
-            grpc_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_GRPC_PORT)
+            grpc_addr: format!("0.0.0.0:{}", lattice_core::DEFAULT_GRPC_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
-            proxy_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_PROXY_PORT)
+            proxy_addr: format!("0.0.0.0:{}", lattice_core::DEFAULT_PROXY_PORT)
                 .parse()
                 .expect("hardcoded socket address is valid"),
             auth_proxy_addr: format!("0.0.0.0:{}", lattice_common::DEFAULT_AUTH_PROXY_PORT)
@@ -995,13 +995,13 @@ mod tests {
         let config = ParentConfig::from_config(&test_lattice_config());
         assert_eq!(
             config.bootstrap_addr,
-            format!("0.0.0.0:{}", lattice_common::DEFAULT_BOOTSTRAP_PORT)
+            format!("0.0.0.0:{}", lattice_core::DEFAULT_BOOTSTRAP_PORT)
                 .parse()
                 .expect("valid address")
         );
         assert_eq!(
             config.grpc_addr,
-            format!("0.0.0.0:{}", lattice_common::DEFAULT_GRPC_PORT)
+            format!("0.0.0.0:{}", lattice_core::DEFAULT_GRPC_PORT)
                 .parse()
                 .expect("valid address")
         );

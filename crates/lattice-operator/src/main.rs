@@ -40,9 +40,9 @@ use lattice_common::telemetry::init_telemetry;
 use lattice_common::CrdRegistry;
 use lattice_common::SharedConfig;
 use lattice_common::{
-    lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, DEFAULT_HEALTH_PORT,
-    LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME,
+    lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, DEFAULT_HEALTH_PORT, OPERATOR_NAME,
 };
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;

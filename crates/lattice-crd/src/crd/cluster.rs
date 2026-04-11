@@ -149,10 +149,10 @@ impl LatticeClusterSpec {
     }
 
     /// Validate the cluster specification
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         // provider_ref must not be empty
         if self.provider_ref.is_empty() {
-            return Err(crate::Error::validation("provider_ref cannot be empty"));
+            return Err(crate::ValidationError::new("provider_ref cannot be empty"));
         }
 
         // Validate node spec
@@ -165,14 +165,14 @@ impl LatticeClusterSpec {
 
         // Validate DNS config
         if let Some(ref dns) = self.dns {
-            dns.validate().map_err(crate::Error::validation)?;
+            dns.validate().map_err(crate::ValidationError::new)?;
         }
 
         // Validate issuer references
         for (key, cert_issuer_ref) in &self.issuers {
-            crate::crd::validate_dns_label(key, "issuer key").map_err(crate::Error::validation)?;
+            crate::crd::validate_dns_label(key, "issuer key").map_err(crate::ValidationError::new)?;
             if cert_issuer_ref.is_empty() {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "issuers['{key}']: CertIssuer reference cannot be empty"
                 )));
             }
@@ -474,7 +474,7 @@ impl LatticeCluster {
     /// controller, not inherited from the source.
     pub fn for_export(&self) -> Self {
         let mut exported = self.clone();
-        crate::kube_utils::strip_export_metadata(&mut exported.metadata);
+        crate::strip_export_metadata(&mut exported.metadata);
         // Remove status entirely - the target cluster's controller will manage status.
         exported.status = None;
         exported

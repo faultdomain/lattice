@@ -19,16 +19,16 @@ pub struct AutoscalingSpec {
 
 impl AutoscalingSpec {
     /// Validate autoscaling metric targets.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         for m in &self.metrics {
             if m.target <= 0.0 {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "autoscaling metric '{}' target must be greater than 0",
                     m.metric
                 )));
             }
             if (m.metric == "cpu" || m.metric == "memory") && m.target > 100.0 {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "autoscaling metric '{}' target cannot exceed 100%",
                     m.metric
                 )));

@@ -9,9 +9,8 @@ use lattice_common::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
     ServiceRef,
 };
-use lattice_common::{
-    LABEL_NAME, LATTICE_SYSTEM_NAMESPACE, MONITORING_NAMESPACE, OPERATOR_NAME, VMAGENT_SA_NAME,
-};
+use lattice_common::{LABEL_NAME, MONITORING_NAMESPACE, OPERATOR_NAME, VMAGENT_SA_NAME};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};

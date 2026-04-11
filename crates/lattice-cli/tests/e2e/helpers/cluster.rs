@@ -8,7 +8,7 @@ use std::time::Duration;
 use kube::api::Api;
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use tracing::{info, warn};
 
 use base64::Engine;
@@ -647,7 +647,7 @@ pub fn load_cluster_config(
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let value = lattice_common::yaml::parse_yaml(&content)
+    let value = lattice_core::yaml::parse_yaml(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
     let cluster: LatticeCluster = serde_json::from_value(value)
         .map_err(|e| format!("Invalid cluster config in {}: {}", path.display(), e))?;
@@ -667,7 +667,7 @@ pub fn load_fixture_config<T: serde::de::DeserializeOwned>(filename: &str) -> Re
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let value = lattice_common::yaml::parse_yaml(&content)
+    let value = lattice_core::yaml::parse_yaml(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
     serde_json::from_value(value)
         .map_err(|e| format!("Invalid config in {}: {}", path.display(), e))

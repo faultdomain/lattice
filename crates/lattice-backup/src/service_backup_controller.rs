@@ -15,7 +15,8 @@ use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use lattice_common::crd::LatticeService;
-use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ControllerContext, ReconcileError};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::cluster_backup_controller::resolve_store;
 use crate::velero::{self, build_service_schedule};

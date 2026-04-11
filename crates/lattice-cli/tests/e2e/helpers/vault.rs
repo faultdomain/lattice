@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use tracing::info;
 
 use super::cedar::apply_yaml;

@@ -174,10 +174,10 @@ pub(crate) fn image_pull_policy(image: &str) -> String {
 
 /// Sanitize a string into a valid K8s DNS label.
 ///
-/// Delegates to `lattice_common::sanitize_dns_label` and converts `None` to
+/// Delegates to `lattice_core::sanitize_dns_label` and converts `None` to
 /// a compilation error.
 pub(crate) fn sanitize_dns_label(s: &str) -> Result<String, crate::error::CompilationError> {
-    lattice_common::sanitize_dns_label(s).ok_or_else(|| {
+    lattice_core::sanitize_dns_label(s).ok_or_else(|| {
         crate::error::CompilationError::file_compilation(format!(
             "input '{}' produces empty DNS label after sanitization",
             s

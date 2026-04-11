@@ -18,9 +18,8 @@ use k8s_openapi::ByteString;
 
 use kube::CustomResourceExt;
 use lattice_common::crd::{LatticeCluster, ProviderType};
-use lattice_common::{
-    LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET, SECRET_TYPE_DOCKERCONFIG,
-};
+use lattice_common::{OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET};
+use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_DOCKERCONFIG};
 
 use super::types::ManifestGenerator;
 
@@ -217,13 +216,13 @@ impl DefaultManifestGenerator {
                             ports: Some(vec![
                                 ContainerPort {
                                     name: Some("bootstrap".to_string()),
-                                    container_port: lattice_common::DEFAULT_BOOTSTRAP_PORT as i32,
+                                    container_port: lattice_core::DEFAULT_BOOTSTRAP_PORT as i32,
                                     protocol: Some("TCP".to_string()),
                                     ..Default::default()
                                 },
                                 ContainerPort {
                                     name: Some("grpc".to_string()),
-                                    container_port: lattice_common::DEFAULT_GRPC_PORT as i32,
+                                    container_port: lattice_core::DEFAULT_GRPC_PORT as i32,
                                     protocol: Some("TCP".to_string()),
                                     ..Default::default()
                                 },
@@ -329,7 +328,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
     #[tokio::test]
     async fn default_generator_creates_namespace() {

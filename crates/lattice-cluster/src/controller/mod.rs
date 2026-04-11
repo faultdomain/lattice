@@ -41,7 +41,8 @@ use lattice_common::crd::{ClusterPhase, LatticeCluster, LatticeClusterStatus};
 
 use lattice_common::events::{actions, reasons};
 use lattice_common::metrics::{self, ReconcileTimer};
-use lattice_common::{Error, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_SECRET};
+use lattice_common::{Error, PARENT_CONFIG_SECRET};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::phases::{
     handle_pending, handle_pivoting, handle_provisioning, handle_ready, update_status,

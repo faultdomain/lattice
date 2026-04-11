@@ -11,6 +11,7 @@ fips = ["lattice-common/fips", "aws-lc-rs/fips"]
 [dependencies]
 # Internal
 lattice-common = { workspace = true }
+lattice-core = { workspace = true }
 lattice-cedar = { workspace = true }
 lattice-secret-provider = { workspace = true }
 lattice-quota = { workspace = true }

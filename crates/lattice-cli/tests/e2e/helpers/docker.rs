@@ -239,7 +239,7 @@ fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'static 
 
 /// Patch a kubeconfig's server URL to use localhost with the given endpoint
 fn patch_kubeconfig_server(kubeconfig: &str, endpoint: &str) -> Result<String, String> {
-    let mut config: serde_json::Value = lattice_common::yaml::parse_yaml(kubeconfig)
+    let mut config: serde_json::Value = lattice_core::yaml::parse_yaml(kubeconfig)
         .map_err(|e| format!("Failed to parse kubeconfig: {}", e))?;
 
     if let Some(clusters) = config.get_mut("clusters").and_then(|c| c.as_array_mut()) {

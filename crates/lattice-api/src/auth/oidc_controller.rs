@@ -17,9 +17,10 @@ use lattice_common::crd::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderStatus, ParsedEndpoint,
 };
 use lattice_common::{
-    ControllerContext, ReconcileError, LABEL_MANAGED_BY, LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME,
+    ControllerContext, ReconcileError, LABEL_MANAGED_BY, OPERATOR_NAME,
     REQUEUE_SUCCESS_SECS,
 };
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Shorter retry interval for OIDC validation failures. The global REQUEUE_ERROR_SECS (60s) is
 /// too slow here — validation typically fails on the first attempt because the egress mesh policy

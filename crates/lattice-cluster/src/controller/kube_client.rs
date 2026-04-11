@@ -12,7 +12,8 @@ use tracing::{debug, info, warn};
 use mockall::automock;
 
 use lattice_common::crd::{LatticeCluster, LatticeClusterStatus};
-use lattice_common::{Error, CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME};
+use lattice_common::{Error, CELL_SERVICE_NAME, OPERATOR_NAME};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use super::pure::{is_control_plane_node, is_node_ready};
 use super::FIELD_MANAGER;

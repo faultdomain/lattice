@@ -144,7 +144,7 @@ pub use workload::topology::{TopologyMode, WorkloadNetworkTopology};
 // =============================================================================
 
 /// Serde default helper returning `true`
-pub(crate) fn default_true() -> bool {
+pub fn default_true() -> bool {
     true
 }
 
@@ -154,7 +154,7 @@ pub(crate) fn default_true() -> bool {
 /// `additionalProperties` fields (e.g., `endpoints: {"default": "https://..."}` → `{}`).
 ///
 /// Used via `#[schemars(schema_with = "crate::crd::preserve_unknown_fields")]`.
-pub(crate) fn preserve_unknown_fields(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub fn preserve_unknown_fields(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
         "x-kubernetes-preserve-unknown-fields": true

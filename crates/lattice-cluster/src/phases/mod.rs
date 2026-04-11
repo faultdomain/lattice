@@ -363,7 +363,7 @@ async fn resolve_registry_credentials(
                     provider_name: &provider_name,
                     credentials: resource,
                     credential_data: None,
-                    target_namespace: lattice_common::LATTICE_SYSTEM_NAMESPACE,
+                    target_namespace: lattice_core::LATTICE_SYSTEM_NAMESPACE,
                     field_manager: "lattice-cluster-controller",
                 },
             )
@@ -379,7 +379,7 @@ async fn resolve_registry_credentials(
         let secret_name = format!("{provider_name}-credentials");
         let secret = ctx
             .kube
-            .get_secret(&secret_name, lattice_common::LATTICE_SYSTEM_NAMESPACE)
+            .get_secret(&secret_name, lattice_core::LATTICE_SYSTEM_NAMESPACE)
             .await
             .map_err(|e| {
                 Error::internal(format!(

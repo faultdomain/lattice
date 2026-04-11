@@ -7,7 +7,7 @@ use kube::api::{Api, PostParams};
 use kube::Client;
 
 use lattice_common::kube_utils::build_cell_service;
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_common::crd::{LatticeCluster, ProviderType};
 

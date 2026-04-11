@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use kube::ResourceExt;
 use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
 use lattice_common::crd::{InfraProvider, LatticeCluster, ProviderType};
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use super::config::CAPI_CRD_POLL_INTERVAL;
 use super::AgentClient;

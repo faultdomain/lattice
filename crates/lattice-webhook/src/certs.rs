@@ -9,7 +9,7 @@ use kube::api::{ObjectMeta, PostParams};
 use kube::{Api, Client};
 use std::collections::BTreeMap;
 
-use lattice_common::SECRET_TYPE_TLS;
+use lattice_core::SECRET_TYPE_TLS;
 use lattice_infra::pki::CertificateAuthority;
 
 use crate::error::Error;
@@ -18,7 +18,7 @@ use crate::error::Error;
 pub const WEBHOOK_TLS_SECRET_NAME: &str = "lattice-webhook-tls";
 
 /// Namespace for webhook TLS credentials
-pub const WEBHOOK_NAMESPACE: &str = lattice_common::LATTICE_SYSTEM_NAMESPACE;
+pub const WEBHOOK_NAMESPACE: &str = lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// SAN for the webhook service (short DNS)
 const WEBHOOK_SAN_SHORT: &str = "lattice-operator.lattice-system.svc";

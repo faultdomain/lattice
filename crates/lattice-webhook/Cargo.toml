@@ -8,6 +8,7 @@ description = "Kubernetes ValidatingAdmissionWebhook server for Lattice CRDs"
 [dependencies]
 # Internal
 lattice-common = { workspace = true }
+lattice-core = { workspace = true }
 lattice-infra = { workspace = true }
 
 # Kubernetes

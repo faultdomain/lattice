@@ -179,7 +179,7 @@ mod tests {
     use kube::core::ObjectMeta;
     use lattice_common::crd::{CredentialSpec, InfraProviderSpec};
     use lattice_common::template::extract_secret_refs;
-    use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
     use lattice_secret_provider::eso::{build_external_secret, build_templated_external_secret};
     use std::collections::BTreeMap;
 

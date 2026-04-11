@@ -15,9 +15,8 @@ use lattice_common::crd::{
     CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;
-use lattice_common::{
-    INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
-};
+use lattice_common::{INHERITED_LABEL, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Convert domain `DistributableResources` to the proto wire type.
 ///
@@ -236,7 +235,7 @@ where
         .name
         .clone()
         .ok_or_else(|| ResourceError::Internal("resource has no metadata.name".to_string()))?;
-    lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
+    lattice_core::strip_export_metadata(clean.meta_mut());
 
     serialize_resource_core(&clean, &resource_name)
 }
@@ -260,7 +259,7 @@ where
     clean.meta_mut().name = Some(prefixed_name.clone());
 
     // Strip cluster-specific metadata
-    lattice_common::kube_utils::strip_export_metadata(clean.meta_mut());
+    lattice_core::strip_export_metadata(clean.meta_mut());
 
     // Add origin labels
     let labels = clean.meta_mut().labels.get_or_insert_with(Default::default);

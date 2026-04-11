@@ -182,7 +182,7 @@ pub async fn run_kubeconfig_verification(
 ) -> Result<(), String> {
     let diag = DiagnosticContext::new(
         &ctx.mgmt_kubeconfig,
-        lattice_common::LATTICE_SYSTEM_NAMESPACE,
+        lattice_core::LATTICE_SYSTEM_NAMESPACE,
     );
     with_diagnostics(&diag, "Kubeconfig Verification", || async {
         verify_kubeconfig_patched(

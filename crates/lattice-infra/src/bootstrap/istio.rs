@@ -12,7 +12,8 @@ use lattice_common::policy::istio::{
     MtlsConfig, OperationSpec, PeerAuthentication, PeerAuthenticationSpec, TargetRef,
     WorkloadSelector,
 };
-use lattice_common::{LATTICE_SYSTEM_NAMESPACE, OPERATOR_NAME};
+use lattice_common::OPERATOR_NAME;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use super::split_yaml_documents;
 

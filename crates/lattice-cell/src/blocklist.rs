@@ -10,7 +10,7 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use tracing::{info, warn};
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// ConfigMap name for persisting blocked certificate fingerprints
 const BLOCKLIST_CONFIGMAP: &str = "lattice-cert-blocklist";

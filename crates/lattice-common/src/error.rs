@@ -400,6 +400,12 @@ impl Error {
     }
 }
 
+impl From<lattice_core::ValidationError> for Error {
+    fn from(e: lattice_core::ValidationError) -> Self {
+        Error::validation(e.0)
+    }
+}
+
 impl Retryable for Error {
     fn is_retryable(&self) -> bool {
         // Delegate to the inherent method (inherent takes priority, no recursion)

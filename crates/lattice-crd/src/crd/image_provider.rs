@@ -179,9 +179,9 @@ impl std::fmt::Display for ImageProviderPhase {
 
 impl ImageProviderSpec {
     /// Validate the spec. Returns an error if invalid.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.registry.is_empty() {
-            return Err(crate::Error::validation("registry cannot be empty"));
+            return Err(crate::ValidationError::new("registry cannot be empty"));
         }
 
         if let Some(ref credentials) = self.credentials {
@@ -189,7 +189,7 @@ impl ImageProviderSpec {
         }
 
         if self.credential_data.is_some() && self.credentials.is_none() {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "credentialData requires credentials to be set",
             ));
         }
@@ -198,9 +198,9 @@ impl ImageProviderSpec {
             let ecr = self
                 .ecr
                 .as_ref()
-                .ok_or_else(|| crate::Error::validation("ecr config required when type is ecr"))?;
+                .ok_or_else(|| crate::ValidationError::new("ecr config required when type is ecr"))?;
             if ecr.region.is_empty() {
-                return Err(crate::Error::validation("ecr.region cannot be empty"));
+                return Err(crate::ValidationError::new("ecr.region cannot be empty"));
             }
         }
 

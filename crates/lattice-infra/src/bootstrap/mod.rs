@@ -37,9 +37,11 @@ use lattice_common::crd::{
     MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
 };
 use lattice_common::{
-    DEFAULT_AUTH_PROXY_PORT, DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT,
-    DEFAULT_WEBHOOK_PORT, LATTICE_SYSTEM_NAMESPACE, LOCAL_SECRETS_PORT, MONITORING_NAMESPACE,
+    DEFAULT_AUTH_PROXY_PORT, DEFAULT_WEBHOOK_PORT, LOCAL_SECRETS_PORT, MONITORING_NAMESPACE,
     OPERATOR_NAME, VMAGENT_SA_NAME,
+};
+use lattice_core::{
+    DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
 };
 
 /// A single infrastructure component with its name, version, and manifests.
@@ -189,7 +191,8 @@ pub struct IstioCaConfig {
 /// - `lattice-ca` exists + no `cacerts` → trust_domain=Some, root_ca=Some → Istio installed with cacerts
 pub async fn resolve_istio_ca(client: &kube::Client) -> IstioCaConfig {
     use k8s_openapi::api::core::v1::Secret;
-    use lattice_common::{CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, LATTICE_SYSTEM_NAMESPACE};
+    use lattice_common::{CA_CERT_KEY, CA_KEY_KEY, CA_SECRET};
+    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
     let api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let secret = match api.get(CA_SECRET).await {

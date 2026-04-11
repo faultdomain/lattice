@@ -7,23 +7,30 @@
 //! plane must operate outside the mesh it manages).
 //!
 //! Namespaces with LatticeMeshMember coverage (kthena-system, monitoring,
-//! keda) are NOT listed here — their pods get explicit CiliumNetworkPolicies
+//! keda) are NOT listed here -- their pods get explicit CiliumNetworkPolicies
 //! and PeerAuthentication resources from the MeshMember controller.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use crate::{
-    CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, EXTERNAL_DNS_NAMESPACE, VELERO_NAMESPACE,
-};
+use crate::EXTERNAL_DNS_NAMESPACE;
+
+/// CAPI provider namespace for AWS
+pub const CAPA_NAMESPACE: &str = "capa-system";
+/// CAPI provider namespace for Proxmox
+pub const CAPMOX_NAMESPACE: &str = "capmox-system";
+/// CAPI provider namespace for OpenStack
+pub const CAPO_NAMESPACE: &str = "capo-system";
+/// Velero backup namespace
+pub const VELERO_NAMESPACE: &str = "velero";
 
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
 
-/// CNI (Cilium) namespace — can't enforce policies on itself
+/// CNI (Cilium) namespace -- can't enforce policies on itself
 pub const CNI: &[&str] = &["cilium-system"];
 
-/// Service mesh (Istio) namespace — control plane must be outside the mesh
+/// Service mesh (Istio) namespace -- control plane must be outside the mesh
 pub const MESH: &[&str] = &["istio-system"];
 
 /// Certificate management namespace (serves webhooks, no MeshMember yet)

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use lattice_common::kube_utils::{HasApiResource, ObjectMeta};
 use lattice_common::{ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
-pub(crate) use lattice_common::VELERO_NAMESPACE;
+pub(crate) use lattice_core::system_namespaces::VELERO_NAMESPACE;
 
 /// Apply a Velero resource using server-side apply via DynamicObject
 pub(crate) async fn apply_resource<T>(

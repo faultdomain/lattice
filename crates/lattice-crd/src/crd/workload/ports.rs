@@ -31,15 +31,15 @@ pub struct ServicePortsSpec {
 
 impl ServicePortsSpec {
     /// Validate service port specification
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         let mut seen_ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
 
         for (name, port_spec) in &self.ports {
             // Validate port name is a valid DNS label (max 15 chars for IANA compliance)
             super::super::validate_dns_label(name, "port name")
-                .map_err(crate::Error::validation)?;
+                .map_err(crate::ValidationError::new)?;
             if name.len() > 15 {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "port name '{}' exceeds 15 character IANA service name limit",
                     name
                 )));
@@ -47,7 +47,7 @@ impl ServicePortsSpec {
 
             // Validate port is not zero
             if port_spec.port == 0 {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "service port '{}': port cannot be 0",
                     name
                 )));
@@ -56,7 +56,7 @@ impl ServicePortsSpec {
             // Validate target_port is not zero
             if let Some(target_port) = port_spec.target_port {
                 if target_port == 0 {
-                    return Err(crate::Error::validation(format!(
+                    return Err(crate::ValidationError::new(format!(
                         "service port '{}': target_port cannot be 0",
                         name
                     )));
@@ -65,7 +65,7 @@ impl ServicePortsSpec {
 
             // Check for duplicate port numbers
             if !seen_ports.insert(port_spec.port) {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "duplicate service port number: {}",
                     port_spec.port
                 )));

@@ -203,21 +203,21 @@ impl CertIssuer {
 
 impl CertIssuerSpec {
     /// Validate the issuer spec. Returns an error if invalid.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         match self.type_ {
             IssuerType::Acme => {
                 let acme = self.acme.as_ref().ok_or_else(|| {
-                    crate::Error::validation("acme config required when type is acme")
+                    crate::ValidationError::new("acme config required when type is acme")
                 })?;
                 if acme.email.is_empty() {
-                    return Err(crate::Error::validation("acme.email cannot be empty"));
+                    return Err(crate::ValidationError::new("acme.email cannot be empty"));
                 }
                 if acme.server.is_empty() {
-                    return Err(crate::Error::validation("acme.server cannot be empty"));
+                    return Err(crate::ValidationError::new("acme.server cannot be empty"));
                 }
                 if let Some(ref dns_ref) = acme.dns_provider_ref {
                     if dns_ref.is_empty() {
-                        return Err(crate::Error::validation(
+                        return Err(crate::ValidationError::new(
                             "acme.dnsProviderRef cannot be empty when specified",
                         ));
                     }
@@ -225,26 +225,26 @@ impl CertIssuerSpec {
             }
             IssuerType::Ca => {
                 let ca = self.ca.as_ref().ok_or_else(|| {
-                    crate::Error::validation("ca config required when type is ca")
+                    crate::ValidationError::new("ca config required when type is ca")
                 })?;
                 ca.credentials.validate()?;
             }
             IssuerType::Vault => {
                 let vault = self.vault.as_ref().ok_or_else(|| {
-                    crate::Error::validation("vault config required when type is vault")
+                    crate::ValidationError::new("vault config required when type is vault")
                 })?;
                 if vault.server.is_empty() {
-                    return Err(crate::Error::validation("vault.server cannot be empty"));
+                    return Err(crate::ValidationError::new("vault.server cannot be empty"));
                 }
                 if vault.path.is_empty() {
-                    return Err(crate::Error::validation("vault.path cannot be empty"));
+                    return Err(crate::ValidationError::new("vault.path cannot be empty"));
                 }
                 vault.auth_credentials.validate()?;
             }
             IssuerType::SelfSigned => {
                 // No config needed — but reject extraneous fields
                 if self.acme.is_some() || self.ca.is_some() || self.vault.is_some() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "selfSigned type must not have acme, ca, or vault config",
                     ));
                 }

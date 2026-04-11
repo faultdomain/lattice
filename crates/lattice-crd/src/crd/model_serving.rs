@@ -183,10 +183,10 @@ pub struct ModelScaleDownBehavior {
 
 impl ModelRoleSpec {
     /// Validate role constraints (e.g. replicas must not exceed autoscaling max).
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if let Some(ref autoscaling) = self.autoscaling {
             if self.replicas() > autoscaling.max {
-                return Err(crate::Error::validation(
+                return Err(crate::ValidationError::new(
                     "replicas cannot exceed autoscaling max",
                 ));
             }
@@ -534,13 +534,13 @@ pub struct ModelIngressSpec {
 
 impl ModelIngressSpec {
     /// Validate the ingress spec
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.hosts.is_empty() {
-            return Err(crate::Error::validation("ingress hosts must not be empty"));
+            return Err(crate::ValidationError::new("ingress hosts must not be empty"));
         }
         if let Some(ref tls) = self.tls {
             if tls.secret_name.is_some() && tls.issuer_ref.is_some() {
-                return Err(crate::Error::validation(
+                return Err(crate::ValidationError::new(
                     "ingress tls: specify either secretName or issuerRef, not both",
                 ));
             }
@@ -638,17 +638,17 @@ impl LatticeModelSpec {
     }
 
     /// Validate the model specification (all roles, with defaults applied).
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         let roles = self.merged_roles();
         for (role_name, role_spec) in &roles {
             role_spec
                 .validate()
-                .map_err(|e| crate::Error::validation(format!("role '{role_name}': {e}")))?;
+                .map_err(|e| crate::ValidationError::new(format!("role '{role_name}': {e}")))?;
         }
         if let Some(ref ingress) = self.ingress {
             ingress.validate()?;
             if self.routing.is_none() {
-                return Err(crate::Error::validation(
+                return Err(crate::ValidationError::new(
                     "ingress requires routing to be configured",
                 ));
             }

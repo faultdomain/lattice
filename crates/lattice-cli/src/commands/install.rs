@@ -47,9 +47,10 @@ use lattice_common::credentials::{
 };
 use lattice_common::kube_utils;
 use lattice_common::{
-    capi_namespace, kubeconfig_secret_name, AWS_CREDENTIALS_SECRET, LATTICE_SYSTEM_NAMESPACE,
-    OPENSTACK_CREDENTIALS_SECRET, OPERATOR_NAME, PROXMOX_CREDENTIALS_SECRET, SECRET_TYPE_SA_TOKEN,
+    capi_namespace, kubeconfig_secret_name, AWS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET,
+    OPERATOR_NAME, PROXMOX_CREDENTIALS_SECRET,
 };
+use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_SA_TOKEN};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 
@@ -169,7 +170,7 @@ impl Installer {
         config_dir: PathBuf,
         run_id: Option<String>,
     ) -> Result<Self> {
-        let docs = lattice_common::yaml::parse_yaml_multi(&cluster_yaml)
+        let docs = lattice_core::yaml::parse_yaml_multi(&cluster_yaml)
             .map_err(|e| Error::validation(format!("Invalid YAML: {}", e)))?;
 
         // Find the LatticeCluster document and collect LatticePackage documents
@@ -785,7 +786,7 @@ impl Installer {
         let localhost_url = format!("https://127.0.0.1:{}", port);
 
         // Parse kubeconfig as YAML and update the server URL
-        let mut config = lattice_common::yaml::parse_yaml(kubeconfig).map_err(|e| {
+        let mut config = lattice_core::yaml::parse_yaml(kubeconfig).map_err(|e| {
             Error::command_failed(format!("Failed to parse kubeconfig YAML: {}", e))
         })?;
 
@@ -1057,7 +1058,7 @@ impl Installer {
                 ])),
                 ..Default::default()
             },
-            type_: Some(lattice_common::SECRET_TYPE_DOCKERCONFIG.to_string()),
+            type_: Some(lattice_core::SECRET_TYPE_DOCKERCONFIG.to_string()),
             data: Some(BTreeMap::from([(
                 ".dockerconfigjson".to_string(),
                 k8s_openapi::ByteString(creds.as_bytes().to_vec()),
@@ -1135,7 +1136,7 @@ impl Installer {
                 ))
             })?;
 
-            let value = lattice_common::yaml::parse_yaml(&secret_yaml).map_err(|e| {
+            let value = lattice_core::yaml::parse_yaml(&secret_yaml).map_err(|e| {
                 Error::validation(format!(
                     "Invalid YAML in secret file {}: {}",
                     secret_path.display(),
@@ -1903,7 +1904,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_kubeconfig_server() {
-        use lattice_common::yaml::parse_yaml;
+        use lattice_core::yaml::parse_yaml;
 
         let kubeconfig = r#"apiVersion: v1
 kind: Config
@@ -1954,7 +1955,7 @@ users:
 
     #[test]
     fn test_rewrite_kubeconfig_multiple_clusters() {
-        use lattice_common::yaml::parse_yaml;
+        use lattice_core::yaml::parse_yaml;
 
         let kubeconfig = r#"apiVersion: v1
 kind: Config

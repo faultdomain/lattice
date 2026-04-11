@@ -72,7 +72,7 @@ pub async fn handle(cmd: &ApplyManifestsCommand, ctx: &CommandContext) {
 
 /// Extract kind and name from a YAML/JSON manifest string for logging.
 pub fn extract_manifest_info(yaml: &str) -> (String, String) {
-    extract_manifest_info_from_value(lattice_common::yaml::parse_yaml(yaml).ok())
+    extract_manifest_info_from_value(lattice_core::yaml::parse_yaml(yaml).ok())
 }
 
 /// Extract kind and name from manifest bytes for logging.

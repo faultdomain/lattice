@@ -103,7 +103,7 @@ impl ProviderType {
 }
 
 impl std::str::FromStr for ProviderType {
-    type Err = crate::Error;
+    type Err = crate::ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
@@ -113,7 +113,7 @@ impl std::str::FromStr for ProviderType {
             "aws" => Ok(Self::Aws),
             "gcp" => Ok(Self::Gcp),
             "azure" => Ok(Self::Azure),
-            _ => Err(crate::Error::validation(format!(
+            _ => Err(crate::ValidationError::new(format!(
                 "invalid provider type: {s}, expected one of: docker, proxmox, openstack, aws, gcp, azure"
             ))),
         }
@@ -281,7 +281,7 @@ impl ProviderConfig {
     }
 
     /// Validate that exactly one provider is configured
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         let count = [
             self.aws.is_some(),
             self.docker.is_some(),
@@ -293,12 +293,12 @@ impl ProviderConfig {
         .count();
 
         if count == 0 {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "provider config must specify exactly one provider (aws, docker, openstack, or proxmox)",
             ));
         }
         if count > 1 {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "provider config must specify exactly one provider, not multiple",
             ));
         }
@@ -676,14 +676,14 @@ impl NodeSpec {
     }
 
     /// Validates the node specification
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.control_plane.replicas == 0 {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "control plane count must be at least 1",
             ));
         }
         if self.control_plane.replicas > 1 && self.control_plane.replicas.is_multiple_of(2) {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "control plane count must be odd for HA (1, 3, 5, ...)",
             ));
         }
@@ -691,10 +691,10 @@ impl NodeSpec {
         // Validate pool identifiers and autoscaling config
         for (pool_id, pool_spec) in &self.worker_pools {
             if let Err(e) = super::validate_dns_label(pool_id, "worker pool id") {
-                return Err(crate::Error::validation(e));
+                return Err(crate::ValidationError::new(e));
             }
             if let Err(e) = pool_spec.validate() {
-                return Err(crate::Error::validation(format!(
+                return Err(crate::ValidationError::new(format!(
                     "worker pool '{}': {}",
                     pool_id, e
                 )));
@@ -817,14 +817,14 @@ impl Default for CertPolicy {
 
 impl CertPolicy {
     /// Validate that the policy is internally consistent.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.min_lifespan_hours < 1 {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "certPolicy.minLifespanHours must be at least 1",
             ));
         }
         if self.min_lifespan_hours > self.max_lifespan_hours {
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "certPolicy.minLifespanHours ({}) must be <= maxLifespanHours ({})",
                 self.min_lifespan_hours, self.max_lifespan_hours
             )));
@@ -832,7 +832,7 @@ impl CertPolicy {
         if self.default_lifespan_hours < self.min_lifespan_hours
             || self.default_lifespan_hours > self.max_lifespan_hours
         {
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "certPolicy.defaultLifespanHours ({}) must be between min ({}) and max ({})",
                 self.default_lifespan_hours, self.min_lifespan_hours, self.max_lifespan_hours
             )));
@@ -893,10 +893,10 @@ pub struct ServiceSpec {
 
 impl ServiceSpec {
     /// Validate the service specification.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         match self.type_.as_str() {
             "LoadBalancer" | "NodePort" | "ClusterIP" => Ok(()),
-            _ => Err(crate::Error::validation(format!(
+            _ => Err(crate::ValidationError::new(format!(
                 "service type must be LoadBalancer, NodePort, or ClusterIP, got: {}",
                 self.type_
             ))),
@@ -906,28 +906,28 @@ impl ServiceSpec {
 
 impl EndpointsSpec {
     /// Validate the endpoints specification.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.grpc_port == 0 {
-            return Err(crate::Error::validation("grpc_port must be non-zero"));
+            return Err(crate::ValidationError::new("grpc_port must be non-zero"));
         }
         if self.bootstrap_port == 0 {
-            return Err(crate::Error::validation("bootstrap_port must be non-zero"));
+            return Err(crate::ValidationError::new("bootstrap_port must be non-zero"));
         }
         if self.proxy_port == 0 {
-            return Err(crate::Error::validation("proxy_port must be non-zero"));
+            return Err(crate::ValidationError::new("proxy_port must be non-zero"));
         }
         if self.grpc_port == self.bootstrap_port {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "grpc_port and bootstrap_port must be distinct",
             ));
         }
         if self.grpc_port == self.proxy_port {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "grpc_port and proxy_port must be distinct",
             ));
         }
         if self.bootstrap_port == self.proxy_port {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "bootstrap_port and proxy_port must be distinct",
             ));
         }
@@ -1093,12 +1093,12 @@ pub struct CredentialSpec {
 
 impl CredentialSpec {
     /// Validate required fields. Returns an error if `id` or `provider` is empty.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.id.is_empty() {
-            return Err(crate::Error::validation("credentials.id cannot be empty"));
+            return Err(crate::ValidationError::new("credentials.id cannot be empty"));
         }
         if self.provider.is_empty() {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "credentials.provider cannot be empty",
             ));
         }

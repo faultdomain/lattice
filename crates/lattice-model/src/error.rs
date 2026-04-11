@@ -19,6 +19,9 @@ pub enum ModelError {
     #[error("{0}")]
     Common(#[from] lattice_common::Error),
 
+    #[error("{0}")]
+    Validation(#[from] lattice_core::ValidationError),
+
     #[error("role '{role}' validation failed: {message}")]
     RoleValidation { role: String, message: String },
 
@@ -55,6 +58,7 @@ impl Retryable for ModelError {
             Self::MissingName => false,
             Self::MissingGeneration => false,
             Self::MissingInferencePort => false,
+            Self::Validation(_) => false,
         }
     }
 }

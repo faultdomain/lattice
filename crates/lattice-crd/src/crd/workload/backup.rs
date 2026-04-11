@@ -40,9 +40,9 @@ pub struct BackupHook {
 
 impl BackupHook {
     /// Validate that the hook's command[0] is an absolute path.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.command.is_empty() {
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "backup hook '{}': command must not be empty",
                 self.name
             )));
@@ -126,7 +126,7 @@ pub struct ServiceBackupSpec {
 
 impl ServiceBackupSpec {
     /// Validate all backup hooks have absolute command paths.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if let Some(ref hooks) = self.hooks {
             for hook in &hooks.pre {
                 hook.validate()?;

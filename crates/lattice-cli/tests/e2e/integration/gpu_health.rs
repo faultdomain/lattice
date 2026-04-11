@@ -348,7 +348,7 @@ pub async fn run_gpu_health_tests(kubeconfig: &str) -> Result<(), String> {
     info!("GPU Health Monitoring Tests");
     info!("========================================\n");
 
-    let diag = DiagnosticContext::new(kubeconfig, lattice_common::LATTICE_SYSTEM_NAMESPACE);
+    let diag = DiagnosticContext::new(kubeconfig, lattice_core::LATTICE_SYSTEM_NAMESPACE);
     with_diagnostics(&diag, "GPU Health", || async {
         let node = match get_first_worker_node(kubeconfig).await? {
             Some(n) => n,

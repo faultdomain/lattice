@@ -170,7 +170,7 @@ spec:
 pub fn generate_gpu_monitor_mesh_member() -> LatticeMeshMember {
     lmm(
         "lattice-gpu-monitor",
-        lattice_common::LATTICE_SYSTEM_NAMESPACE,
+        lattice_core::LATTICE_SYSTEM_NAMESPACE,
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 LABEL_NAME.to_string(),

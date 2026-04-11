@@ -15,7 +15,8 @@ use lattice_common::crd::{
     BackupStorageProvider, BackupStore, BackupStorePhase, BackupStoreStatus,
 };
 use lattice_common::status_check::is_status_unchanged;
-use lattice_common::{ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ControllerContext, ReconcileError};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::velero::{
     self, BackupStorageLocation, BackupStorageLocationSpec, ObjectStorageLocation,

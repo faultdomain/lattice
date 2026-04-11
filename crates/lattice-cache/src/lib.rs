@@ -289,7 +289,7 @@ impl ResourceCache {
         let mut result = std::collections::BTreeMap::new();
         for name in provider_names {
             if let Some(provider) =
-                self.get_namespaced::<ImageProvider>(name, lattice_common::LATTICE_SYSTEM_NAMESPACE)
+                self.get_namespaced::<ImageProvider>(name, lattice_core::LATTICE_SYSTEM_NAMESPACE)
             {
                 if let Some(ref credentials) = provider.spec.credentials {
                     result.insert(name.clone(), credentials.clone());

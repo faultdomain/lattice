@@ -38,7 +38,7 @@ pub fn build_cell_service(
     Service {
         metadata: kube::core::ObjectMeta {
             name: Some(crate::CELL_SERVICE_NAME.to_string()),
-            namespace: Some(crate::LATTICE_SYSTEM_NAMESPACE.to_string()),
+            namespace: Some(lattice_core::LATTICE_SYSTEM_NAMESPACE.to_string()),
             labels: Some(labels),
             annotations: if annotations.is_empty() {
                 None

@@ -86,5 +86,5 @@ pub fn k8s_success_status() -> serde_json::Value {
 pub fn effective_namespace<T: kube::ResourceExt>(resource: &T) -> String {
     resource
         .namespace()
-        .unwrap_or_else(|| crate::LATTICE_SYSTEM_NAMESPACE.to_string())
+        .unwrap_or_else(|| lattice_core::LATTICE_SYSTEM_NAMESPACE.to_string())
 }

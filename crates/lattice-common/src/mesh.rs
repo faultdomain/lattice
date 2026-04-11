@@ -105,19 +105,7 @@ pub fn ingress_gateway_sa_name(namespace: &str) -> String {
 /// Lattice uses per-cluster trust domains: `lattice.{cluster}.local`
 /// This provides multi-cluster isolation while maintaining a consistent format.
 pub mod trust_domain {
-    /// Build a SPIFFE principal for a service account.
-    ///
-    /// Format: `{trust_domain}/ns/{namespace}/sa/{service_account}`
-    ///
-    /// The trust domain is derived from the root CA fingerprint
-    /// (e.g., `lattice.{sha256}.local`). All clusters sharing the
-    /// same root CA use the same trust domain.
-    ///
-    /// Note: The principal does NOT include the `spiffe://` prefix.
-    /// Istio adds it internally.
-    pub fn principal(trust_domain: &str, namespace: &str, service_account: &str) -> String {
-        format!("{}/ns/{}/sa/{}", trust_domain, namespace, service_account)
-    }
+    pub use lattice_core::trust_domain::principal;
 
     /// Build a SPIFFE principal for a namespace's waypoint proxy.
     ///

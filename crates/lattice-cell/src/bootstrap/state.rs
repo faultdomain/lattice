@@ -17,9 +17,10 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{LatticeCluster, ProviderType};
 use lattice_common::{
-    CsrResponse, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_CSR_TOKEN_KEY,
+    CsrResponse, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_CSR_TOKEN_KEY,
     PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET,
 };
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_infra::pki::CertificateAuthorityBundle;
 
 use super::bundle::generate_bootstrap_bundle;

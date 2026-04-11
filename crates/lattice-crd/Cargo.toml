@@ -1,0 +1,20 @@
+[package]
+name = "lattice-crd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lattice Custom Resource Definitions"
+
+[dependencies]
+kube.workspace = true
+k8s-openapi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+lattice-template.workspace = true
+lattice-core.workspace = true
+aws-lc-rs.workspace = true
+async-trait.workspace = true
+tracing.workspace = true

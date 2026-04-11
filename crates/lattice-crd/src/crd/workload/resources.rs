@@ -932,7 +932,7 @@ pub struct ResourceQuantity {
 
 impl ResourceRequirements {
     /// Validate resource requirements
-    pub fn validate(&self, container_name: &str) -> Result<(), crate::Error> {
+    pub fn validate(&self, container_name: &str) -> Result<(), crate::ValidationError> {
         if let Some(ref requests) = self.requests {
             requests.validate(container_name, "requests")?;
         }
@@ -945,7 +945,7 @@ impl ResourceRequirements {
 
 impl ResourceQuantity {
     /// Validate resource quantity values
-    pub fn validate(&self, container_name: &str, field: &str) -> Result<(), crate::Error> {
+    pub fn validate(&self, container_name: &str, field: &str) -> Result<(), crate::ValidationError> {
         if let Some(ref cpu) = self.cpu {
             validate_cpu_quantity(cpu, container_name, field)?;
         }
@@ -961,7 +961,7 @@ pub(crate) fn validate_cpu_quantity(
     qty: &str,
     container_name: &str,
     field: &str,
-) -> Result<(), crate::Error> {
+) -> Result<(), crate::ValidationError> {
     let is_valid = if let Some(stripped) = qty.strip_suffix('m') {
         stripped.parse::<u64>().is_ok()
     } else {
@@ -969,7 +969,7 @@ pub(crate) fn validate_cpu_quantity(
     };
 
     if !is_valid {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}' {}.cpu: invalid quantity '{}' (expected e.g., '100m', '1', '0.5')",
             container_name, field, qty
         )));
@@ -983,7 +983,7 @@ pub(crate) fn validate_memory_quantity(
     qty: &str,
     container_name: &str,
     field: &str,
-) -> Result<(), crate::Error> {
+) -> Result<(), crate::ValidationError> {
     let suffixes = [
         "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "k", "M", "G", "T", "P", "E",
     ];
@@ -996,7 +996,7 @@ pub(crate) fn validate_memory_quantity(
     };
 
     if !is_valid {
-        return Err(crate::Error::validation(format!(
+        return Err(crate::ValidationError::new(format!(
             "container '{}' {}.memory: invalid quantity '{}' (expected e.g., '128Mi', '1Gi')",
             container_name, field, qty
         )));

@@ -21,7 +21,7 @@ const WEBHOOK_CONFIG_NAME: &str = "lattice-validating-webhook";
 const WEBHOOK_SERVICE_NAME: &str = lattice_common::OPERATOR_NAME;
 
 /// Service namespace for the webhook
-const WEBHOOK_SERVICE_NAMESPACE: &str = lattice_common::LATTICE_SYSTEM_NAMESPACE;
+const WEBHOOK_SERVICE_NAMESPACE: &str = lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Port the webhook server listens on
 const WEBHOOK_PORT: i32 = lattice_common::DEFAULT_WEBHOOK_PORT as i32;

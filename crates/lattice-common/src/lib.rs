@@ -4,7 +4,7 @@
 
 pub mod capi_lifecycle;
 pub mod config;
-pub mod crd;
+pub use lattice_crd::crd;
 pub mod crd_registry;
 pub mod credentials;
 pub mod error;
@@ -23,11 +23,9 @@ pub mod resources;
 pub mod retry;
 pub mod routing;
 pub mod status_check;
-pub mod system_namespaces;
 pub mod telemetry;
 pub mod template;
 pub mod watcher;
-pub mod yaml;
 
 pub use config::{LatticeConfig, SharedConfig};
 pub use crd_registry::{CrdKind, CrdRegistry};
@@ -54,23 +52,12 @@ pub const REQUEUE_ERROR_SECS: u64 = 60;
 /// Default port for the admission webhook server (K8s convention)
 pub const DEFAULT_WEBHOOK_PORT: u16 = 9443;
 
-/// Default port for the bootstrap HTTPS server
-pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8443;
-
-/// Default port for the gRPC server (agent-cell communication)
-pub const DEFAULT_GRPC_PORT: u16 = 50051;
-
-/// Default port for the K8s API proxy server (CAPI controller access to child clusters)
-pub const DEFAULT_PROXY_PORT: u16 = 8081;
 
 /// Default port for the authenticated K8s API proxy (user/service access with Cedar)
 pub const DEFAULT_AUTH_PROXY_PORT: u16 = 8082;
 
 /// Default port for health check endpoints (liveness/readiness probes)
 pub const DEFAULT_HEALTH_PORT: u16 = 8080;
-
-/// Namespace for Lattice system resources (CA, credentials, operator)
-pub const LATTICE_SYSTEM_NAMESPACE: &str = "lattice-system";
 
 /// Namespace for local secret source K8s Secrets (used by ESO webhook backend)
 pub const LOCAL_SECRETS_NAMESPACE: &str = "lattice-secrets";
@@ -117,14 +104,14 @@ pub fn istiod_kubeconfig_secret_name(cluster_name: &str) -> String {
 ///
 /// Returns `{service}.{LATTICE_SYSTEM_NAMESPACE}.svc`
 pub fn lattice_svc_dns(service: &str) -> String {
-    format!("{}.{}.svc", service, LATTICE_SYSTEM_NAMESPACE)
+    format!("{}.{}.svc", service, lattice_core::LATTICE_SYSTEM_NAMESPACE)
 }
 
 /// Construct a fully-qualified Kubernetes service DNS name for a Lattice service.
 ///
 /// Returns `{service}.{LATTICE_SYSTEM_NAMESPACE}.svc.cluster.local`
 pub fn lattice_svc_dns_fqdn(service: &str) -> String {
-    format!("{}.{}.svc.cluster.local", service, LATTICE_SYSTEM_NAMESPACE)
+    format!("{}.{}.svc.cluster.local", service, lattice_core::LATTICE_SYSTEM_NAMESPACE)
 }
 
 /// Environment variable to indicate this is a bootstrap cluster
@@ -227,7 +214,8 @@ impl ParentConnectionConfig {
         use k8s_openapi::api::core::v1::Secret;
         use kube::Api;
 
-        let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let secrets: Api<Secret> =
+            Api::namespaced(client.clone(), lattice_core::LATTICE_SYSTEM_NAMESPACE);
         let secret = match secrets.get(PARENT_CONFIG_SECRET).await {
             Ok(s) => s,
             Err(kube::Error::Api(e)) if e.code == 404 => return Ok(None),
@@ -275,19 +263,6 @@ impl ParentConnectionConfig {
     }
 }
 
-/// Namespace where external-dns deployments run
-pub const EXTERNAL_DNS_NAMESPACE: &str = "external-dns";
-/// Namespace where Velero backup resources live
-pub const VELERO_NAMESPACE: &str = "velero";
-
-// CAPI provider namespaces
-/// Target namespace for CAPA (AWS) provider
-pub const CAPA_NAMESPACE: &str = "capa-system";
-/// Target namespace for CAPMOX (Proxmox) provider
-pub const CAPMOX_NAMESPACE: &str = "capmox-system";
-/// Target namespace for CAPO (OpenStack) provider
-pub const CAPO_NAMESPACE: &str = "capo-system";
-
 // CAPI provider credential secret names (source secrets in lattice-system)
 /// Secret name for Proxmox credentials
 pub const PROXMOX_CREDENTIALS_SECRET: &str = "proxmox-credentials";
@@ -322,14 +297,6 @@ pub const CA_SECRET: &str = "lattice-ca";
 pub const TLS_CERT_KEY: &str = "tls.crt";
 /// Key for TLS private key in secrets
 pub const TLS_KEY_KEY: &str = "tls.key";
-
-// Kubernetes Secret types
-/// Kubernetes TLS secret type
-pub const SECRET_TYPE_TLS: &str = "kubernetes.io/tls";
-/// Kubernetes Docker config secret type (for image pull secrets)
-pub const SECRET_TYPE_DOCKERCONFIG: &str = "kubernetes.io/dockerconfigjson";
-/// Kubernetes service account token secret type
-pub const SECRET_TYPE_SA_TOKEN: &str = "kubernetes.io/service-account-token";
 
 // CA secret data keys
 /// Key for CA certificate in CA secrets
@@ -427,105 +394,3 @@ pub fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
     !is_inherited_resource(metadata)
 }
 
-/// Sanitize a string into a valid DNS label (`[a-z]([-a-z0-9]*[a-z0-9])?`).
-///
-/// Replaces non-alphanumeric characters with `-`, lowercases, strips leading
-/// digits/dashes (must start with a letter), trims trailing dashes, and
-/// truncates to 63 characters. Use this for any K8s resource name, volume
-/// name, or label value that must conform to RFC 1123.
-pub fn sanitize_dns_label(s: &str) -> Option<String> {
-    let sanitized: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    // Must start with a lowercase letter
-    let trimmed = sanitized.trim_start_matches(|c: char| !c.is_ascii_lowercase());
-    let trimmed = trimmed.trim_end_matches('-');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let truncated: String = trimmed.chars().take(63).collect();
-    let truncated = truncated.trim_end_matches('-');
-    if truncated.is_empty() {
-        None
-    } else {
-        Some(truncated.to_string())
-    }
-}
-
-#[cfg(test)]
-mod sanitize_tests {
-    use super::*;
-
-    #[test]
-    fn simple_passthrough() {
-        assert_eq!(sanitize_dns_label("hello").unwrap(), "hello");
-    }
-
-    #[test]
-    fn lowercases() {
-        assert_eq!(sanitize_dns_label("Hello").unwrap(), "hello");
-    }
-
-    #[test]
-    fn replaces_underscores_and_dots() {
-        assert_eq!(
-            sanitize_dns_label("wg_confs.conf").unwrap(),
-            "wg-confs-conf"
-        );
-    }
-
-    #[test]
-    fn strips_leading_digits() {
-        assert_eq!(sanitize_dns_label("123abc").unwrap(), "abc");
-    }
-
-    #[test]
-    fn strips_leading_dashes_and_digits() {
-        assert_eq!(sanitize_dns_label("--1-abc").unwrap(), "abc");
-    }
-
-    #[test]
-    fn trims_trailing_dashes() {
-        assert_eq!(sanitize_dns_label("abc--").unwrap(), "abc");
-    }
-
-    #[test]
-    fn empty_returns_none() {
-        assert!(sanitize_dns_label("").is_none());
-    }
-
-    #[test]
-    fn all_digits_returns_none() {
-        assert!(sanitize_dns_label("12345").is_none());
-    }
-
-    #[test]
-    fn truncates_to_63() {
-        let long = format!("a{}", "b".repeat(100));
-        let result = sanitize_dns_label(&long).unwrap();
-        assert!(result.len() <= 63);
-        assert!(result.starts_with('a'));
-    }
-
-    #[test]
-    fn valid_label_roundtrips() {
-        for s in ["default", "gpu-large-v2", "a1b2c3"] {
-            assert_eq!(sanitize_dns_label(s).unwrap(), s);
-        }
-    }
-
-    #[test]
-    fn real_world_file_path() {
-        assert_eq!(
-            sanitize_dns_label("nzbget-wireguard-file-config-wg_confs-wg0.conf").unwrap(),
-            "nzbget-wireguard-file-config-wg-confs-wg0-conf"
-        );
-    }
-}

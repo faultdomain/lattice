@@ -14,10 +14,8 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{ImageProvider, ImageProviderPhase, ImageProviderStatus};
 use lattice_common::status_check;
-use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
-    REQUEUE_SUCCESS_SECS,
-};
+use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 const FIELD_MANAGER: &str = "lattice-image-provider-controller";
 
@@ -64,7 +62,7 @@ pub async fn reconcile(
         // Force dockerconfigjson type so kubelet recognizes the Secret
         let mut creds = credentials.clone();
         if creds.secret_type.is_none() {
-            creds.secret_type = Some(lattice_common::SECRET_TYPE_DOCKERCONFIG.to_string());
+            creds.secret_type = Some(lattice_core::SECRET_TYPE_DOCKERCONFIG.to_string());
         }
 
         // Interpolate ${registry} in credentialData if provided

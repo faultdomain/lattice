@@ -149,15 +149,15 @@ impl SecretProviderSpec {
     }
 
     /// Validate the spec. Returns an error if invalid.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.provider.is_empty() {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "spec.provider must contain exactly one provider key",
             ));
         }
         if self.provider.len() > 1 {
             let keys: Vec<&String> = self.provider.keys().collect();
-            return Err(crate::Error::validation(format!(
+            return Err(crate::ValidationError::new(format!(
                 "spec.provider must contain exactly one provider key, found {}: {:?}",
                 self.provider.len(),
                 keys

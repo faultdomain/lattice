@@ -242,38 +242,38 @@ impl std::fmt::Display for DNSProviderPhase {
 
 impl DNSProviderSpec {
     /// Validate the spec. Returns an error if invalid.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.zone.is_empty() {
-            return Err(crate::Error::validation("zone cannot be empty"));
+            return Err(crate::ValidationError::new("zone cannot be empty"));
         }
 
         // Validate provider-specific config matches type
         match self.provider_type {
             DNSProviderType::Pihole => {
                 let pihole = self.pihole.as_ref().ok_or_else(|| {
-                    crate::Error::validation("pihole config required when type is pihole")
+                    crate::ValidationError::new("pihole config required when type is pihole")
                 })?;
                 if pihole.url.is_empty() {
-                    return Err(crate::Error::validation("pihole.url cannot be empty"));
+                    return Err(crate::ValidationError::new("pihole.url cannot be empty"));
                 }
             }
             DNSProviderType::Google => {
                 if self.google.is_none() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "google config required when type is google",
                     ));
                 }
             }
             DNSProviderType::Azure => {
                 if self.azure.is_none() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "azure config required when type is azure",
                     ));
                 }
             }
             DNSProviderType::Designate => {
                 if self.designate.is_none() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "designate config required when type is designate",
                     ));
                 }
@@ -287,7 +287,7 @@ impl DNSProviderSpec {
         }
 
         if self.credential_data.is_some() && self.credentials.is_none() {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "credentialData requires credentials to be set",
             ));
         }

@@ -28,7 +28,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::resources::parse_resource_by_key;
+use crate::quantity::parse_resource_by_key;
 
 /// LatticeQuota defines resource limits for a Cedar principal.
 ///
@@ -72,9 +72,9 @@ pub struct LatticeQuotaSpec {
 impl LatticeQuotaSpec {
     /// Validate the quota spec. Returns an error if any quantity string is unparseable
     /// or the principal format is invalid.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         QuotaPrincipal::parse(&self.principal)
-            .map_err(|e| crate::Error::validation(e.to_string()))?;
+            .map_err(|e| crate::ValidationError::new(e.to_string()))?;
 
         validate_resource_map(&self.limits, "limits")?;
 
@@ -86,10 +86,10 @@ impl LatticeQuotaSpec {
     }
 }
 
-fn validate_resource_map(map: &BTreeMap<String, String>, field: &str) -> Result<(), crate::Error> {
+fn validate_resource_map(map: &BTreeMap<String, String>, field: &str) -> Result<(), crate::ValidationError> {
     for (key, value) in map {
         parse_resource_by_key(key, value).map_err(|_| {
-            crate::Error::validation(format!("{field}.{key}: invalid quantity '{value}'"))
+            crate::ValidationError::new(format!("{field}.{key}: invalid quantity '{value}'"))
         })?;
     }
     Ok(())

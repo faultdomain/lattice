@@ -31,7 +31,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Label key added to the cell leader pod for Service selector
 pub const LEADER_LABEL_KEY: &str = "lattice.dev/leader";

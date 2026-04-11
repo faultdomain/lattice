@@ -13,7 +13,7 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use kube::Api;
 use tokio::sync::watch;
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::error::CostError;
 use crate::rates::CostRates;

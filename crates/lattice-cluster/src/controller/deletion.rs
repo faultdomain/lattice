@@ -21,7 +21,8 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
-use lattice_common::{capi_namespace, Error, LATTICE_SYSTEM_NAMESPACE, PARENT_CONFIG_SECRET};
+use lattice_common::{capi_namespace, Error, PARENT_CONFIG_SECRET};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_move::{pause_cluster, unpause_cluster};
 use lattice_proto::cell_command::Command;
 use lattice_proto::{CellCommand, DeleteCluster};

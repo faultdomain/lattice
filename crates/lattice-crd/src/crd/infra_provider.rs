@@ -211,7 +211,7 @@ impl std::fmt::Display for InfraProviderPhase {
 
 impl InfraProviderSpec {
     /// Validate the spec. Returns an error if invalid.
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         // Validate credentials if present
         if let Some(ref credentials) = self.credentials {
             credentials.validate()?;
@@ -219,7 +219,7 @@ impl InfraProviderSpec {
 
         // credentialData requires credentials
         if self.credential_data.is_some() && self.credentials.is_none() {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "credentialData requires credentials to be set",
             ));
         }
@@ -230,37 +230,37 @@ impl InfraProviderSpec {
                 // AWS provider doesn't strictly require aws config (it's optional BYOI),
                 // but does require credentials
                 if self.credentials.is_none() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "AWS provider requires credentials",
                     ));
                 }
             }
             InfraProviderType::Proxmox => {
                 if self.credentials.is_none() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "Proxmox provider requires credentials",
                     ));
                 }
                 let proxmox = self.proxmox.as_ref().ok_or_else(|| {
-                    crate::Error::validation("proxmox config required when type is proxmox")
+                    crate::ValidationError::new("proxmox config required when type is proxmox")
                 })?;
                 if proxmox.server_url.is_empty() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "proxmox.serverUrl cannot be empty",
                     ));
                 }
             }
             InfraProviderType::OpenStack => {
                 if self.credentials.is_none() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "OpenStack provider requires credentials",
                     ));
                 }
                 let openstack = self.openstack.as_ref().ok_or_else(|| {
-                    crate::Error::validation("openstack config required when type is openstack")
+                    crate::ValidationError::new("openstack config required when type is openstack")
                 })?;
                 if openstack.auth_url.is_empty() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "openstack.authUrl cannot be empty",
                     ));
                 }

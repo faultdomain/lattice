@@ -21,9 +21,10 @@ use lattice_common::crd::{
 };
 use lattice_common::status_check;
 use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
+    ControllerContext, ReconcileError, REQUEUE_ERROR_SECS,
     REQUEUE_SUCCESS_SECS,
 };
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_secret_provider::credentials::{
     reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
 };

@@ -52,7 +52,7 @@ fn patch_kubeconfig_yaml(
     }
 
     // Parse the existing kubeconfig
-    let mut config = lattice_common::yaml::parse_yaml(kubeconfig_str)
+    let mut config = lattice_core::yaml::parse_yaml(kubeconfig_str)
         .map_err(|e| Error::internal(format!("failed to parse kubeconfig YAML: {}", e)))?;
 
     // Build the new server URL with cluster path

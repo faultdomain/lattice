@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lattice_common::retry::{retry_with_backoff_bail, RetryConfig};
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use tokio::sync::Semaphore;
 use tracing::info;
 

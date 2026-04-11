@@ -158,7 +158,7 @@ mod tests {
         AzureDnsConfig, CloudflareConfig, CredentialSpec, DNSProviderSpec, GoogleDnsConfig,
         PiholeConfig, Route53Config,
     };
-    use lattice_common::{EXTERNAL_DNS_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
+    use lattice_core::{EXTERNAL_DNS_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
 
     fn sample_pihole_provider() -> DNSProvider {
         DNSProvider::new(

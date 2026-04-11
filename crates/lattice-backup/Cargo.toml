@@ -10,6 +10,7 @@ fips = ["lattice-common/fips"]
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-core = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

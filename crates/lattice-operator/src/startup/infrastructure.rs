@@ -10,7 +10,8 @@ use kube::api::ListParams;
 use kube::{Api, Client, ResourceExt};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{ParentConnectionConfig, SharedConfig, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{ParentConnectionConfig, SharedConfig};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_capi::installer::{CapiInstaller, CapiProviderConfig};
 use lattice_common::crd::{

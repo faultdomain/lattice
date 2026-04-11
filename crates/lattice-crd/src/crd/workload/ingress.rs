@@ -136,7 +136,7 @@ impl AdvertiseConfig {
                     && !parts[2].is_empty()
                 {
                     // parts[0] is cluster name (for routing), parts[1] namespace, parts[2] SA name
-                    Some(crate::mesh::trust_domain::principal(
+                    Some(crate::trust_domain::principal(
                         trust_domain, parts[1], parts[2],
                     ))
                 } else {

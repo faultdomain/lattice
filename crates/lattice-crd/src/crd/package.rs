@@ -214,22 +214,22 @@ pub struct LatticePackageStatus {
 
 impl LatticePackageSpec {
     /// Validate the package spec
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.chart.repository.is_empty() {
-            return Err(crate::Error::validation("chart.repository is required"));
+            return Err(crate::ValidationError::new("chart.repository is required"));
         }
         if self.chart.name.is_empty() {
-            return Err(crate::Error::validation("chart.name is required"));
+            return Err(crate::ValidationError::new("chart.name is required"));
         }
         if self.chart.version.is_empty() {
-            return Err(crate::Error::validation(
+            return Err(crate::ValidationError::new(
                 "chart.version is required (no floating versions)",
             ));
         }
 
         if let Some(ref mesh) = self.mesh {
             if mesh.selector.is_empty() {
-                return Err(crate::Error::validation(
+                return Err(crate::ValidationError::new(
                     "mesh.selector must have at least one label",
                 ));
             }

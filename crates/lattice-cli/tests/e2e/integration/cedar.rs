@@ -23,7 +23,7 @@
 use std::time::Duration;
 use tracing::info;
 
-use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{

@@ -280,12 +280,12 @@ impl ServiceNode {
 
         let selector = match &spec.target {
             MeshMemberTarget::Selector(labels) => Some(labels.clone()),
-            MeshMemberTarget::Namespace(_) => None,
+            _ => None,
         };
 
         let target_namespace = match &spec.target {
             MeshMemberTarget::Namespace(ns) => Some(ns.clone()),
-            MeshMemberTarget::Selector(_) => None,
+            _ => None,
         };
 
         Self {

@@ -17,7 +17,8 @@ use lattice_common::crd::{
     CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;
-use lattice_common::{kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::kubeconfig_secret_name;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Resolve the Kubernetes API server ClusterIP from the `kubernetes` service.
 ///
@@ -80,7 +81,7 @@ async fn fetch_kubeconfig_from_secret(
     let kubeconfig_str = String::from_utf8(kubeconfig_bytes.0.clone())
         .map_err(|e| PivotError::Internal(format!("kubeconfig is not valid UTF-8: {}", e)))?;
 
-    lattice_common::yaml::parse_yaml(&kubeconfig_str)
+    lattice_core::yaml::parse_yaml(&kubeconfig_str)
         .map_err(|e| PivotError::Internal(format!("failed to parse kubeconfig YAML: {}", e)))
 }
 
@@ -264,7 +265,7 @@ async fn apply_secrets_to_namespaces(
     for bytes in secrets_bytes {
         let json_str = String::from_utf8(bytes.clone())
             .map_err(|e| PivotError::Internal(format!("Secret contains invalid UTF-8: {e}")))?;
-        let value = lattice_common::yaml::parse_yaml(&json_str)
+        let value = lattice_core::yaml::parse_yaml(&json_str)
             .map_err(|e| PivotError::Internal(format!("failed to parse Secret JSON: {e}")))?;
         let secret: Secret = serde_json::from_value(value)
             .map_err(|e| PivotError::Internal(format!("failed to deserialize Secret: {e}")))?;
@@ -321,7 +322,7 @@ where
         let json_str = String::from_utf8(bytes.clone()).map_err(|e| {
             PivotError::Internal(format!("{} contains invalid UTF-8: {}", resource_type, e))
         })?;
-        let value = lattice_common::yaml::parse_yaml(&json_str).map_err(|e| {
+        let value = lattice_core::yaml::parse_yaml(&json_str).map_err(|e| {
             PivotError::Internal(format!("failed to parse {} JSON: {}", resource_type, e))
         })?;
         let resource: T = serde_json::from_value(value).map_err(|e| {
@@ -426,7 +427,7 @@ pub async fn apply_distributed_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::yaml::parse_yaml;
+    use lattice_core::yaml::parse_yaml;
 
     const TEST_CLUSTER_IP_ENDPOINT: &str = "https://10.96.0.1:443";
 

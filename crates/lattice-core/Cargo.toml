@@ -1,0 +1,12 @@
+[package]
+name = "lattice-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared constants, error types, and utilities for Lattice crates"
+
+[dependencies]
+k8s-openapi.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+yaml-rust2.workspace = true

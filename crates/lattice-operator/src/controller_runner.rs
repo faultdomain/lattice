@@ -26,7 +26,8 @@ use lattice_common::crd::{
     LatticeMeshMember, LatticeModel, LatticeService, MonitoringConfig, ProviderType,
 };
 use lattice_common::graph::ServiceGraph;
-use lattice_common::{CrdRegistry, LeaderElector, LATTICE_SYSTEM_NAMESPACE};
+use lattice_common::{CrdRegistry, LeaderElector};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_cost::CostProvider;
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_mesh_member::remote_secret;
@@ -245,7 +246,7 @@ async fn resolve_workload_params(
     let cache = lattice_cache::ResourceCache::builder()
         .watch(kube::Api::<lattice_common::crd::LatticeQuota>::namespaced(
             client.clone(),
-            lattice_common::LATTICE_SYSTEM_NAMESPACE,
+            LATTICE_SYSTEM_NAMESPACE,
         ))
         .watch(kube::Api::<k8s_openapi::api::core::v1::Namespace>::all(
             client.clone(),
@@ -253,7 +254,7 @@ async fn resolve_workload_params(
         .watch(kube::Api::<LatticeMeshMember>::all(client.clone()))
         .watch(kube::Api::<lattice_common::crd::ImageProvider>::namespaced(
             client.clone(),
-            lattice_common::LATTICE_SYSTEM_NAMESPACE,
+            LATTICE_SYSTEM_NAMESPACE,
         ))
         .watch_with(
             kube::Api::<k8s_openapi::api::core::v1::Secret>::all(client.clone()),

@@ -315,26 +315,26 @@ pub enum MeshMemberScope {
 
 impl LatticeMeshMemberSpec {
     /// Validate the spec
-    pub fn validate(&self) -> Result<(), crate::Error> {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
         for port in &self.ports {
-            super::validate_dns_label(&port.name, "port name").map_err(crate::Error::validation)?;
+            super::validate_dns_label(&port.name, "port name").map_err(crate::ValidationError::new)?;
         }
 
         if let MeshMemberTarget::Namespace(ref ns) = self.target {
             if ns.is_empty() {
-                return Err(crate::Error::validation("namespace target cannot be empty"));
+                return Err(crate::ValidationError::new("namespace target cannot be empty"));
             }
         }
 
         if let MeshMemberTarget::Selector(ref labels) = self.target {
             if labels.is_empty() {
-                return Err(crate::Error::validation(
+                return Err(crate::ValidationError::new(
                     "selector must have at least one label",
                 ));
             }
             for key in labels.keys() {
                 if key.is_empty() {
-                    return Err(crate::Error::validation(
+                    return Err(crate::ValidationError::new(
                         "selector label key cannot be empty",
                     ));
                 }

@@ -245,7 +245,7 @@ async fn cleanup_service_stubs(
 /// Returns (proxy_url, ca_cert_pem, proxy_token) from the Secret written by
 /// the agent when it receives peer routes from the parent.
 async fn load_peer_proxy_credentials(client: &Client) -> Result<(String, String, String), Error> {
-    use lattice_common::LATTICE_SYSTEM_NAMESPACE;
+    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
     let api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let secret = api

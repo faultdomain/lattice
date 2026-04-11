@@ -46,7 +46,7 @@ pub(crate) fn parse_manifest(manifest: &str) -> Result<ManifestMetadata, Error> 
             )
         })?
     } else {
-        crate::yaml::parse_yaml(manifest).map_err(|e| {
+        lattice_core::yaml::parse_yaml(manifest).map_err(|e| {
             Error::internal_with_context(
                 "parse_manifest",
                 format!("Failed to parse manifest as YAML: {}", e),
