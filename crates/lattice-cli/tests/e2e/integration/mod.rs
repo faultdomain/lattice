@@ -35,6 +35,7 @@ pub mod cedar_security;
 pub mod celery_queue;
 pub mod cert_manager;
 pub mod cost;
+pub mod dns;
 pub mod ecommerce;
 pub mod gateway;
 pub mod gpu_health;
