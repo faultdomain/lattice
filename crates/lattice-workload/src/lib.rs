@@ -18,6 +18,7 @@
 pub mod backup;
 mod compiled;
 mod compiler;
+pub mod cosign;
 pub mod error;
 pub mod helpers;
 pub mod k8s;

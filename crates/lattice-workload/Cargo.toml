@@ -22,6 +22,7 @@ lattice-template = { workspace = true }
 
 # Crypto (FIPS)
 aws-lc-rs = { workspace = true }
+sigstore = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -38,3 +39,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+tempfile = { workspace = true }
