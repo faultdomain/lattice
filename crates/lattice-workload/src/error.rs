@@ -92,6 +92,18 @@ pub enum CompilationError {
         metrics: Vec<String>,
     },
 
+    /// Image signature verification failed and Cedar denied skip
+    ImageVerificationDenied {
+        /// Denial details
+        details: String,
+    },
+
+    /// Internal error during compilation
+    Internal {
+        /// Error message
+        message: String,
+    },
+
     /// Error from a compiler extension phase
     Extension {
         /// Phase name
@@ -146,6 +158,12 @@ impl fmt::Display for CompilationError {
                     "custom Prometheus metrics [{}] require monitoring to be enabled on the cluster",
                     metrics.join(", ")
                 )
+            }
+            Self::ImageVerificationDenied { details } => {
+                write!(f, "image verification denied: {}", details)
+            }
+            Self::Internal { message } => {
+                write!(f, "internal compilation error: {}", message)
             }
             Self::Extension { phase, message } => {
                 write!(f, "extension phase '{}': {}", phase, message)
@@ -241,6 +259,20 @@ impl CompilationError {
         }
     }
 
+    /// Create an image verification denied error
+    pub fn image_verification_denied(details: impl Into<String>) -> Self {
+        Self::ImageVerificationDenied {
+            details: details.into(),
+        }
+    }
+
+    /// Create an internal error
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+        }
+    }
+
     /// Create an extension phase error
     pub fn extension(phase: &str, message: impl Into<String>) -> Self {
         Self::Extension {
@@ -257,6 +289,7 @@ impl CompilationError {
                 | Self::SecurityOverrideDenied { .. }
                 | Self::VolumeAccessDenied { .. }
                 | Self::ExternalEndpointAccessDenied { .. }
+                | Self::ImageVerificationDenied { .. }
         )
     }
 

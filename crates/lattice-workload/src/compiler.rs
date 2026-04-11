@@ -59,6 +59,15 @@ pub struct WorkloadCompiler<'a> {
     quota_budget: Option<lattice_quota::QuotaBudget>,
     replicas: u32,
     image_providers: std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec>,
+    image_trust: std::collections::BTreeMap<String, ImageTrustEntry>,
+}
+
+/// Pre-resolved trust policy for a registry, with key material ready to verify.
+pub struct ImageTrustEntry {
+    /// Whether verification is enforced.
+    pub enforce: bool,
+    /// Authority name → PEM public key bytes.
+    pub authorities: Vec<(String, Vec<u8>)>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -97,6 +106,7 @@ impl<'a> WorkloadCompiler<'a> {
             quota_budget: None,
             replicas: 1,
             image_providers: std::collections::BTreeMap::new(),
+            image_trust: std::collections::BTreeMap::new(),
         }
     }
 
@@ -179,6 +189,131 @@ impl<'a> WorkloadCompiler<'a> {
     ) -> Self {
         self.image_providers = providers;
         self
+    }
+
+    /// Set pre-resolved image trust policies for signature verification.
+    ///
+    /// Maps registry prefix (e.g., "ghcr.io/acme") to trust policy with
+    /// resolved key material. During compilation, each container image is
+    /// checked against matching policies.
+    pub fn with_image_trust(
+        mut self,
+        trust: std::collections::BTreeMap<String, ImageTrustEntry>,
+    ) -> Self {
+        self.image_trust = trust;
+        self
+    }
+
+    /// Verify all container images against trust policies.
+    ///
+    /// For each image, finds the matching ImageProvider by registry prefix.
+    /// If trust is enforced, verifies the signature with each authority's key.
+    /// If no authority matches, checks Cedar `SkipImageVerification`.
+    /// If Cedar denies, returns a compilation error.
+    async fn verify_images(&self) -> Result<(), CompilationError> {
+        if self.image_trust.is_empty() {
+            return Ok(());
+        }
+
+        // Collect all images from containers and sidecars
+        let mut images: Vec<String> = self
+            .workload
+            .containers
+            .values()
+            .map(|c| c.image.clone())
+            .collect();
+        for sidecar in self.runtime.sidecars.values() {
+            images.push(sidecar.image.clone());
+        }
+
+        let mut unsigned_images = Vec::new();
+
+        for image in &images {
+            // Find matching trust policy by registry prefix
+            let trust_entry = self
+                .image_trust
+                .iter()
+                .find(|(registry, _)| image.starts_with(registry.as_str()));
+
+            let (registry, entry) = match trust_entry {
+                Some((r, e)) if e.enforce => (r, e),
+                _ => continue, // No policy or not enforced
+            };
+
+            // Try each authority
+            let mut verified = false;
+            for (authority_name, key_pem) in &entry.authorities {
+                match crate::cosign::verify_image(image, key_pem).await {
+                    crate::cosign::VerifyResult::Verified => {
+                        tracing::info!(
+                            image = image,
+                            authority = authority_name,
+                            "image signature verified"
+                        );
+                        verified = true;
+                        break;
+                    }
+                    crate::cosign::VerifyResult::NotSigned(reason) => {
+                        tracing::debug!(
+                            image = image,
+                            authority = authority_name,
+                            reason = %reason,
+                            "authority did not verify image"
+                        );
+                    }
+                    crate::cosign::VerifyResult::Error(e) => {
+                        return Err(CompilationError::internal(format!(
+                            "image verification error for {image} (authority {authority_name}): {e}"
+                        )));
+                    }
+                }
+            }
+
+            if !verified {
+                tracing::warn!(
+                    image = image,
+                    registry = registry.as_str(),
+                    "image has no valid signature from any trusted authority"
+                );
+                unsigned_images.push(image.clone());
+            }
+        }
+
+        if unsigned_images.is_empty() {
+            return Ok(());
+        }
+
+        // Check Cedar: can this service skip verification for these images?
+        let result = self
+            .cedar
+            .authorize_unsigned_images(&lattice_cedar::ImageVerifyRequest {
+                service_name: self.name.to_string(),
+                namespace: self.namespace.to_string(),
+                kind: self.kind.to_string(),
+                unsigned_images: unsigned_images.clone(),
+            })
+            .await;
+
+        if !result.is_allowed() {
+            let denied: Vec<String> = result
+                .denied
+                .iter()
+                .map(|d| format!("{}: {}", d.image, d.reason))
+                .collect();
+            return Err(CompilationError::image_verification_denied(format!(
+                "unsigned images rejected: {}",
+                denied.join(", ")
+            )));
+        }
+
+        tracing::info!(
+            images = ?unsigned_images,
+            "Cedar policy permits unsigned images for {}/{}",
+            self.namespace,
+            self.name
+        );
+
+        Ok(())
     }
 
     /// Compile files for a container/sidecar and collect outputs into the accumulator vecs.
@@ -302,6 +437,9 @@ impl<'a> WorkloadCompiler<'a> {
             self.workload,
         )
         .await?;
+
+        // Verify container image signatures against trust policies
+        self.verify_images().await?;
 
         // Build template context and render all containers
         let graph = self.graph.ok_or_else(|| {
