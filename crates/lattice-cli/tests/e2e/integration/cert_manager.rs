@@ -23,7 +23,9 @@ use tracing::info;
 
 use super::super::helpers::cedar::apply_yaml;
 use super::super::helpers::docker::run_kubectl;
-use super::super::helpers::pihole::{pihole_resolver, pihole_url, PIHOLE_PASSWORD};
+use super::super::helpers::pihole::{
+    pihole_resolver, pihole_url, PIHOLE_API_TOKEN, PIHOLE_PASSWORD,
+};
 use super::super::helpers::{
     wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
@@ -527,8 +529,9 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
         "run", "dns-test", "-n", "kube-system", "--rm", "-i", "--restart=Never",
         "--image=curlimages/curl:8.5.0",
         "--", "curl", "-s", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}",
+        "-d", "",
         &format!(
-            "{pihole}/admin/api.php?customdns&action=add&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
+            "{pihole}/admin/api.php?customdns&action=add&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_API_TOKEN}"
         ),
     ]).await?;
 
@@ -720,9 +723,9 @@ async fn cleanup_test_resources(kubeconfig: &str) {
         "--kubeconfig", kubeconfig,
         "run", "dns-cleanup", "-n", "kube-system", "--rm", "-i", "--restart=Never",
         "--image=curlimages/curl:8.5.0",
-        "--", "curl", "-s", "-m", "10",
+        "--", "curl", "-s", "-m", "10", "-d", "",
         &format!(
-            "{pihole}/admin/api.php?customdns&action=delete&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
+            "{pihole}/admin/api.php?customdns&action=delete&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_API_TOKEN}"
         ),
     ]).await;
 
