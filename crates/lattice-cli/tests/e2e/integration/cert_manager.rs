@@ -32,7 +32,7 @@ use super::super::helpers::{
 // Constants
 // =============================================================================
 
-const TEST_ZONE: &str = "e2e.local";
+const TEST_ZONE: &str = "e2e.internal";
 const CERT_TEST_NAMESPACE: &str = "cert-manager-test";
 const LATTICE_NS: &str = "lattice-system";
 const SECRETS_NS: &str = "lattice-secrets";

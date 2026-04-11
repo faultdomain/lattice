@@ -16,7 +16,7 @@ use super::super::helpers::{
     wait_for_condition, wait_for_resource_phase, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
-const TEST_ZONE: &str = "e2e.local";
+const TEST_ZONE: &str = "e2e.internal";
 const DNS_TEST_NAMESPACE: &str = "dns-test";
 const LATTICE_NS: &str = "lattice-system";
 const SECRETS_NS: &str = "lattice-secrets";
