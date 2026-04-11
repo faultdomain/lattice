@@ -111,10 +111,10 @@ pub struct ServiceNode {
     /// Whether this member participates in Istio ambient mesh (L7 enforcement).
     /// When `false`, only Cilium L4 policies are generated.
     pub ambient: bool,
-    /// Whether this service is advertised for cross-cluster access with open callers.
-    /// Set when ingress routes have `advertise: { allowedServices: ["*"] }`.
-    /// Drives inbound AuthorizationPolicy to allow any authenticated principal.
-    pub advertised_open: bool,
+    /// Cross-cluster advertisement config. When set, drives inbound
+    /// AuthorizationPolicy for cross-cluster callers — open (any authenticated
+    /// principal) or restricted (specific SPIFFE identities).
+    pub advertise: Option<lattice_crd::crd::workload::ingress::AdvertiseConfig>,
 }
 
 /// Resolve a list of caller/service references into a (allows_all, callers) pair.
@@ -161,10 +161,7 @@ impl ServiceNode {
             }
         }
 
-        node.advertised_open = spec
-            .advertise
-            .as_ref()
-            .is_some_and(|a| a.is_open());
+        node.advertise = spec.advertise.clone();
 
         node
     }
@@ -231,7 +228,7 @@ impl ServiceNode {
             egress_rules: vec![],
             service_account: None,
             ambient: true,
-            advertised_open: false,
+            advertise: None,
         }
     }
 
@@ -303,10 +300,7 @@ impl ServiceNode {
             egress_rules: spec.egress.clone(),
             service_account: spec.service_account.clone(),
             ambient: spec.ambient,
-            advertised_open: spec
-                .advertise
-                .as_ref()
-                .is_some_and(|a| a.is_open()),
+            advertise: spec.advertise.clone(),
         }
     }
 
@@ -328,7 +322,7 @@ impl ServiceNode {
             egress_rules: vec![],
             service_account: None,
             ambient: true,
-            advertised_open: false,
+            advertise: None,
         }
     }
 
@@ -839,7 +833,7 @@ impl ServiceGraph {
             egress_rules: vec![],
             service_account: None,
             ambient: true,
-            advertised_open: false,
+            advertise: None,
         };
         self.put_node(NodeUpdate::Service(node));
     }

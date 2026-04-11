@@ -47,7 +47,8 @@ impl<'a> PolicyCompiler<'a> {
         namespace: &str,
         inbound_edges: &[ActiveEdge],
     ) -> Option<AuthorizationPolicy> {
-        if inbound_edges.is_empty() && !service.allow_peer_traffic && !service.advertised_open {
+        let has_advertise = service.advertise.is_some();
+        if inbound_edges.is_empty() && !service.allow_peer_traffic && !has_advertise {
             return None;
         }
 
@@ -74,45 +75,54 @@ impl<'a> PolicyCompiler<'a> {
             ));
         }
 
+        // Cross-cluster callers arrive via the east-west gateway with their
+        // original SPIFFE identity. Add advertised caller principals.
+        if let Some(ref adv) = service.advertise {
+            if adv.is_open() {
+                // Open advertise: allow any authenticated identity.
+                // Empty `from` = any authenticated source.
+                let match_labels = service.istio_match_labels();
+                let ports: Vec<String> = service
+                    .ports
+                    .values()
+                    .map(|pm| pm.target_port.to_string())
+                    .collect();
+                return Some(AuthorizationPolicy::new(
+                    ObjectMeta::new(
+                        derived_name("allow-to-", &[namespace, &service.name]),
+                        namespace,
+                    ),
+                    AuthorizationPolicySpec {
+                        target_refs: vec![],
+                        selector: Some(WorkloadSelector { match_labels }),
+                        action: "ALLOW".to_string(),
+                        rules: vec![AuthorizationRule {
+                            from: vec![],
+                            to: if ports.is_empty() {
+                                vec![]
+                            } else {
+                                vec![AuthorizationOperation {
+                                    operation: OperationSpec {
+                                        ports,
+                                        hosts: vec![],
+                                    },
+                                }]
+                            },
+                        }],
+                    },
+                ));
+            } else {
+                // Restricted advertise: add specific SPIFFE principals
+                principals.extend(adv.to_spiffe_principals(self.graph.trust_domain()));
+            }
+        }
+
         let ports: Vec<String> = service
             .ports
             .values()
             .map(|pm| pm.target_port.to_string())
             .collect();
 
-        // Advertised services with open callers allow any authenticated identity.
-        // Cross-cluster callers arrive via the east-west gateway with their original
-        // SPIFFE identity — we can't enumerate them, so allow from any source.
-        // Uses empty `from` (omitted in serialization) = any authenticated caller.
-        if service.advertised_open {
-            let match_labels = service.istio_match_labels();
-            return Some(AuthorizationPolicy::new(
-                ObjectMeta::new(
-                    derived_name("allow-to-", &[namespace, &service.name]),
-                    namespace,
-                ),
-                AuthorizationPolicySpec {
-                    target_refs: vec![],
-                    selector: Some(WorkloadSelector { match_labels }),
-                    action: "ALLOW".to_string(),
-                    rules: vec![AuthorizationRule {
-                        from: vec![], // omitted = any authenticated source
-                        to: if ports.is_empty() {
-                            vec![]
-                        } else {
-                            vec![AuthorizationOperation {
-                                operation: OperationSpec {
-                                    ports,
-                                    hosts: vec![],
-                                },
-                            }]
-                        },
-                    }],
-                },
-            ));
-        }
-
-        // Need both principals and ports to generate a meaningful policy
         if principals.is_empty() || ports.is_empty() {
             return None;
         }

@@ -223,7 +223,7 @@ impl<'a> PolicyCompiler<'a> {
         if !inbound_edges.is_empty()
             || !ingress_rules.is_empty()
             || service.allow_peer_traffic
-            || service.advertised_open
+            || service.advertise.is_some()
         {
             ingress_rules.insert(0, hbone_ingress_rule());
         }
