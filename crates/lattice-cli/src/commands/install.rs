@@ -1084,6 +1084,7 @@ impl Installer {
                 }),
                 credential_data: None,
                 ecr: None,
+                trust: None,
             },
         );
         image_provider.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());

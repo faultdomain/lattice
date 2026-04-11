@@ -88,6 +88,41 @@ pub struct ImageProviderSpec {
     /// ECR-specific configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ecr: Option<EcrConfig>,
+
+    /// Image signature verification policy.
+    ///
+    /// When `enforce` is true (default), images from this registry must be
+    /// signed by at least one trusted authority. Cedar `SkipImageVerification`
+    /// can override per-service or per-image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<ImageTrustPolicy>,
+}
+
+/// Image trust policy — controls signature verification for a registry.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageTrustPolicy {
+    /// Whether to enforce signature verification. Default: true.
+    #[serde(default = "default_true")]
+    pub enforce: bool,
+
+    /// Trusted signing authorities. Image is accepted if ANY authority matches.
+    pub authorities: Vec<VerificationAuthority>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// A trusted image signing authority.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationAuthority {
+    /// Name of this authority (for status reporting and logging)
+    pub name: String,
+
+    /// ESO-backed cosign public key (PEM format).
+    pub key: super::types::CredentialSpec,
 }
 
 /// Supported image registry types
@@ -203,6 +238,22 @@ impl ImageProviderSpec {
             }
         }
 
+        if let Some(ref trust) = self.trust {
+            if trust.enforce && trust.authorities.is_empty() {
+                return Err(crate::ValidationError::new(
+                    "trust.enforce is true but no authorities configured",
+                ));
+            }
+            for auth in &trust.authorities {
+                if auth.name.is_empty() {
+                    return Err(crate::ValidationError::new(
+                        "trust authority name cannot be empty",
+                    ));
+                }
+                auth.key.validate()?;
+            }
+        }
+
         Ok(())
     }
 
@@ -214,6 +265,7 @@ impl ImageProviderSpec {
             credentials: None,
             credential_data: None,
             ecr: None,
+            trust: None,
         }
     }
 }

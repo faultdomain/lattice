@@ -283,6 +283,87 @@ pub(crate) fn build_external_endpoint_entity(
 }
 
 // =============================================================================
+// ImageRef Entity (for image signature verification)
+// =============================================================================
+
+/// Build an image ref entity for image verification authorization
+///
+/// UID: `Lattice::ImageRef::"ghcr.io/acme/app:v1.0"`
+///
+/// Attributes:
+/// - `registry`: registry hostname (e.g., "ghcr.io/acme")
+/// - `name`: image name without registry (e.g., "app")
+/// - `tag`: image tag or digest (e.g., "v1.0", "sha256:abc...")
+pub(crate) fn build_image_ref_entity(image: &str) -> Result<Entity> {
+    let uid = build_entity_uid("ImageRef", image)?;
+
+    // Parse image into components: registry/name:tag
+    let (registry, name, tag) = parse_image_ref(image);
+
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        "registry".to_string(),
+        RestrictedExpression::new_string(registry),
+    );
+    attrs.insert(
+        "name".to_string(),
+        RestrictedExpression::new_string(name),
+    );
+    attrs.insert(
+        "tag".to_string(),
+        RestrictedExpression::new_string(tag),
+    );
+
+    Entity::new(uid, attrs, HashSet::new())
+        .map_err(|e| Error::Internal(format!("Failed to create image ref entity: {}", e)))
+}
+
+/// Parse a container image reference into (registry, name, tag).
+///
+/// Examples:
+/// - "ghcr.io/acme/app:v1.0" → ("ghcr.io/acme", "app", "v1.0")
+/// - "nginx:latest" → ("docker.io/library", "nginx", "latest")
+/// - "ghcr.io/acme/app@sha256:abc" → ("ghcr.io/acme", "app", "sha256:abc")
+fn parse_image_ref(image: &str) -> (String, String, String) {
+    // Split off tag or digest
+    let (name_part, tag) = if let Some(idx) = image.rfind('@') {
+        (&image[..idx], image[idx + 1..].to_string())
+    } else if let Some(idx) = image.rfind(':') {
+        // Avoid splitting on port numbers (e.g., "registry:5000/image")
+        let after_colon = &image[idx + 1..];
+        if after_colon.contains('/') {
+            (image, "latest".to_string())
+        } else {
+            (&image[..idx], after_colon.to_string())
+        }
+    } else {
+        (image, "latest".to_string())
+    };
+
+    // Split registry from name
+    let parts: Vec<&str> = name_part.splitn(2, '/').collect();
+    if parts.len() == 1 {
+        // No slash → docker.io library image
+        ("docker.io/library".to_string(), parts[0].to_string(), tag)
+    } else if parts[0].contains('.') || parts[0].contains(':') {
+        // First part has a dot or colon → it's a registry
+        let name_parts: Vec<&str> = parts[1].rsplitn(2, '/').collect();
+        if name_parts.len() == 2 {
+            (
+                format!("{}/{}", parts[0], name_parts[1]),
+                name_parts[0].to_string(),
+                tag,
+            )
+        } else {
+            (parts[0].to_string(), parts[1].to_string(), tag)
+        }
+    } else {
+        // No dot → docker.io user image
+        ("docker.io".to_string(), name_part.to_string(), tag)
+    }
+}
+
+// =============================================================================
 // ApiRoute Entity (for route-level authorization)
 // =============================================================================
 

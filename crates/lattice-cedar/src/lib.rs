@@ -46,6 +46,7 @@ mod engine;
 /// Cedar entity builders for constructing principals, actions, and resources.
 pub mod entities;
 mod external_endpoint_auth;
+mod image_auth;
 mod mesh_auth;
 mod secret_auth;
 mod security_auth;
@@ -64,4 +65,5 @@ pub use secret_auth::{SecretAuthzRequest, SecretAuthzResult, SecretDenial};
 pub use security_auth::{
     SecurityAuthzRequest, SecurityAuthzResult, SecurityDenial, SecurityOverrideRequest,
 };
+pub use image_auth::{ImageDenial, ImageVerifyRequest, ImageVerifyResult};
 pub use volume_auth::{VolumeAuthzRequest, VolumeAuthzResult, VolumeDenial};
