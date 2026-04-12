@@ -98,9 +98,22 @@ async fn setup_cosign_infrastructure(kubeconfig: &str) -> Result<TestContext, St
     run_docker_push(&signed_tag).await?;
     info!("[ImageSignature] Pushed signed image: {signed_tag}");
 
-    // Sign the image
+    // Sign the image.
+    //
+    // `--registry-referrers-mode=legacy` is required: cosign 3.x defaults to
+    // OCI 1.1 referrers, which writes a referrers index at the bare
+    // `sha256-<digest>` tag. sigstore-rs 0.13 (the operator's verifier) only
+    // knows how to look up the legacy `sha256-<digest>.sig` tag, so without
+    // this flag every signature verification fails with "manifest unknown".
     let sign_result = tokio::process::Command::new("cosign")
-        .args(["sign", "--key", &priv_key_path, "--yes", &signed_tag])
+        .args([
+            "sign",
+            "--key",
+            &priv_key_path,
+            "--registry-referrers-mode=legacy",
+            "--yes",
+            &signed_tag,
+        ])
         .env("COSIGN_PASSWORD", "")
         .output()
         .await
