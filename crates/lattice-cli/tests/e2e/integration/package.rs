@@ -80,6 +80,21 @@ async fn setup_package_test(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
+    // Wait for the Cedar policy to be loaded by the operator before applying
+    // the package. Without this, the package controller can reconcile before
+    // the policy engine has reloaded, causing a spurious authorization denial
+    // on the second run (first run succeeds because the engine is warm from
+    // earlier test phases).
+    wait_for_resource_phase(
+        kubeconfig,
+        "cedarpolicy",
+        "lattice-system",
+        "permit-package-secrets",
+        "Valid",
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
     // Apply the LatticePackage
     let package_yaml = include_str!("../fixtures/services/package-redis.yaml");
     apply_yaml(kubeconfig, package_yaml).await?;
