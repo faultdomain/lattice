@@ -17,7 +17,7 @@ use tracing::info;
 use super::super::helpers::cedar::{apply_cedar_policy_crd, apply_yaml};
 use super::super::helpers::docker::run_kubectl;
 use super::super::helpers::{
-    ensure_namespace, wait_for_resource_phase, wait_for_service_phase, DEFAULT_TIMEOUT,
+    ensure_fresh_namespace, wait_for_resource_phase, wait_for_service_phase, DEFAULT_TIMEOUT,
 };
 
 const SIG_TEST_NS: &str = "image-sig-test";
@@ -32,15 +32,15 @@ pub async fn run_image_signature_tests(kubeconfig: &str) -> Result<(), String> {
     info!("IMAGE SIGNATURE VERIFICATION TESTS");
     info!("========================================");
 
-    ensure_namespace(kubeconfig, SIG_TEST_NS).await?;
+    ensure_fresh_namespace(kubeconfig, SIG_TEST_NS).await?;
 
     let test_ctx = setup_cosign_infrastructure(kubeconfig).await?;
     test_signed_image_accepted(kubeconfig, &test_ctx).await?;
     test_unsigned_image_rejected(kubeconfig, &test_ctx).await?;
     test_cedar_skip_allows_unsigned(kubeconfig, &test_ctx).await?;
 
+    info!("[ImageSignature] All tests passed! Cleaning up...");
     cleanup(kubeconfig).await;
-    info!("[ImageSignature] All tests passed!");
     Ok(())
 }
 
