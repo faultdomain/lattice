@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -120,9 +121,16 @@ pub async fn leader_controller<F>(
     }
 }
 
+/// Delay between each controller startup to avoid thundering herd on etcd.
+/// All controllers starting simultaneously causes a burst of initial LIST
+/// requests that can stall single-node etcd for seconds.
+const STARTUP_JITTER_MS: u64 = 500;
+
 /// Shared context for spawning leader-elected controllers.
 ///
 /// Avoids passing `client`, `pod_name`, `cancel`, `config` repeatedly.
+/// Includes a jitter counter so each spawned controller staggers its startup,
+/// preventing a thundering herd of initial LIST requests against etcd.
 #[derive(Clone)]
 pub struct SpawnContext {
     pub client: Client,
@@ -131,6 +139,34 @@ pub struct SpawnContext {
     pub config: lattice_common::SharedConfig,
     pub cedar: Arc<PolicyEngine>,
     pub graph_holder: Arc<OnceLock<Arc<ServiceGraph>>>,
+    jitter_counter: Arc<AtomicU32>,
+}
+
+impl SpawnContext {
+    pub fn new(
+        client: Client,
+        pod_name: String,
+        cancel: CancellationToken,
+        config: lattice_common::SharedConfig,
+        cedar: Arc<PolicyEngine>,
+        graph_holder: Arc<OnceLock<Arc<ServiceGraph>>>,
+    ) -> Self {
+        Self {
+            client,
+            pod_name,
+            cancel,
+            config,
+            cedar,
+            graph_holder,
+            jitter_counter: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    /// Returns the next startup delay for jittering controller launches.
+    fn next_jitter(&self) -> Duration {
+        let n = self.jitter_counter.fetch_add(1, Ordering::Relaxed);
+        Duration::from_millis(u64::from(n) * STARTUP_JITTER_MS)
+    }
 }
 
 impl SpawnContext {
@@ -155,6 +191,7 @@ impl SpawnContext {
     {
         let client = self.client.clone();
         let config = self.config.clone();
+        let jitter = self.next_jitter();
         tokio::spawn(leader_controller(
             self.client.clone(),
             self.pod_name.clone(),
@@ -165,6 +202,7 @@ impl SpawnContext {
                 let client = client.clone();
                 let config = config.clone();
                 Box::pin(async move {
+                    tokio::time::sleep(jitter).await;
                     lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
                     let ctx = Arc::new(lattice_common::ControllerContext::new(
                         client.clone(),
@@ -199,6 +237,7 @@ impl SpawnContext {
         let config = self.config.clone();
         let cedar = self.cedar.clone();
         let graph_holder = self.graph_holder.clone();
+        let jitter = self.next_jitter();
         tokio::spawn(leader_controller(
             self.client.clone(),
             self.pod_name.clone(),
@@ -212,6 +251,7 @@ impl SpawnContext {
                 let graph_holder = graph_holder.clone();
                 let build = build.clone();
                 Box::pin(async move {
+                    tokio::time::sleep(jitter).await;
                     lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
                     let params =
                         resolve_workload_params(&client, &config, &cedar, &graph_holder).await;

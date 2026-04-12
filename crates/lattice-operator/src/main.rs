@@ -324,14 +324,14 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    let ctx = controller_runner::SpawnContext {
-        client: client.clone(),
-        pod_name: pod_name.clone(),
-        cancel: cancel.clone(),
-        config: config.clone(),
-        cedar: cedar.clone(),
-        graph_holder: graph_holder.clone(),
-    };
+    let ctx = controller_runner::SpawnContext::new(
+        client.clone(),
+        pod_name.clone(),
+        cancel.clone(),
+        config.clone(),
+        cedar.clone(),
+        graph_holder.clone(),
+    );
 
     // Workload controllers (Service, Job, Model)
     ctx.spawn_workload::<LatticeService, _>("service", |p| {
