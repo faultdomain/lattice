@@ -86,31 +86,67 @@ async fn setup_cosign_infrastructure(kubeconfig: &str) -> Result<TestContext, St
     let signed_tag = format!("{LOCAL_REGISTRY}/sig-test:signed-{}", std::process::id());
     let unsigned_tag = format!("{LOCAL_REGISTRY}/sig-test:unsigned-{}", std::process::id());
 
-    // Create and push signed image
-    let dockerfile = format!("{keypair_dir}/Dockerfile");
-    std::fs::write(
-        &dockerfile,
-        "FROM busybox:latest\nCMD [\"sleep\", \"infinity\"]\n",
-    )
-    .map_err(|e| format!("failed to write Dockerfile: {e}"))?;
+    // The signed and unsigned variants MUST have distinct manifest digests.
+    // Cosign signs by digest, not by tag — if both tags pointed at the same
+    // content, sigstore-rs would triangulate the unsigned tag back to the
+    // signed image's `.sig` artifact and verification would succeed for an
+    // image we expect to be rejected. We give each variant its own
+    // Dockerfile (and its own context dir) so the LABELs differ and Docker
+    // produces a different digest.
+    let signed_dir = format!("{keypair_dir}/signed-image");
+    let unsigned_dir = format!("{keypair_dir}/unsigned-image");
+    std::fs::create_dir_all(&signed_dir)
+        .map_err(|e| format!("failed to create signed image dir: {e}"))?;
+    std::fs::create_dir_all(&unsigned_dir)
+        .map_err(|e| format!("failed to create unsigned image dir: {e}"))?;
 
-    run_docker_build(&keypair_dir, &signed_tag).await?;
+    let pid = std::process::id();
+    std::fs::write(
+        format!("{signed_dir}/Dockerfile"),
+        format!(
+            "FROM busybox:latest\n\
+             LABEL lattice.test.variant=\"signed\"\n\
+             LABEL lattice.test.run=\"{pid}\"\n\
+             CMD [\"sleep\", \"infinity\"]\n"
+        ),
+    )
+    .map_err(|e| format!("failed to write signed Dockerfile: {e}"))?;
+    std::fs::write(
+        format!("{unsigned_dir}/Dockerfile"),
+        format!(
+            "FROM busybox:latest\n\
+             LABEL lattice.test.variant=\"unsigned\"\n\
+             LABEL lattice.test.run=\"{pid}\"\n\
+             CMD [\"sleep\", \"infinity\"]\n"
+        ),
+    )
+    .map_err(|e| format!("failed to write unsigned Dockerfile: {e}"))?;
+
+    run_docker_build(&signed_dir, &signed_tag).await?;
     run_docker_push(&signed_tag).await?;
     info!("[ImageSignature] Pushed signed image: {signed_tag}");
 
     // Sign the image.
     //
-    // `--registry-referrers-mode=legacy` is required: cosign 3.x defaults to
-    // OCI 1.1 referrers, which writes a referrers index at the bare
-    // `sha256-<digest>` tag. sigstore-rs 0.13 (the operator's verifier) only
-    // knows how to look up the legacy `sha256-<digest>.sig` tag, so without
-    // this flag every signature verification fails with "manifest unknown".
+    // sigstore-rs 0.13 (the operator's verifier) only knows how to find
+    // signatures via the legacy `sha256-<digest>.sig` tag. Cosign 3.x defaults
+    // to `--new-bundle-format=true`, which instead writes an OCI 1.1 referrer
+    // artifact at the bare `sha256-<digest>` tag and never produces a `.sig`
+    // tag — sigstore-rs cannot read that. `--registry-referrers-mode=legacy`
+    // is *not* the right knob (it only affects how cosign fetches references
+    // during verify, not how `sign` pushes). The combination below is what
+    // actually forces cosign to push the legacy `.sig` artifact:
+    //   --new-bundle-format=false   write the simple-signing layer, not a bundle
+    //   --use-signing-config=false  required when new-bundle-format is false
+    //   --tlog-upload=false         no Rekor (we have no transparency log)
     let sign_result = tokio::process::Command::new("cosign")
         .args([
             "sign",
             "--key",
             &priv_key_path,
-            "--registry-referrers-mode=legacy",
+            "--new-bundle-format=false",
+            "--use-signing-config=false",
+            "--tlog-upload=false",
             "--yes",
             &signed_tag,
         ])
@@ -127,8 +163,9 @@ async fn setup_cosign_infrastructure(kubeconfig: &str) -> Result<TestContext, St
     }
     info!("[ImageSignature] Signed image with cosign");
 
-    // Push unsigned image (same content, different tag, no signature)
-    run_docker_tag(&signed_tag, &unsigned_tag).await?;
+    // Build and push the unsigned image from its own context — distinct
+    // digest from the signed image, no `cosign sign` call.
+    run_docker_build(&unsigned_dir, &unsigned_tag).await?;
     run_docker_push(&unsigned_tag).await?;
     info!("[ImageSignature] Pushed unsigned image: {unsigned_tag}");
 
@@ -389,21 +426,6 @@ async fn run_docker_push(tag: &str) -> Result<(), String> {
     if !output.status.success() {
         return Err(format!(
             "docker push failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
-}
-
-async fn run_docker_tag(src: &str, dst: &str) -> Result<(), String> {
-    let output = tokio::process::Command::new("docker")
-        .args(["tag", src, dst])
-        .output()
-        .await
-        .map_err(|e| format!("docker tag failed: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "docker tag failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }

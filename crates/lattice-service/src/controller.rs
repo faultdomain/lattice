@@ -951,8 +951,22 @@ async fn compile_and_apply(
         .cache
         .resolve_image_providers(&service.spec.runtime.image_pull_secrets);
 
-    // Resolve image trust policies and fetch cosign public keys from Secrets
-    let image_trust = resolve_image_trust(&ctx.cache, ctx.kube.as_ref()).await;
+    // Resolve image trust policies and fetch cosign public keys from Secrets.
+    // Missing key material is transient — wait for ESO instead of compiling
+    // with an empty trust map (which would silently bypass verification).
+    let image_trust = match resolve_image_trust(&ctx.cache, ctx.kube.as_ref()).await {
+        Ok(map) => map,
+        Err(not_ready) => {
+            warn!(error = %not_ready, "image trust not ready, requeueing");
+            let message = format!("Waiting for image trust key material: {not_ready}");
+            ServiceStatusUpdate::new(ServicePhase::Compiling)
+                .message(&message)
+                .condition("Compiling", ConditionStatus::True, "DependencyCheck")
+                .apply(ctx.kube.as_ref(), service)
+                .await?;
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
+    };
 
     let compiler = ServiceCompiler::new(
         &ctx.graph,
@@ -1181,10 +1195,15 @@ async fn transition_to_failed(
 ///
 /// Returns a map of registry prefix → ImageTrustEntry with key material
 /// ready for cosign verification.
+///
+/// Returns `Err(TrustNotReady)` if any declared authority's key material
+/// hasn't been synced yet (or is empty / unreadable). Callers MUST treat
+/// this as a transient error and requeue — silently dropping the authority
+/// would let images bypass signature verification while we wait.
 async fn resolve_image_trust(
     cache: &lattice_cache::ResourceCache,
     kube: &dyn ServiceKubeClient,
-) -> std::collections::BTreeMap<String, lattice_workload::ImageTrustEntry> {
+) -> Result<std::collections::BTreeMap<String, lattice_workload::ImageTrustEntry>, TrustNotReady> {
     let mut result = std::collections::BTreeMap::new();
 
     for (provider_name, registry, insecure, trust_policy) in cache.resolve_image_trust_policies() {
@@ -1195,32 +1214,34 @@ async fn resolve_image_trust(
             // (set by ImageProvider controller via reconcile_credentials)
             let secret_name = format!("{}-trust-{}-credentials", provider_name, authority.name);
             match kube.get_secret(&secret_name, "lattice-system").await {
-                Ok(Some(secret_data)) => {
-                    if let Some(key_bytes) = secret_data.values().next() {
+                Ok(Some(secret_data)) => match secret_data.values().next() {
+                    Some(key_bytes) if !key_bytes.is_empty() => {
                         authorities.push((authority.name.clone(), key_bytes.clone()));
-                    } else {
-                        tracing::warn!(
-                            authority = %authority.name,
-                            registry = %registry,
-                            "cosign key secret is empty"
-                        );
                     }
-                }
+                    _ => {
+                        return Err(TrustNotReady {
+                            registry,
+                            authority: authority.name.clone(),
+                            secret: secret_name,
+                            reason: "cosign key secret is empty".to_string(),
+                        });
+                    }
+                },
                 Ok(None) => {
-                    tracing::warn!(
-                        authority = %authority.name,
-                        registry = %registry,
-                        secret = %secret_name,
-                        "cosign key secret not found (ESO may not have synced yet)"
-                    );
+                    return Err(TrustNotReady {
+                        registry,
+                        authority: authority.name.clone(),
+                        secret: secret_name,
+                        reason: "cosign key secret not found (ESO not synced yet)".to_string(),
+                    });
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        authority = %authority.name,
-                        registry = %registry,
-                        error = %e,
-                        "failed to read cosign key secret"
-                    );
+                    return Err(TrustNotReady {
+                        registry,
+                        authority: authority.name.clone(),
+                        secret: secret_name,
+                        reason: format!("failed to read cosign key secret: {e}"),
+                    });
                 }
             }
         }
@@ -1237,7 +1258,28 @@ async fn resolve_image_trust(
         }
     }
 
-    result
+    Ok(result)
+}
+
+/// Transient signal that an ImageProvider trust authority's key material
+/// hasn't appeared in the cluster yet. The reconciler converts this into a
+/// Compiling-phase status update and a short requeue.
+#[derive(Debug)]
+struct TrustNotReady {
+    registry: String,
+    authority: String,
+    secret: String,
+    reason: String,
+}
+
+impl std::fmt::Display for TrustNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "trust authority '{}' for registry '{}' not ready: {} (secret: {})",
+            self.authority, self.registry, self.reason, self.secret
+        )
+    }
 }
 
 // =============================================================================
@@ -1360,12 +1402,27 @@ impl<'a> ServiceStatusUpdate<'a> {
             .unwrap_or_default();
         Condition::merge_into(new_condition, &mut conditions);
 
+        // Preserve existing cost and metrics only during transient phase
+        // writes (Compiling). Ready and Failed represent final compilation
+        // results — if cost is None there, the ConfigMap was absent and we
+        // must clear it.
+        let (cost, metrics) = if self.phase == ServicePhase::Compiling {
+            let existing = service.status.as_ref();
+            (
+                self.cost.or_else(|| existing.and_then(|s| s.cost.clone())),
+                self.metrics
+                    .or_else(|| existing.and_then(|s| s.metrics.clone())),
+            )
+        } else {
+            (self.cost, self.metrics)
+        };
+
         let status = LatticeServiceStatus::with_phase(self.phase)
             .message(self.message)
             .conditions(conditions)
             .observed_generation(self.observed_generation)
-            .cost(self.cost)
-            .metrics(self.metrics);
+            .cost(cost)
+            .metrics(metrics);
 
         if service.status.as_ref() == Some(&status) {
             return Ok(());

@@ -229,7 +229,12 @@ impl<'a> WorkloadCompiler<'a> {
             images.push(sidecar.image.clone());
         }
 
-        let mut unsigned_images = Vec::new();
+        // Per-image verification reasons. We collect them so the final error
+        // can name *why* each image failed (no signature found, signature
+        // present but key mismatch, etc.) instead of just "unsigned" — that
+        // distinction is what we need to debug rotation/registry issues.
+        let mut failures: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
 
         for image in &images {
             // Find matching trust policy by registry prefix
@@ -245,6 +250,7 @@ impl<'a> WorkloadCompiler<'a> {
 
             // Try each authority
             let mut verified = false;
+            let mut authority_reasons: Vec<String> = Vec::new();
             for (authority_name, key_pem) in &entry.authorities {
                 match crate::cosign::verify_image(image, key_pem, entry.insecure).await {
                     crate::cosign::VerifyResult::Verified => {
@@ -257,12 +263,13 @@ impl<'a> WorkloadCompiler<'a> {
                         break;
                     }
                     crate::cosign::VerifyResult::NotSigned(reason) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             image = image,
                             authority = authority_name,
                             reason = %reason,
                             "authority did not verify image"
                         );
+                        authority_reasons.push(format!("{authority_name}: {reason}"));
                     }
                     crate::cosign::VerifyResult::Error(e) => {
                         return Err(CompilationError::internal(format!(
@@ -276,15 +283,18 @@ impl<'a> WorkloadCompiler<'a> {
                 tracing::warn!(
                     image = image,
                     registry = registry.as_str(),
+                    reasons = ?authority_reasons,
                     "image has no valid signature from any trusted authority"
                 );
-                unsigned_images.push(image.clone());
+                failures.insert(image.clone(), authority_reasons);
             }
         }
 
-        if unsigned_images.is_empty() {
+        if failures.is_empty() {
             return Ok(());
         }
+
+        let unsigned_images: Vec<String> = failures.keys().cloned().collect();
 
         // Check Cedar: can this service skip verification for these images?
         let result = self
@@ -298,14 +308,38 @@ impl<'a> WorkloadCompiler<'a> {
             .await;
 
         if !result.is_allowed() {
-            let denied: Vec<String> = result
+            // Surface BOTH the verification failure reasons AND the Cedar
+            // denial reason. Without the verification reasons the operator
+            // would only see "no permit policy" and the actual cause (wrong
+            // key, missing `.sig` tag, etc.) is invisible.
+            let cedar_reasons: std::collections::BTreeMap<&str, String> = result
                 .denied
                 .iter()
-                .map(|d| format!("{}: {}", d.image, d.reason))
+                .map(|d| (d.image.as_str(), d.reason.to_string()))
+                .collect();
+            let detail: Vec<String> = unsigned_images
+                .iter()
+                .map(|image| {
+                    let why = failures
+                        .get(image)
+                        .map(|rs| {
+                            if rs.is_empty() {
+                                "no trust authority configured".to_string()
+                            } else {
+                                rs.join("; ")
+                            }
+                        })
+                        .unwrap_or_default();
+                    let cedar = cedar_reasons
+                        .get(image.as_str())
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    format!("{image} [verify: {why}] [cedar: {cedar}]")
+                })
                 .collect();
             return Err(CompilationError::image_verification_denied(format!(
-                "unsigned images rejected: {}",
-                denied.join(", ")
+                "image signature verification failed: {}",
+                detail.join(", ")
             )));
         }
 

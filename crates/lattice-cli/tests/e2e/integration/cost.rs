@@ -77,26 +77,44 @@ async fn test_service_cost_populated(kubeconfig: &str) -> Result<(), String> {
     )
     .await?;
 
-    info!("[Cost] Service ready, checking cost fields...");
+    info!("[Cost] Service ready, waiting for cost fields...");
 
-    // Verify hourlyCost is set and non-empty
-    let hourly_cost = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticeservice",
-        SERVICE_NAME,
-        "-n",
-        COST_NAMESPACE,
-        "-o",
-        "jsonpath={.status.cost.hourlyCost}",
-    ])
+    // The service may reach Ready before the rates ConfigMap is in the
+    // controller's cache. Wait for hourlyCost to be populated — the
+    // controller requeues on success and will recompute cost once the
+    // ConfigMap is cached.
+    let kc_cost = kubeconfig.to_string();
+    let hourly_cost: String = wait_for_condition(
+        "status.cost.hourlyCost to be populated",
+        DEFAULT_TIMEOUT,
+        POLL_INTERVAL,
+        || {
+            let kc = kc_cost.clone();
+            async move {
+                let output = run_kubectl(&[
+                    "--kubeconfig",
+                    &kc,
+                    "get",
+                    "latticeservice",
+                    SERVICE_NAME,
+                    "-n",
+                    COST_NAMESPACE,
+                    "-o",
+                    "jsonpath={.status.cost.hourlyCost}",
+                ])
+                .await?;
+                let trimmed = output.trim().to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed))
+                }
+            }
+        },
+    )
     .await?;
 
-    let cost_str = hourly_cost.trim();
-    if cost_str.is_empty() {
-        return Err("status.cost.hourlyCost is empty — cost estimation not working".to_string());
-    }
+    let cost_str = hourly_cost.as_str();
 
     let cost_val: f64 = cost_str
         .parse()

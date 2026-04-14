@@ -185,7 +185,7 @@ schemars = { version = "1", features = ["chrono04"] }
 uuid = { version = "1.11", features = ["v4"] }
 
 # Random
-rand = "0.8"
+rand = "0.10"
 
 # Auth
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }

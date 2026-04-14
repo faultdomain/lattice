@@ -50,27 +50,46 @@ pub fn vault_tests_enabled() -> bool {
 // =============================================================================
 
 /// Write a secret to Vault KV v2 at the given path.
+///
+/// Retries on transient network errors for up to 30s since Vault may still be
+/// starting when the test begins seeding secrets.
 pub async fn vault_kv_put(path: &str, data: &BTreeMap<String, String>) -> Result<(), String> {
     let url = format!("{}/v1/{}/data/{}", vault_url(), VAULT_KV_MOUNT, path);
     let payload = serde_json::json!({ "data": data });
-
     let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("X-Vault-Token", VAULT_DEV_TOKEN)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Vault KV put failed: {}", e))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Vault KV put to '{}' failed: {} - {}",
-            path, status, body
-        ));
-    }
+    wait_for_condition(
+        &format!("Vault KV put to '{}'", path),
+        Duration::from_secs(30),
+        Duration::from_secs(2),
+        || {
+            let client = client.clone();
+            let url = url.clone();
+            let payload = payload.clone();
+            let path = path.to_owned();
+            async move {
+                let response = client
+                    .post(&url)
+                    .header("X-Vault-Token", VAULT_DEV_TOKEN)
+                    .json(&payload)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Vault KV put failed: {}", e))?;
+
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(format!(
+                        "Vault KV put to '{}' failed: {} - {}",
+                        path, status, body
+                    ));
+                }
+
+                Ok(true)
+            }
+        },
+    )
+    .await?;
 
     info!("[Vault] Wrote secret at {}/{}", VAULT_KV_MOUNT, path);
     Ok(())

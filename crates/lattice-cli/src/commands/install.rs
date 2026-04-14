@@ -429,6 +429,13 @@ impl Installer {
         )
         .await
         .cmd_err()?;
+        kube_utils::wait_for_crd(
+            &bootstrap_client,
+            "imageproviders.lattice.dev",
+            CRD_APPLY_TIMEOUT,
+        )
+        .await
+        .cmd_err()?;
 
         info!("[Phase 3/8] Creating InfraProvider and credentials...");
         self.create_cloud_provider_with_credentials(&bootstrap_client)
